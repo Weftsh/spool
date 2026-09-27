@@ -1,0 +1,19 @@
+[package]
+name = "stratum-proto"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[dependencies]
+stratum-store = { path = "../stratum-store" }
+# `workspace` builds real git objects (blob, tree, commit) and packs them
+# in memory for a changeset's synthetic repository. No store is touched:
+# this is the object *encoder*, which lives in the engine because that is
+# where the REST commit path needed it first.
+stratum-engine = { path = "../stratum-engine" }
+serde_json.workspace = true
+sha1.workspace = true
+libc.workspace = true
+
+[dev-dependencies]
+stratum-testkit = { path = "../stratum-testkit" }

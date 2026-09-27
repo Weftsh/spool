@@ -1,0 +1,9 @@
+# Pinned, not "stable". `dtolnay/rust-toolchain@stable` meant every
+# six-week release invalidated the Swatinem cache in all three Rust
+# jobs on the same day, on every branch at once — and a cold cache is
+# a twenty-five-minute job. A bump is now a reviewed commit with one
+# known-slow run, which is the same argument `.nvmrc` and the pinned
+# terraform_version already won here.
+[toolchain]
+channel = "1.96.0"
+components = ["rustfmt", "clippy", "llvm-tools-preview"]

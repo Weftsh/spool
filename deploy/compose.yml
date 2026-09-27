@@ -1,0 +1,173 @@
+# Production-parity local stack: the REAL deployable image (built from the
+# repo-root Dockerfile) against Postgres and MinIO-as-S3. This is what the
+# CI deploy-validation job runs, and what you run before trusting a deploy:
+#
+#   ./deploy/dev-host-key.sh                 # once: local SSH host key
+#   docker compose -f deploy/compose.yml build runner-image   # the runner image
+#   docker compose -f deploy/compose.yml build github-runner-image   # the GitHub Actions one
+#   docker compose -f deploy/compose.yml up -d --build --wait
+#   BASE_URL=http://127.0.0.1:8080 \
+#     SSH_ENDPOINT=ssh://git@127.0.0.1:2222 \
+#     SMOKE_RUNNER=1 \
+#     BOOTSTRAP_CMD="docker compose -f deploy/compose.yml exec -T app stratum-server admin bootstrap" \
+#     ./deploy/smoke.sh
+#
+# The repo-root docker-compose.yml remains the cargo-run dev loop; this
+# file is the deployment rehearsal.
+#
+# Hosted runners are part of the rehearsal. The app is configured exactly
+# as production is — an ECS cluster, a task definition, a dispatch key —
+# and points its ECS endpoint at `fake-ecs`, the one stand-in in this
+# file: it checks the signed RunTask the way AWS would and starts the
+# REAL runner image (Dockerfile.runner, built as `weft-runner:local`)
+# with the docker daemon. The runner then clones from `app` over HTTP with
+# its job token and reports its verdict back, so `SMOKE_RUNNER=1` proves
+# the whole loop with nothing faked but the cloud.
+
+services:
+  app:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    image: stratum-app:local
+    ports:
+      - "127.0.0.1:8080:8080"
+      - "127.0.0.1:2222:2222"
+    environment:
+      STRATUM_DB_URL: postgres://stratum:stratum@postgres:5432/stratum
+      STRATUM_STORE_URL: http://minio:9000/stratum
+      AWS_ACCESS_KEY_ID: stratum
+      AWS_SECRET_ACCESS_KEY: stratum-dev-only
+      AWS_REGION: us-east-1
+      STRATUM_PUBLIC_URL: http://127.0.0.1:8080
+      STRATUM_WEBHOOK_SECRET: local-smoke-secret
+      STRATUM_SSH_BIND: 0.0.0.0:2222
+      STRATUM_SSH_PUBLIC_URL: ssh://git@127.0.0.1:2222
+      # CDN-offloaded clones in the origin-route shape: no CloudFront
+      # here, so the app is its own pack origin and the advertised URL
+      # carries a short-lived HMAC token (git sends no credentials when
+      # it fetches an advertised pack).
+      STRATUM_CDN_BASE: http://127.0.0.1:8080
+      STRATUM_CDN_ORIGIN_SECRET: local-smoke-cdn-secret
+      # Hosted runners. The same variables the terraform root passes
+      # the service, with the ECS endpoint redirected at the stand-in.
+      STRATUM_RUNNER_ECS_CLUSTER: local
+      STRATUM_RUNNER_ECS_TASK_DEFINITION: weft-runner-local
+      # The GitHub Actions runner family on the same stand-in. The real
+      # agent cannot finish a job here — there is no GitHub — so the
+      # smoke does not drive one; the family is configured so the app
+      # is the app we deploy, and a launch has the shape the image reads.
+      STRATUM_RUNNER_ECS_GITHUB_TASK_DEFINITION: weft-gh-runner-local
+      STRATUM_RUNNER_ECS_SUBNETS: subnet-local
+      STRATUM_RUNNER_ECS_SECURITY_GROUP: sg-local
+      STRATUM_RUNNER_ECS_URL: http://fake-ecs:8443
+      STRATUM_RUNNER_AWS_ACCESS_KEY_ID: AKIALOCALDISPATCH
+      STRATUM_RUNNER_AWS_SECRET_ACCESS_KEY: local-dispatch-secret-not-a-real-key
+      STRATUM_RUNNER_AWS_REGION: us-east-1
+      # The budget controls, set here for the same reason the terraform
+      # root sets them: unset is unlimited, and a stack that never
+      # exercises the metered path is not prod parity.
+      STRATUM_RUNNER_MINUTES_PER_MONTH: "2000"
+      STRATUM_RUNNER_MAX_TIMEOUT_MINUTES: "360"
+      # Where a runner reaches this server: the compose service name,
+      # since 127.0.0.1 inside a runner container is the runner.
+      STRATUM_RUNNER_URL: http://app:8080
+    # The image's entrypoint is tini + the binary; this override reads the
+    # dev host key file into the env var the server expects ($$ keeps the
+    # substitution away from compose).
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - sh
+      - -c
+      - STRATUM_SSH_HOST_KEY="$$(cat /run/ssh-host-key)" exec stratum-server
+    volumes:
+      - ./.dev-ssh-host-key:/run/ssh-host-key:ro
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+      fake-ecs:
+        condition: service_healthy
+
+  # The runner image, built here so `compose build runner-image` is the
+  # one command that produces it. It is never *run* by compose — a runner
+  # is a one-shot task, and `fake-ecs` starts one per job — so it sits
+  # behind a profile that nothing enables.
+  runner-image:
+    build:
+      context: ..
+      dockerfile: Dockerfile.runner
+    image: weft-runner:local
+    profiles: ["image"]
+
+  # The GitHub Actions runner image, the same way. Built for linux/amd64
+  # because the official agent is, and because Fargate is.
+  github-runner-image:
+    build:
+      context: ..
+      dockerfile: Dockerfile.github-runner
+      platforms: ["linux/amd64"]
+    image: weft-github-runner:local
+    profiles: ["image"]
+
+  # Stand-in for ECS. Holds the docker socket, which is exactly why it is
+  # not in the runner image and why this service must never be deployed:
+  # see fake-ecs/fake-ecs.py.
+  fake-ecs:
+    build:
+      context: ./fake-ecs
+    image: stratum-fake-ecs:local
+    environment:
+      FAKE_ECS_ACCESS_KEY_ID: AKIALOCALDISPATCH
+      FAKE_ECS_SECRET_ACCESS_KEY: local-dispatch-secret-not-a-real-key
+      FAKE_ECS_REGION: us-east-1
+      FAKE_ECS_CLUSTER: local
+      FAKE_ECS_TASK_DEFINITION: weft-runner-local
+      FAKE_ECS_RUNNER_IMAGE: weft-runner:local
+      FAKE_ECS_GITHUB_TASK_DEFINITION: weft-gh-runner-local
+      FAKE_ECS_GITHUB_RUNNER_IMAGE: weft-github-runner:local
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8443/')"]
+      interval: 2s
+      timeout: 3s
+      retries: 15
+
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: stratum
+      POSTGRES_PASSWORD: stratum
+      POSTGRES_DB: stratum
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratum"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: quay.io/minio/minio
+    command: server /data --address :9000
+    environment:
+      MINIO_ROOT_USER: stratum
+      MINIO_ROOT_PASSWORD: stratum-dev-only
+      MINIO_BROWSER: "off"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio-init:
+    image: quay.io/minio/mc
+    depends_on:
+      minio:
+        condition: service_healthy
+    entrypoint:
+      - sh
+      - -c
+      - mc alias set local http://minio:9000 stratum stratum-dev-only && mc mb -p local/stratum
+    restart: "no"

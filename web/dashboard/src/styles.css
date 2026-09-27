@@ -1,0 +1,12 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+@import "@fontsource-variable/inter";
+@import "@fontsource/jetbrains-mono/400.css";
+@import "@fontsource/jetbrains-mono/500.css";
+@import "@fontsource/jetbrains-mono/600.css";
+@import "@fontsource/jetbrains-mono/700.css";
+@import "../../shared/tokens.css";
+@import "../../shared/theme.css";
+/* shadcn variable names, aliased over the Weft tokens above — see the
+   header of shadcn.css before touching it. */
+@import "./shadcn.css";

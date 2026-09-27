@@ -1,0 +1,14 @@
+[
+  {
+    "email": "person0@example.com",
+    "primary": true,
+    "verified": true,
+    "visibility": "public"
+  },
+  {
+    "email": "person1@example.com",
+    "primary": false,
+    "verified": false,
+    "visibility": null
+  }
+]

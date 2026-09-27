@@ -1,0 +1,14 @@
+{
+  "recorded_at": "2026-09-13T17:56:32.698162+00:00",
+  "api_base": "https://api.github.com",
+  "oauth_base": "https://github.com",
+  "beliefs": {
+    "emails_is_a_flat_array": true,
+    "entries_carry_primary_and_verified_separately": true,
+    "exactly_one_primary": true,
+    "user_id_is_numeric": true,
+    "bad_code_is_200_with_error": true,
+    "no_permission_is_403": null
+  },
+  "note": "addresses and the login are scrubbed; the SHAPE is what these pin."
+}

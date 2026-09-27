@@ -1,0 +1,131 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# A newer push supersedes the runs of older commits on the same branch:
+# they cancel instead of finishing red and mailing a failure.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  correctness-gate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Deleting ~28 GB of toolchains this workspace never uses takes a
+      # couple of minutes and would block the build that needs the space.
+      # The build is CPU-bound and the deletion I/O-bound, so they overlap
+      # — but only because the paired step below waits for it before the
+      # tests start. MinIO answers 507 Insufficient Storage when its
+      # filesystem runs low, which surfaces as an ordinary PUT failing
+      # inside a test and says nothing about the cause.
+      - name: Start reclaiming disk
+        run: |
+          df -h /
+          TOOLS="${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
+          rm -f /tmp/free-disk.done
+          sudo bash -c "rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/powershell /usr/share/swift \
+            '$TOOLS' || true; docker image prune -af || true; \
+            touch /tmp/free-disk.done" >/tmp/free-disk.log 2>&1 </dev/null &
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+          components: rustfmt, clippy
+
+      # Keyed on the manifest as well as the lockfile: rust-cache's own key
+      # does not cover `Cargo.toml`, so a `[profile.*]` edit would restore
+      # artifacts built under the old profile and rebuild every dependency
+      # on every run without ever saving.
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
+
+      - name: Format
+        run: cargo fmt --all --check
+
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+      # Pinned, and cached on the pin: `.minio-version` is the one place
+      # the release is named, and `crates/stratum-testkit/src/minio.rs`
+      # `include_str!`s the same file, so the two cannot drift.
+      - name: MinIO version
+        id: minio
+        run: echo "release=$(cat .minio-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .testkit/bin/minio
+          key: minio-linux-amd64-${{ steps.minio.outputs.release }}
+
+      - name: Fetch MinIO (testkit backend)
+        run: scripts/fetch-minio.sh
+
+      - name: Wait for the disk reclaim
+        run: |
+          for _ in $(seq 1 300); do
+            [ -f /tmp/free-disk.done ] && break
+            sleep 2
+          done
+          cat /tmp/free-disk.log || true
+          test -f /tmp/free-disk.done || { echo "the reclaim never finished"; exit 1; }
+          df -h /
+
+      # PostgreSQL comes from the runner image (`/usr/lib/postgresql/*/bin`);
+      # the testkit starts a private cluster per suite.
+      - name: Unit + integration tests
+        run: cargo test --workspace --release
+
+  web:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/dashboard/package-lock.json
+
+      # Pinned by the lockfile, so cacheable on exactly that. Keep this on
+      # the bundled Chromium: `workers: 1` is pinned in playwright.config.ts
+      # to stop "passes here, fails there", and a different browser
+      # reintroduces the same class.
+      - name: Playwright browser cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ hashFiles('web/dashboard/package-lock.json') }}
+
+      - name: Dashboard — install + unit tests + build
+        working-directory: web/dashboard
+        run: |
+          npm ci
+          npx vitest run
+          npm run build
+
+      - name: Dashboard — Playwright e2e
+        working-directory: web/dashboard
+        run: |
+          npx playwright install --with-deps chromium
+          npx playwright test

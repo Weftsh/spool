@@ -1,0 +1,50 @@
+# Local development stack: PostgreSQL (control plane) + MinIO (object
+# store). The server itself runs on the host (`cargo run -p stratum-server`)
+# against these, or add it here once you have a binary image.
+#
+#   docker compose up -d
+#   export STRATUM_DB_URL=postgres://stratum:stratum@127.0.0.1:5432/stratum
+#   export STRATUM_STORE_URL=http://127.0.0.1:9000/stratum
+#   export AWS_ACCESS_KEY_ID=stratum AWS_SECRET_ACCESS_KEY=stratum-dev-only AWS_REGION=us-east-1
+#   mc alias set local http://127.0.0.1:9000 stratum stratum-dev-only && mc mb local/stratum
+#
+# The test suite does NOT use this file — it spawns its own hermetic
+# PostgreSQL and MinIO per test process (see crates/stratum-testkit).
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: stratum
+      POSTGRES_PASSWORD: stratum
+      POSTGRES_DB: stratum
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U stratum"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  minio:
+    image: quay.io/minio/minio
+    command: server /data --address :9000
+    environment:
+      MINIO_ROOT_USER: stratum
+      MINIO_ROOT_PASSWORD: stratum-dev-only
+      MINIO_BROWSER: "off"
+    ports:
+      - "127.0.0.1:9000:9000"
+    volumes:
+      - miniodata:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:
+  miniodata:

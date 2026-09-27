@@ -1,0 +1,4 @@
+To https://github.com/Weftsh/minio-mirror.git
+!	d6a8b23164e164d3cec80fe26d0b50710dd4d4e5:refs/heads/weft-protected-probe	[remote rejected] (protected branch hook declined)
+!	0bcf06cda917efdd260acd8391212b48372cf9f6:refs/heads/weft-manual-sibling-1789560393	[remote rejected] (atomic transaction failed)
+Done

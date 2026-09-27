@@ -1,0 +1,59 @@
+/* Aliases only — the two Pierre libraries, in Weft's colours.
+
+   Every value here is a var() onto web/shared/tokens.css, the same rule
+   shadcn.css follows and the same test enforces (theme-contract.test.ts).
+   The libraries render inside shadow roots, but custom properties inherit
+   across that boundary, so setting them on :root reaches every line.
+
+   @pierre/diffs reads --diffs-* for its chrome and, through the "weft"
+   CSS-variables theme registered in surface.tsx, --diffs-token-* for the
+   syntax colours. @pierre/trees reads --trees-*-override ahead of its
+   own defaults. Both lists are the library's names, not ours. */
+
+:root {
+  /* Syntax — what the Shiki theme resolves. */
+  --diffs-foreground: var(--code-fg);
+  --diffs-background: var(--surface-1);
+  --diffs-token-comment: var(--code-comment);
+  --diffs-token-keyword: var(--code-keyword);
+  --diffs-token-string: var(--code-string);
+  --diffs-token-string-expression: var(--code-string);
+  --diffs-token-constant: var(--code-constant);
+  --diffs-token-function: var(--code-function);
+  --diffs-token-parameter: var(--code-parameter);
+  --diffs-token-punctuation: var(--code-punctuation);
+  --diffs-token-link: var(--code-link);
+
+  /* Diff chrome. */
+  --diffs-font-family: var(--font-mono);
+  --diffs-font-size: var(--text-xs);
+  --diffs-light-bg: var(--surface-1);
+  --diffs-dark-bg: var(--surface-1);
+  --diffs-bg-context-override: var(--surface-1);
+  --diffs-bg-context-gutter-override: var(--surface-2);
+  --diffs-fg-number-override: var(--text-muted);
+  --diffs-addition-color-override: var(--status-good);
+  --diffs-deletion-color-override: var(--status-serious);
+  --diffs-bg-separator-override: var(--surface-2);
+  --diffs-bg-selection-override: var(--brand);
+  --diffs-annotation-bg: var(--surface-0);
+
+  /* Tree chrome. */
+  --trees-bg-override: var(--surface-1);
+  --trees-fg-override: var(--text-secondary);
+  --trees-fg-muted-override: var(--text-muted);
+  --trees-border-color-override: var(--border);
+  --trees-accent-override: var(--brand);
+  --trees-selected-bg-override: var(--surface-2);
+  --trees-selected-fg-override: var(--text-primary);
+  --trees-focus-ring-color-override: var(--brand);
+  --trees-input-bg-override: var(--surface-0);
+  --trees-search-bg-override: var(--surface-0);
+  --trees-search-fg-override: var(--text-primary);
+  --trees-indent-guide-bg-override: var(--border);
+  --trees-font-family-override: var(--font-sans);
+  --trees-font-size-override: var(--text-sm);
+  --trees-git-added-color-override: var(--status-good);
+  --trees-git-modified-color-override: var(--status-warning);
+  --trees-git-deleted-color-override: var(--status-serious);
+}

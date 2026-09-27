@@ -1,0 +1,25 @@
+/* The single Tailwind v4 @theme mapping for both apps (site + dashboard):
+   design tokens (tokens.css) → utility classes. Import order matters —
+   tokens.css first, then this file. Documented in web/DESIGN.md. */
+
+@theme {
+  --color-surface-0: var(--surface-0);
+  --color-surface-1: var(--surface-1);
+  --color-surface-2: var(--surface-2);
+  --color-borderline: var(--border);
+  --color-ink: var(--text-primary);
+  --color-ink-2: var(--text-secondary);
+  --color-ink-3: var(--text-muted);
+  --color-brand: var(--brand);
+  --color-brand-strong: var(--brand-strong);
+  --color-brand-ink: var(--brand-ink);
+  --color-accent: var(--accent);
+  --color-good: var(--status-good);
+  --color-warning: var(--status-warning);
+  --color-serious: var(--status-serious);
+  --color-series-1: var(--series-1);
+  --color-series-2: var(--series-2);
+  --color-series-3: var(--series-3);
+  --font-sans: var(--font-sans);
+  --font-mono: var(--font-mono);
+}

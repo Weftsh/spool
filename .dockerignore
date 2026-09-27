@@ -1,0 +1,21 @@
+target/
+**/node_modules/
+.git/
+.testkit/
+web/site/dist/
+web/dashboard/dist/
+web/site/.astro/
+web/dashboard/test-results/
+web/dashboard/playwright-report/
+*.profraw
+coverage.lcov
+reference/
+deploy/
+.github/
+docs/
+# Except the GitHub runner entrypoint, the cache proxy and the `docker`
+# tool, which Dockerfile.github-runner copies into its image, and the
+# PRoot scripts both runner images install behind that tool.
+!deploy/github-runner/
+!deploy/proot/
+.proot-local/

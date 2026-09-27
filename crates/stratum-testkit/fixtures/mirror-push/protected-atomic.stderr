@@ -1,0 +1,4 @@
+remote: error: GH006: Protected branch update failed for refs/heads/weft-protected-probe.        
+remote: 
+remote: - Changes must be made through a pull request.        
+error: failed to push some refs to 'https://github.com/Weftsh/minio-mirror.git'

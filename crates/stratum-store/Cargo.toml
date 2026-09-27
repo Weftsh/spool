@@ -1,0 +1,23 @@
+[package]
+name = "stratum-store"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+[features]
+# STRATUM-CORE DIVERGENCE: the research repo's client-side S3 latency models
+# (docs/storage-model.md) are benchmark scaffolding. They compile out of the
+# product build unless this feature is enabled.
+bench-models = []
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+# STRATUM-CORE DIVERGENCE: TLS enabled (research build was plain-HTTP MinIO only).
+ureq.workspace = true
+flate2.workspace = true
+sha2.workspace = true
+hmac = "0.12"
+
+[dev-dependencies]
+stratum-testkit = { path = "../stratum-testkit" }

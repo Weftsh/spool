@@ -1,0 +1,24 @@
+[package]
+name = "stratum-runner"
+version = "0.1.0"
+edition.workspace = true
+publish.workspace = true
+
+# The package keeps the workspace's name; the binary a person installs,
+# runs under systemd and types into a shell is the product's.
+[[bin]]
+name = "weft-runner"
+path = "src/main.rs"
+
+[dependencies]
+ureq.workspace = true
+# `serde` itself is never named here: the JobSpec is walked as a
+# `serde_json::Value` so every refusal can name the field it is about,
+# which a derived deserializer reports as a Rust type instead.
+serde_json.workspace = true
+# Killing a *process group* is the whole point of the timeout and the
+# cancellation paths: a step is `bash -e -c`, and the shell's children
+# outlive `Child::kill`, which std can only aim at the leader. `kill(-pgid)`
+# has no std spelling, so the one libc call earns the dependency — which is
+# already a workspace dep, not a new third party.
+libc.workspace = true

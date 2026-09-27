@@ -1,0 +1,33 @@
+/target
+**/*.rs.bk
+/.testkit
+node_modules/
+web/*/dist/
+web/*/.astro/
+*.log
+test-results/
+playwright-report/
+*.tsbuildinfo
+*.profraw
+coverage.lcov
+deploy/.dev-ssh-host-key*
+.terraform/
+*.tfstate*
+.walkthrough/
+.walkthrough2/
+# Screenshots from a focused browser check of one flow, the same shape
+# as a walkthrough run's output and equally not source.
+.sites-check/
+.stack/
+# Python bytecode from the manual stack's CI-provider fixture. The
+# fixture is source we ship and read; its cache is neither.
+__pycache__/
+*.pyc
+
+# Local credentials for the manual gates (Stripe test mode, GitHub App). Never committed.
+.env
+.env.*
+*.private-key.pem
+.secrets/
+deploy/proot/bin/
+.proot-local/

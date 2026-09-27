@@ -1,0 +1,41 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/stratum-store",
+    "crates/stratum-proto",
+    "crates/stratum-engine",
+    "crates/stratum-control",
+    "crates/stratum-server",
+    "crates/stratum-runner",
+    "crates/stratum-testkit",
+]
+
+[workspace.package]
+edition = "2021"
+publish = false
+
+[workspace.dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+sha1 = "0.10"
+sha2 = "0.10"
+flate2 = "1"
+libc = "0.2"
+ureq = { version = "2", default-features = false, features = ["tls"] }
+postgres = { version = "0.19", features = ["with-serde_json-1"] }
+argon2 = "0.5"
+# Workflow YAML. The parser layer only â see workflow::parse for why the
+# tree loader is not used.
+granit-parser = "1.2"
+
+[profile.release]
+debug = true
+
+# Dependencies, but never a workspace member: `"*"` in a profile matches
+# only packages we did not write. Every `crates/stratum-*` line keeps
+# `opt-level = 0`, so the lcov line mapping that `coverage-ledger.toml` is
+# exact against is untouched — and the debug suite stops paying
+# unoptimised Argon2, SHA-1/2 and zlib, which is most of what a git forge
+# does. Costs one slow rebuild of the dependency graph per cache miss.
+[profile.dev.package."*"]
+opt-level = 3

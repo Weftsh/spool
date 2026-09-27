@@ -1,0 +1,85 @@
+# syntax=docker/dockerfile:1
+# The hosted-runner image: one small binary and the toolchain a build is
+# allowed to assume. It is deliberately *not* the deployable server image
+# — a runner executes shell out of somebody's repository, so everything in
+# here is attack surface, and everything that is not here is a class of
+# thing that cannot go wrong.
+#
+# What is missing is the point. No docker CLI or socket (a runner that can
+# talk to a daemon can escape its container), no cloud CLIs and no cloud
+# credentials (the task has no IAM role at all — see
+# deploy/terraform/modules/runner), and no long-lived state: the process
+# runs one job and the container is discarded, so the previous job's
+# credential, caches and stray daemons are gone by construction rather
+# than by cleanup.
+#
+# Toolchains beyond this base do not get appended here. The image
+# allowlist (slice 6) is where a workflow asks for a different image, so
+# that "my job needs Go" is a per-repository choice rather than a growing
+# pile in the one image every job on the fleet runs.
+#
+# Corporate/CI proxies: pass a CA via `--secret id=extra_ca,src=…` and the
+# predefined HTTP_PROXY/HTTPS_PROXY build args; absent, the steps no-op.
+
+FROM rust:1.98-bookworm AS build
+WORKDIR /src
+RUN --mount=type=secret,id=extra_ca,required=false \
+    if [ -s /run/secrets/extra_ca ]; then \
+      mkdir -p /usr/local/share/ca-certificates \
+      && cp /run/secrets/extra_ca /usr/local/share/ca-certificates/extra-ca.crt \
+      && update-ca-certificates; fi
+COPY . .
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/src/target \
+    --mount=type=secret,id=extra_ca,required=false \
+    cargo build --release -p stratum-runner \
+    && cp target/release/weft-runner /weft-runner \
+    && strip /weft-runner
+
+FROM debian:bookworm-slim AS runtime
+# git clones the tree; ca-certificates lets the fetch and the control-plane
+# calls verify TLS; curl/build-essential/python3/jq are what a workflow's
+# `run:` steps assume exist without saying so. `bash` is already in the base
+# image, and is named anyway because steps run under it — see `step_command`
+# — so the day it stops being essential is not the day a copied Actions
+# workflow starts failing on `[[ ]]`.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+       git bash ca-certificates curl build-essential python3 jq \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd -r -u 10002 -d /work runner \
+    && mkdir -p /work \
+    && chown runner:runner /work
+COPY --from=build /weft-runner /usr/local/bin/weft-runner
+# `docker` on PATH, and not a daemon: `docker build` and `docker run`
+# with kaniko and PRoot, the same way deploy-validation builds this very
+# image (deploy/proot/README.md), for the subset a `run:` step uses.
+# Everything the tool needs is baked in so a job never fetches a
+# runtime: deploy/proot's scripts, a PRoot pinned by digest, and the
+# kaniko executor from the weftsh mirror. What the tool cannot do —
+# `container:`, `services:`, push, exec, detach — fails on a sentence
+# that names the reason (deploy/github-runner/weft-docker says which).
+# The store is copied per build by the job's uid, so it is made
+# world-readable and handed to that uid here.
+COPY deploy/proot/pull-image.py deploy/proot/build-image.sh deploy/proot/run.sh deploy/proot/fetch-proot.sh /usr/local/lib/weft-docker/
+RUN /usr/local/lib/weft-docker/fetch-proot.sh /usr/local/lib/weft-docker/proot \
+    && python3 /usr/local/lib/weft-docker/pull-image.py ghcr.io/weftsh/kaniko:v1.24.0 /usr/local/lib/weft-docker/kaniko \
+    && chmod -R a+rX /usr/local/lib/weft-docker \
+    && chown -R 10002:10002 /usr/local/lib/weft-docker
+COPY --chmod=0755 deploy/github-runner/weft-docker /usr/local/bin/docker
+RUN python3 /usr/local/bin/docker --self-test
+ENV STRATUM_RUNNER_WORKDIR=/work
+USER runner
+WORKDIR /work
+# No tini either: the ECS task definition sets `initProcessEnabled`, which
+# gives the task a real init to reap anything a step orphans. Carrying our
+# own would duplicate it, and a runner that ran without one would only
+# accumulate zombies for the length of a single job before the container
+# went away. Stopping does not depend on that init either way: the runner
+# installs its own SIGTERM handler (see `signals.rs`), so a `StopTask`
+# reaches it whether it is PID 1 or a child of one — which it did not
+# before, and a superseded run went on executing steps nobody wanted.
+# No HEALTHCHECK: this is a one-shot task, not a service. A health probe
+# on a process that is meant to exit reports "unhealthy" for every job
+# that finishes, which is the opposite of a useful signal.
+ENTRYPOINT ["/usr/local/bin/weft-runner"]

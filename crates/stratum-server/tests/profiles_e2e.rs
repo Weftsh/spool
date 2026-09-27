@@ -1,0 +1,884 @@
+//! Profiles, pins and email addresses end to end.
+//!
+//! Two surfaces with opposite rules share one route family, so most of
+//! this file is negative. The class being tested is the one the plan
+//! names: **does surface X let an anonymous or under-privileged
+//! principal learn something they should not** — a private repository's
+//! existence, or somebody's `git config user.email` values.
+//!
+//! Every attack case ends with a health check. A server that survives an
+//! attack by refusing everything has not passed, it has failed
+//! differently.
+
+use stratum_testkit::adversarial::INJECTIONS;
+use stratum_testkit::browser::Browser;
+use stratum_testkit::mailbox::Mailbox;
+use stratum_testkit::{gitcli::Scratch, Minio, Server};
+
+fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Server {
+    Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
+        .db_hint(hint)
+        .data_dir(scratch.path().join("data"))
+        .envs(&mail.env())
+        .env("STRATUM_COMPACT_POLL_SECS", "86400")
+        .start()
+}
+
+/// Percent-decode a mailed link's fragment: templates encode the token
+/// so a `:` or `#` in it cannot truncate the credential silently.
+fn urldecode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).expect("percent escape"));
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("utf8")
+}
+
+/// The token out of the newest mail sent to `address`, for a link whose
+/// fragment key is `key`.
+fn mailed_token(mail: &Mailbox, address: &str, key: &str) -> String {
+    let msg = mail.wait_for(address, std::time::Duration::from_secs(5));
+    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
+    let marker = format!("#{key}=");
+    let raw = link
+        .split_once(&marker)
+        .unwrap_or_else(|| panic!("{link} carries no #{key}="))
+        .1;
+    urldecode(raw)
+}
+
+/// Sign somebody up the way the product does — through the form and the
+/// confirmation link — and hand back a browser holding their session.
+///
+/// The real flow rather than the admin CLI, because `admin user-create`
+/// attaches a person to an *org*, and a profile lives on a **personal
+/// namespace**. Using the shortcut would have tested a shape nobody has.
+fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
+    let (st, body) = server.req(
+        "POST",
+        "/v1/auth/signup",
+        "",
+        Some(serde_json::json!({
+            "handle": handle,
+            "email": email,
+            "name": handle,
+            "password": "a long enough password",
+        })),
+    );
+    assert_eq!(st, 202, "signup {handle}: {body}");
+    let token = mailed_token(mail, email, "verify");
+    let mut b = Browser::new(server);
+    let (st, body) = b.req(
+        "POST",
+        "/v1/auth/verify",
+        Some(serde_json::json!({ "token": token })),
+    );
+    assert_eq!(st, 200, "verify {handle}: {body}");
+    b
+}
+
+fn make_repo(b: &mut Browser, org: &str, name: &str, public: bool) {
+    let (st, body) = b.req(
+        "POST",
+        &format!("/v1/orgs/{org}/repos"),
+        Some(serde_json::json!({ "name": name, "public": public })),
+    );
+    assert_eq!(st, 201, "create {org}/{name}: {body}");
+}
+
+/// An anonymous GET — no token, no cookie — which is the visitor this
+/// whole surface exists for.
+fn anon(server: &Server, path: &str) -> (u16, serde_json::Value) {
+    server.req("GET", path, "", None)
+}
+
+// ---------------------------------------------------------------------
+
+/// The happy path, and the shape a logged-out visitor sees.
+#[test]
+fn a_profile_is_public_and_reads_back_what_its_owner_wrote() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("profiles-happy");
+    let scratch = Scratch::new("profiles-happy");
+    let mail = Mailbox::temp("profiles-happy");
+    let server = spawn(&bucket.base_url, &scratch, "profiles-happy", &mail);
+    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
+
+    // Empty but present from the moment the account exists — no
+    // "create your profile" step, and no second state for a page to
+    // handle.
+    let (st, body) = anon(&server, "/v1/users/ada");
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["handle"], "ada");
+    assert_eq!(body["kind"], "human");
+    assert_eq!(body["bio"], serde_json::Value::Null);
+    assert_eq!(body["public_repos"], 0);
+    assert_eq!(body["links"].as_array().unwrap().len(), 0);
+    // Never, under any circumstances, an address.
+    assert!(
+        !body.to_string().contains("ada@example.test"),
+        "a public profile carried an email address: {body}"
+    );
+
+    let (st, body) = ada.req(
+        "PATCH",
+        "/v1/users/ada",
+        Some(serde_json::json!({
+            "display_name": "Ada Lovelace",
+            "bio": "Analytical engines.",
+            "location": "London",
+            "pronouns": "she/her",
+            "profile_repo": "ada",
+            "links": [
+                { "label": "Home", "url": "https://ada.example" },
+                { "url": "https://notes.example/ada" }
+            ],
+        })),
+    );
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["display_name"], "Ada Lovelace");
+
+    let (st, body) = anon(&server, "/v1/users/ada");
+    assert_eq!(st, 200);
+    assert_eq!(body["display_name"], "Ada Lovelace");
+    assert_eq!(body["bio"], "Analytical engines.");
+    assert_eq!(body["pronouns"], "she/her");
+    assert_eq!(body["profile_repo"], "ada");
+    let links = body["links"].as_array().unwrap();
+    assert_eq!(links.len(), 2);
+    assert_eq!(links[0]["label"], "Home");
+    assert_eq!(links[1]["label"], serde_json::Value::Null);
+
+    // A patch that names one field leaves the rest alone — including
+    // the links, which are replaced only when the key is present.
+    let (st, _) = ada.req(
+        "PATCH",
+        "/v1/users/ada",
+        Some(serde_json::json!({ "location": "Kent" })),
+    );
+    assert_eq!(st, 200);
+    let (_, body) = anon(&server, "/v1/users/ada");
+    assert_eq!(body["location"], "Kent");
+    assert_eq!(body["bio"], "Analytical engines.");
+    assert_eq!(body["links"].as_array().unwrap().len(), 2);
+
+    // …and an explicit null clears one, which an absent key cannot.
+    let (st, _) = ada.req(
+        "PATCH",
+        "/v1/users/ada",
+        Some(serde_json::json!({ "bio": null, "links": [] })),
+    );
+    assert_eq!(st, 200);
+    let (_, body) = anon(&server, "/v1/users/ada");
+    assert_eq!(body["bio"], serde_json::Value::Null);
+    assert_eq!(body["links"].as_array().unwrap().len(), 0);
+
+    // Everything the control plane refuses is something Ada typed and
+    // can retype, so it comes back as a 400 and not a 500 — a cap, a
+    // control character, a scheme we will not render as a link. The
+    // last one is the one that matters: a profile renders on a page
+    // anybody loads, so a `javascript:` link is stored XSS.
+    for bad in [
+        serde_json::json!({ "bio": "x".repeat(601) }),
+        serde_json::json!({ "display_name": "Ada\u{0007}Lovelace" }),
+        serde_json::json!({ "links": [{ "url": "javascript:alert(1)" }] }),
+    ] {
+        let (st, out) = ada.req("PATCH", "/v1/users/ada", Some(bad.clone()));
+        assert_eq!(st, 400, "{bad} answered {st}: {out}");
+    }
+    let (_, body) = anon(&server, "/v1/users/ada");
+    assert_eq!(
+        body["bio"],
+        serde_json::Value::Null,
+        "a refused patch landed anyway: {body}"
+    );
+    assert_eq!(body["links"].as_array().unwrap().len(), 0, "{body}");
+
+    // Pins, publicly readable.
+    make_repo(&mut ada, "ada", "engine", true);
+    let (st, body) = ada.req(
+        "PUT",
+        "/v1/users/ada/pins",
+        Some(serde_json::json!({ "pins": [{ "org": "ada", "repo": "engine" }] })),
+    );
+    assert_eq!(st, 200, "{body}");
+    let (st, body) = anon(&server, "/v1/users/ada/pins");
+    assert_eq!(st, 200);
+    let pins = body["pins"].as_array().unwrap();
+    assert_eq!(pins.len(), 1);
+    assert_eq!(pins[0]["name"], "engine");
+    assert_eq!(pins[0]["org"], "ada");
+    assert_eq!(pins[0]["public"], true);
+    assert_eq!(anon(&server, "/v1/users/ada").1["public_repos"], 1);
+
+    assert!(server.healthy());
+}
+
+/// The self-only routes, against everybody who is not that self.
+///
+/// The addresses are the surface that matters most here: they decide
+/// which commits in the world count as this person's work, so a read by
+/// anybody else is the leak.
+#[test]
+fn every_self_only_route_refuses_a_stranger_and_an_anonymous_caller() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("profiles-self");
+    let scratch = Scratch::new("profiles-self");
+    let mail = Mailbox::temp("profiles-self");
+    let server = spawn(&bucket.base_url, &scratch, "profiles-self", &mail);
+    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
+    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+
+    // Ada has an address on file — the one she signed up with.
+    let (st, body) = ada.req("GET", "/v1/users/ada/emails", None);
+    assert_eq!(st, 200, "{body}");
+    let mine = body["emails"].as_array().unwrap();
+    assert_eq!(mine.len(), 1);
+    assert_eq!(mine[0]["address"], "ada@example.test");
+    assert_eq!(mine[0]["primary"], true);
+    assert!(mine[0]["verified_at"].is_i64(), "{body}");
+
+    let writes: &[(&str, &str, serde_json::Value)] = &[
+        (
+            "PATCH",
+            "/v1/users/ada",
+            serde_json::json!({ "bio": "owned" }),
+        ),
+        (
+            "PUT",
+            "/v1/users/ada/pins",
+            serde_json::json!({ "pins": [] }),
+        ),
+        (
+            "POST",
+            "/v1/users/ada/emails",
+            serde_json::json!({ "email": "mallory@evil.test" }),
+        ),
+        (
+            "POST",
+            "/v1/users/ada/emails/verify",
+            serde_json::json!({ "token": "ada@example.test:whatever" }),
+        ),
+    ];
+    let reads: &[&str] = &["/v1/users/ada/emails"];
+
+    // Signed in as somebody else: forbidden, plainly. A handle is a
+    // public URL, so masking here would only puzzle the person who is
+    // signed in as the wrong account.
+    for (method, path, body) in writes {
+        let (st, out) = mallory.req(method, path, Some(body.clone()));
+        assert_eq!(st, 403, "{method} {path} as a stranger: {out}");
+    }
+    for path in reads {
+        let (st, out) = mallory.req("GET", path, None);
+        assert_eq!(st, 403, "GET {path} as a stranger: {out}");
+        assert!(
+            !out.to_string().contains("ada@example.test"),
+            "a stranger was shown an address: {out}"
+        );
+    }
+    let (st, out) = mallory.req("DELETE", "/v1/users/ada/emails/ada@example.test", None);
+    assert_eq!(st, 403, "{out}");
+
+    // Anonymous: 401, which a browser can act on.
+    for (method, path, body) in writes {
+        let st = server.req(method, path, "", Some(body.clone())).0;
+        assert_eq!(st, 401, "{method} {path} anonymously");
+    }
+    for path in reads {
+        let (st, out) = anon(&server, path);
+        assert_eq!(st, 401, "GET {path} anonymously");
+        assert!(!out.to_string().contains("ada@example.test"), "{out}");
+    }
+    assert_eq!(
+        server
+            .req("DELETE", "/v1/users/ada/emails/ada@example.test", "", None)
+            .0,
+        401
+    );
+
+    // Nothing landed: Ada's profile, pins and addresses are untouched.
+    let (_, body) = anon(&server, "/v1/users/ada");
+    assert_eq!(
+        body["bio"],
+        serde_json::Value::Null,
+        "a stranger wrote: {body}"
+    );
+    let (_, body) = ada.req("GET", "/v1/users/ada/emails", None);
+    assert_eq!(body["emails"].as_array().unwrap().len(), 1, "{body}");
+
+    // A handle nobody has is a 404 on every route, before authority is
+    // even considered — and the same 404 signed in or not.
+    for path in [
+        "/v1/users/nobody",
+        "/v1/users/nobody/pins",
+        "/v1/users/nobody/emails",
+    ] {
+        assert_eq!(anon(&server, path).0, 404, "{path}");
+    }
+    assert_eq!(mallory.req("GET", "/v1/users/nobody/emails", None).0, 404);
+
+    // Hostile handles are settled by shape and never reach a query.
+    for injection in INJECTIONS {
+        let encoded = injection
+            .replace('%', "%25")
+            .replace(' ', "%20")
+            .replace('#', "%23")
+            .replace('?', "%3F")
+            .replace('/', "%2F");
+        let (st, _) = anon(&server, &format!("/v1/users/{encoded}"));
+        assert!(
+            st == 404 || st == 400,
+            "/v1/users/{encoded} answered {st} for {injection:?}"
+        );
+    }
+
+    assert!(server.healthy());
+}
+
+/// Claiming, proving and never disclosing an address.
+#[test]
+fn an_address_is_claimed_proved_and_never_attributed_to_a_stranger() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("profiles-mail");
+    let scratch = Scratch::new("profiles-mail");
+    let mail = Mailbox::temp("profiles-mail");
+    let server = spawn(&bucket.base_url, &scratch, "profiles-mail", &mail);
+    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
+    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+
+    // Claiming mails a link and does not put it in the response — a
+    // claim confirmed over the API would prove nothing at all.
+    let (st, body) = ada.req(
+        "POST",
+        "/v1/users/ada/emails",
+        Some(serde_json::json!({ "email": "  Ada@Work.test " })),
+    );
+    assert_eq!(st, 202, "{body}");
+    assert_eq!(body["address"], "ada@work.test");
+    let token = mailed_token(&mail, "ada@work.test", "verify-email");
+    assert!(
+        !body.to_string().contains(token.split(':').nth(1).unwrap()),
+        "the confirmation secret was in the response body: {body}"
+    );
+
+    // Unproved, so it counts for nothing and stays private.
+    let (_, body) = ada.req("GET", "/v1/users/ada/emails", None);
+    let claimed = body["emails"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|e| e["address"] == "ada@work.test")
+        .unwrap_or_else(|| panic!("{body}"));
+    assert_eq!(claimed["verified_at"], serde_json::Value::Null);
+    assert_eq!(claimed["private"], true);
+    assert_eq!(claimed["primary"], false);
+
+    // The link is bound to the account. Pasted into somebody else's
+    // session it is inert — and it does not become spent, so the real
+    // owner's link still works afterwards.
+    let (st, out) = mallory.req(
+        "POST",
+        "/v1/users/mallory/emails/verify",
+        Some(serde_json::json!({ "token": token })),
+    );
+    assert_eq!(st, 404, "{out}");
+
+    // …and it is bound to the address, so the secret cannot be aimed at
+    // a mailbox the holder never proved.
+    let secret = token.split_once(':').unwrap().1;
+    let (st, out) = ada.req(
+        "POST",
+        "/v1/users/ada/emails/verify",
+        Some(serde_json::json!({ "token": format!("someone@else.test:{secret}") })),
+    );
+    assert_eq!(st, 404, "{out}");
+
+    let (st, out) = ada.req(
+        "POST",
+        "/v1/users/ada/emails/verify",
+        Some(serde_json::json!({ "token": token })),
+    );
+    assert_eq!(st, 200, "{out}");
+    assert_eq!(out["address"], "ada@work.test");
+    // Exactly once.
+    assert_eq!(
+        ada.req(
+            "POST",
+            "/v1/users/ada/emails/verify",
+            Some(serde_json::json!({ "token": token })),
+        )
+        .0,
+        404
+    );
+
+    // An address belongs to at most one account, and the refusal names
+    // nobody — not the handle, not the account, nothing.
+    let (st, out) = mallory.req(
+        "POST",
+        "/v1/users/mallory/emails",
+        Some(serde_json::json!({ "email": "ada@work.test" })),
+    );
+    assert_eq!(st, 409, "{out}");
+    let text = out.to_string();
+    for leak in ["ada", "Ada"] {
+        assert!(
+            !text.contains(leak),
+            "the conflict disclosed who holds the address: {out}"
+        );
+    }
+    // Including somebody's *sign-in* address, which is the one an
+    // impersonator would reach for first.
+    let (st, out) = mallory.req(
+        "POST",
+        "/v1/users/mallory/emails",
+        Some(serde_json::json!({ "email": "ada@example.test" })),
+    );
+    assert_eq!(st, 409, "{out}");
+    assert!(!out.to_string().contains("ada@example.test"), "{out}");
+    // No mail was sent to a mailbox Mallory does not own.
+    assert_eq!(
+        mail.to("ada@example.test").len(),
+        1,
+        "a failed claim mailed the address's real owner"
+    );
+
+    // Adding your own again is a conflict too, and mints no second link.
+    let before = mail.to("ada@work.test").len();
+    let (st, _) = ada.req(
+        "POST",
+        "/v1/users/ada/emails",
+        Some(serde_json::json!({ "email": "ADA@Work.test" })),
+    );
+    assert_eq!(st, 409);
+    assert_eq!(mail.to("ada@work.test").len(), before);
+
+    // Removing works for a secondary address and never for the one the
+    // account signs in with.
+    assert_eq!(
+        ada.req("DELETE", "/v1/users/ada/emails/ada@work.test", None)
+            .0,
+        204
+    );
+    let (st, out) = ada.req("DELETE", "/v1/users/ada/emails/ada@example.test", None);
+    assert_eq!(st, 404, "the sign-in address was removable: {out}");
+    let (_, body) = ada.req("GET", "/v1/users/ada/emails", None);
+    assert_eq!(body["emails"].as_array().unwrap().len(), 1);
+
+    // Nonsense in, refusal out — not a 500.
+    for bad in ["not-an-address", "", "  ", "a@b"] {
+        let (st, out) = ada.req(
+            "POST",
+            "/v1/users/ada/emails",
+            Some(serde_json::json!({ "email": bad })),
+        );
+        assert_eq!(st, 400, "{bad:?} answered {st}: {out}");
+    }
+    for bad in ["", "nonsense", "a:b", ":", "ada@work.test:"] {
+        let (st, _) = ada.req(
+            "POST",
+            "/v1/users/ada/emails/verify",
+            Some(serde_json::json!({ "token": bad })),
+        );
+        assert_eq!(st, 404, "{bad:?}");
+    }
+
+    assert!(server.healthy());
+}
+
+/// A private repository must not reach a public profile by any of the
+/// three routes that could carry it: a pin, the count, or the refusal
+/// message a pin attempt produces.
+#[test]
+fn a_private_repository_never_reaches_a_public_profile() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("profiles-private");
+    let scratch = Scratch::new("profiles-private");
+    let mail = Mailbox::temp("profiles-private");
+    let server = spawn(&bucket.base_url, &scratch, "profiles-private", &mail);
+    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
+    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+
+    make_repo(&mut ada, "ada", "open", true);
+    make_repo(&mut ada, "ada", "secret", false);
+
+    // The count moves for the public one and not for the private one.
+    assert_eq!(anon(&server, "/v1/users/ada").1["public_repos"], 1);
+
+    // Her own repository, and still refused — the rule is about the
+    // repository's visibility, not about who is asking.
+    let (st, out) = ada.req(
+        "PUT",
+        "/v1/users/ada/pins",
+        Some(serde_json::json!({ "pins": [{ "org": "ada", "repo": "secret" }] })),
+    );
+    assert_eq!(st, 400, "{out}");
+    assert!(
+        out["error"].as_str().unwrap().contains("private"),
+        "the refusal should say why: {out}"
+    );
+
+    // Mallory naming a repository she cannot see gets the answer a
+    // name that does not exist gets. Anything more specific would make
+    // the pin form an existence oracle for every private repository on
+    // the platform.
+    let refusals: Vec<String> = [("ada", "secret"), ("ada", "no-such-repo"), ("nobody", "x")]
+        .iter()
+        .map(|(org, repo)| {
+            let (st, out) = mallory.req(
+                "PUT",
+                "/v1/users/mallory/pins",
+                Some(serde_json::json!({ "pins": [{ "org": org, "repo": repo }] })),
+            );
+            assert_eq!(st, 400, "{org}/{repo}: {out}");
+            out["error"].as_str().unwrap().to_string()
+        })
+        .collect();
+    assert!(
+        refusals[0].contains("no such repository"),
+        "a private repository answered differently from an absent one: {refusals:?}"
+    );
+    assert!(
+        !refusals[0].contains("private"),
+        "the refusal admitted the repository exists: {refusals:?}"
+    );
+
+    // The half that survives time: pinned while public, made private
+    // afterwards, and gone from every list a stranger can read.
+    let (st, out) = ada.req(
+        "PUT",
+        "/v1/users/ada/pins",
+        Some(serde_json::json!({ "pins": [{ "org": "ada", "repo": "open" }] })),
+    );
+    assert_eq!(st, 200, "{out}");
+    assert_eq!(
+        anon(&server, "/v1/users/ada/pins").1["pins"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+
+    let (st, out) = ada.req(
+        "PATCH",
+        "/v1/orgs/ada/repos/open",
+        Some(serde_json::json!({ "public": false })),
+    );
+    assert_eq!(st, 200, "{out}");
+    let (_, body) = anon(&server, "/v1/users/ada/pins");
+    assert!(
+        body["pins"].as_array().unwrap().is_empty(),
+        "a repository made private stayed pinned in public: {body}"
+    );
+    assert_eq!(
+        mallory.req("GET", "/v1/users/ada/pins", None).1["pins"]
+            .as_array()
+            .unwrap()
+            .len(),
+        0
+    );
+    // Its owner still sees it, which is what proves the filter is about
+    // visibility and not about the pin having been dropped.
+    assert_eq!(
+        ada.req("GET", "/v1/users/ada/pins", None).1["pins"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(anon(&server, "/v1/users/ada").1["public_repos"], 0);
+
+    // The same read, made with a token instead of a cookie. A token
+    // wins over a session when both are presented, so a developer
+    // pasting one into a request must get that token's authority and
+    // not their own browser's — and a *repo-bound* token is nobody on
+    // this surface, because it was minted to reach one repository and a
+    // person's profile is not that repository.
+    let (st, minted) = ada.req(
+        "POST",
+        "/v1/orgs/ada/tokens",
+        Some(serde_json::json!({ "scopes": ["repo:read"], "label": "laptop" })),
+    );
+    assert_eq!(st, 201, "{minted}");
+    let personal = minted["token"].as_str().unwrap().to_string();
+    let (st, minted) = ada.req(
+        "POST",
+        "/v1/orgs/ada/tokens",
+        Some(serde_json::json!({ "scopes": ["repo:read"], "repo": "open", "label": "ci" })),
+    );
+    assert_eq!(st, 201, "{minted}");
+    let repo_bound = minted["token"].as_str().unwrap().to_string();
+
+    let (st, body) = server.req("GET", "/v1/users/ada/pins", &personal, None);
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        body["pins"].as_array().unwrap().len(),
+        1,
+        "Ada's own token did not speak for Ada: {body}"
+    );
+    let (st, body) = server.req("GET", "/v1/users/ada/pins", &repo_bound, None);
+    assert_eq!(st, 200, "{body}");
+    assert!(
+        body["pins"].as_array().unwrap().is_empty(),
+        "a repo-bound token was read as the person who minted it, and \
+         so was shown a private repository: {body}"
+    );
+
+    // A credential that is not a credential is a 401 and never a quiet
+    // fall back to anonymous: the caller has a typo'd or revoked token
+    // and has to be told to fix it, rather than silently served the
+    // logged-out view of a page they expected to be signed in on.
+    let (st, out) = server.req("GET", "/v1/users/ada/pins", "not-a-token", None);
+    assert_eq!(st, 401, "{out}");
+
+    // Caps and shapes.
+    let (st, _) = ada.req(
+        "PUT",
+        "/v1/users/ada/pins",
+        Some(serde_json::json!({
+            "pins": (0..7).map(|_| serde_json::json!({ "org": "ada", "repo": "open" }))
+                          .collect::<Vec<_>>()
+        })),
+    );
+    assert_eq!(st, 400, "over the pin cap");
+    let (st, out) = ada.req(
+        "PUT",
+        "/v1/users/ada/pins",
+        Some(serde_json::json!({
+            "pins": [{ "org": "ada", "repo": "open", "kind": "change" }]
+        })),
+    );
+    assert_eq!(st, 400, "{out}");
+
+    assert!(server.healthy());
+}
+
+/// An org's profile: anybody reads, only an administrator writes.
+#[test]
+fn an_org_profile_is_public_to_read_and_admin_to_write() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("profiles-org");
+    let scratch = Scratch::new("profiles-org");
+    let mail = Mailbox::temp("profiles-org");
+    let server = spawn(&bucket.base_url, &scratch, "profiles-org", &mail);
+    let admin = server.bootstrap_org("acme");
+    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+
+    // Empty and present before anybody edits it.
+    let (st, body) = anon(&server, "/v1/orgs/acme/profile");
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["org"], "acme");
+    assert_eq!(body["display_name"], serde_json::Value::Null);
+    assert_eq!(body["public_repos"], 0);
+
+    let (st, body) = server.req(
+        "PATCH",
+        "/v1/orgs/acme/profile",
+        &admin,
+        Some(serde_json::json!({
+            "display_name": "Acme Corp",
+            "description": "We make things.",
+            "website": "https://acme.example",
+            "contact_email": "  Hello@Acme.Example ",
+        })),
+    );
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(body["contact_email"], "hello@acme.example");
+
+    let (_, body) = anon(&server, "/v1/orgs/acme/profile");
+    assert_eq!(body["display_name"], "Acme Corp");
+    assert_eq!(body["website"], "https://acme.example");
+
+    // A second patch merges rather than replaces.
+    let (st, _) = server.req(
+        "PATCH",
+        "/v1/orgs/acme/profile",
+        &admin,
+        Some(serde_json::json!({ "location": "Bath" })),
+    );
+    assert_eq!(st, 200);
+    let (_, body) = anon(&server, "/v1/orgs/acme/profile");
+    assert_eq!(body["location"], "Bath");
+    assert_eq!(body["display_name"], "Acme Corp");
+
+    // Refusals, for the same reason the personal profile makes them:
+    // both render on a page anybody loads.
+    for bad in [
+        serde_json::json!({ "website": "javascript:alert(1)" }),
+        serde_json::json!({ "contact_email": "not-an-address" }),
+        serde_json::json!({ "display_name": "x".repeat(101) }),
+        serde_json::json!({ "description": "x".repeat(601) }),
+        serde_json::json!({ "location": "Bath\u{0007}" }),
+    ] {
+        let (st, out) = server.req("PATCH", "/v1/orgs/acme/profile", &admin, Some(bad.clone()));
+        assert_eq!(st, 400, "{bad} answered {st}: {out}");
+    }
+    assert_eq!(
+        anon(&server, "/v1/orgs/acme/profile").1["website"],
+        "https://acme.example",
+        "a refused patch landed anyway"
+    );
+
+    // A stranger cannot write it, and is masked rather than forbidden —
+    // `authx::require` treats a non-member as somebody who cannot know
+    // the org's shape, which is the rule every other admin route uses.
+    let (st, out) = mallory.req(
+        "PATCH",
+        "/v1/orgs/acme/profile",
+        Some(serde_json::json!({ "display_name": "Owned" })),
+    );
+    assert_eq!(st, 404, "{out}");
+    let st = server
+        .req(
+            "PATCH",
+            "/v1/orgs/acme/profile",
+            "",
+            Some(serde_json::json!({ "display_name": "Owned" })),
+        )
+        .0;
+    assert_eq!(st, 401, "anonymous write");
+    assert_eq!(
+        anon(&server, "/v1/orgs/acme/profile").1["display_name"],
+        "Acme Corp"
+    );
+
+    // An org nobody has — on the write as well as the read, and the
+    // name is settled before authority is even considered, so an
+    // administrator of some *other* org gets the same 404 an anonymous
+    // reader does rather than a 403 that would confirm the absence.
+    assert_eq!(anon(&server, "/v1/orgs/nobody/profile").0, 404);
+    let (st, out) = server.req(
+        "PATCH",
+        "/v1/orgs/nobody/profile",
+        &admin,
+        Some(serde_json::json!({ "display_name": "Ghost" })),
+    );
+    assert_eq!(st, 404, "{out}");
+
+    assert!(server.healthy());
+}
+
+/// A profile is not a way to take a name the platform has claimed.
+///
+/// `/v1/users/…` hangs under `v1`, which `registry::RESERVED` already
+/// holds, so no namespace can shadow this family. That claim is worth
+/// checking rather than asserting: the reason `monorepo` went unreserved
+/// for so long is that everybody assumed somebody had checked.
+#[test]
+fn the_new_route_family_sits_under_a_reserved_first_segment() {
+    assert!(
+        stratum_control::registry::is_reserved("v1"),
+        "`/v1/users/…` hangs under `v1`; if `v1` were free, a namespace \
+         could be created that the router would shadow forever"
+    );
+    // And the family's own second segment is not a namespace anybody
+    // could take either way — `users` is not a top-level path.
+    assert!(stratum_control::registry::is_reserved("dashboard"));
+}
+
+/// `openapi.json` is a JSON *object*, and an object with the same key
+/// twice is one where a reader and a parser disagree.
+///
+/// This is a real defect this slice found and fixed:
+/// `/v1/orgs/{org}/repos/{repo}` carried two `"patch"` entries — the
+/// default-branch one written first and the description/visibility one
+/// written later. Every JSON parser keeps the last, so the
+/// default-branch documentation was invisible to Swagger UI, to
+/// `llms-full.txt`, and to anybody reading the served document, while
+/// still sitting in the file looking maintained.
+/// `docs_e2e::every_documented_route_exists_and_every_api_route_is_documented`
+/// could not catch it: it compares *path* keys, and both entries were
+/// under one path.
+#[test]
+fn the_openapi_document_declares_every_operation_exactly_once() {
+    const SPEC: &str = include_str!("../../../docs/openapi.json");
+
+    /// A `serde_json::Value` that refuses to be built from an object
+    /// with the same key twice.
+    ///
+    /// It has to be a deserializer rather than an inspection of the
+    /// parsed document, because by the time `Value` exists the evidence
+    /// is gone: `serde_json` keeps the last of a duplicate pair, exactly
+    /// as every other parser does, and the shadowed entry has already
+    /// vanished. Checking the raw text instead would mean writing a
+    /// second JSON parser out of `str::find`, which is how a test starts
+    /// reporting on its own bugs rather than the document's.
+    struct Unique(serde_json::Value);
+
+    impl<'de> serde::Deserialize<'de> for Unique {
+        fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+            struct V;
+            impl<'de> serde::de::Visitor<'de> for V {
+                type Value = serde_json::Value;
+                fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+                    f.write_str("any JSON value")
+                }
+                fn visit_map<A: serde::de::MapAccess<'de>>(
+                    self,
+                    mut map: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut out = serde_json::Map::new();
+                    while let Some(key) = map.next_key::<String>()? {
+                        let value: Unique = map.next_value()?;
+                        if out.insert(key.clone(), value.0).is_some() {
+                            return Err(serde::de::Error::custom(format!(
+                                "the key {key:?} appears twice in one object — a parser \
+                                 keeps the last and silently discards the earlier one"
+                            )));
+                        }
+                    }
+                    Ok(serde_json::Value::Object(out))
+                }
+                fn visit_seq<A: serde::de::SeqAccess<'de>>(
+                    self,
+                    mut seq: A,
+                ) -> Result<Self::Value, A::Error> {
+                    let mut out = Vec::new();
+                    while let Some(Unique(v)) = seq.next_element()? {
+                        out.push(v);
+                    }
+                    Ok(serde_json::Value::Array(out))
+                }
+                // Scalars carry no keys, so they pass straight through.
+                fn visit_unit<E>(self) -> Result<Self::Value, E> {
+                    Ok(serde_json::Value::Null)
+                }
+                fn visit_bool<E>(self, v: bool) -> Result<Self::Value, E> {
+                    Ok(v.into())
+                }
+                fn visit_i64<E>(self, v: i64) -> Result<Self::Value, E> {
+                    Ok(v.into())
+                }
+                fn visit_u64<E>(self, v: u64) -> Result<Self::Value, E> {
+                    Ok(v.into())
+                }
+                fn visit_f64<E>(self, v: f64) -> Result<Self::Value, E> {
+                    Ok(v.into())
+                }
+                fn visit_str<E>(self, v: &str) -> Result<Self::Value, E> {
+                    Ok(v.into())
+                }
+            }
+            d.deserialize_any(V).map(Unique)
+        }
+    }
+
+    let spec: Unique = serde_json::from_str(SPEC)
+        .unwrap_or_else(|e| panic!("openapi.json is not a well-formed document: {e}"));
+    // And it is still the document the other gates expect, so a parser
+    // that silently accepted nothing could not pass this.
+    assert_eq!(spec.0["openapi"], "3.1.0");
+    assert!(
+        spec.0["paths"].as_object().expect("paths object").len() >= 10,
+        "the spec lost its paths"
+    );
+}

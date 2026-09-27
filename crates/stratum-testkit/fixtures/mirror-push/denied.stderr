@@ -1,0 +1,2 @@
+remote: Write access to repository not granted.
+fatal: unable to access 'https://github.com/acme/widget.git/': The requested URL returned error: 403

@@ -1,0 +1,110 @@
+/* Stratum design tokens — one system across marketing, docs, dashboard.
+   Documented in web/DESIGN.md.
+
+   Every color is defined ONCE as light-dark(light, dark); which side
+   renders is driven by color-scheme. The default is the visitor's system
+   preference; a page that must commit to a theme sets data-theme on
+   <html> (the marketing pages force dark). */
+
+:root {
+  color-scheme: light dark;
+
+  /* Surfaces — charcoal in dark, paper in light. Never pure #000. */
+  --surface-0: light-dark(#f8faf9, #0c0e0d); /* page ground */
+  --surface-1: light-dark(#ffffff, #131615); /* cards, chart surface */
+  --surface-2: light-dark(#eff2f0, #1b1f1d); /* recessed wells, code */
+  /* Hairline in dark (low-alpha white), crisp solid in light. */
+  --border: light-dark(#e2e6e4, rgb(255 255 255 / 0.09));
+
+  /* Ink */
+  --text-primary: light-dark(#101211, #f2f4f3);
+  --text-secondary: light-dark(#4b524e, #a9b1ac);
+  --text-muted: light-dark(#79817c, #7d8580);
+
+  /* Brand — the emerald signature, with an amber counterpoint. Dark
+     hovers go lighter; light hovers go darker. */
+  --brand: light-dark(#047857, #3ecf8e);
+  --brand-strong: light-dark(#065f46, #65e2a9);
+  --brand-ink: light-dark(#ffffff, #052e1c);
+  --accent: light-dark(#b45309, #f0b429);
+
+  /* Data-viz (validator-passed in both modes; slots in fixed order;
+     series-1 leads with the emerald family. Dark steps sit in the
+     OKLCH L 0.48–0.67 band, which is why dark series-2 is an orange —
+     amber cannot hold chroma inside that band.) */
+  --series-1: light-dark(#059669, #29a86f);
+  --series-2: light-dark(#b45309, #d95926);
+  --series-3: light-dark(#2563eb, #5b93ea);
+
+  /* Status (reserved; icon + label, never color alone) */
+  --status-good: light-dark(#047857, #3ecf8e);
+  --status-warning: light-dark(#b45309, #f0b429);
+  --status-serious: light-dark(#dc2626, #f87171);
+
+  /* Type */
+  --font-sans: "Inter Variable", "Inter", system-ui, -apple-system,
+    "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, "SFMono-Regular",
+    "Cascadia Mono", monospace;
+
+  /* Code — the syntax colours the highlighter reads, one per token class,
+     as light-dark() pairs like everything above. The dashboard's code
+     surfaces (@pierre/diffs over Shiki) are themed by a CSS-variables
+     theme that resolves to these, so a repaint here reaches every
+     highlighted line and no component carries a colour of its own. Light
+     side: GitHub-adjacent hues darkened for paper; dark side: the same
+     hues lifted for charcoal, kept under the brand emerald in chroma so
+     the code reads quieter than the controls around it. */
+  --code-fg: var(--text-primary);
+  --code-comment: light-dark(#6b7280, #7c8a82);
+  --code-keyword: light-dark(#a21caf, #d3a4f0);
+  --code-string: light-dark(#0f766e, #8fd9c3);
+  --code-constant: light-dark(#1d4ed8, #8fb8ff);
+  --code-function: light-dark(#7c2d12, #f0b48a);
+  --code-parameter: light-dark(#92400e, #e8c98a);
+  --code-punctuation: var(--text-secondary);
+  --code-link: var(--brand);
+
+  --radius: 8px;
+  --radius-lg: 14px;
+  /* Depth: light gets a soft real shadow; dark gets a 1px ring —
+     borders and surface steps carry depth there, never drop shadows. */
+  --shadow-1: 0 1px 2px light-dark(rgb(16 24 20 / 0.06), rgb(0 0 0 / 0)),
+    0 4px 16px light-dark(rgb(16 24 20 / 0.05), rgb(0 0 0 / 0)),
+    0 0 0 1px light-dark(rgb(16 24 20 / 0), rgb(255 255 255 / 0.04));
+  /* Primary-CTA hover glow (reads in dark; near-invisible in light). */
+  --glow-brand: 0 0 24px rgb(62 207 142 / 0.28);
+}
+
+/* A page that commits to one theme pins color-scheme; light-dark()
+   resolves accordingly. No duplicated value blocks. */
+:root[data-theme="dark"] {
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+}
+
+/* A border with no colour of its own is a hairline. Tailwind v4 draws a
+   bare `border` in currentColor — v3 drew it in a light gray — so a
+   vendored primitive that says `border-r` and relies on shadcn's own base
+   rule (which `shadcn init` would have written, and we never run) drew
+   the dashboard sidebar's edge in full-strength text colour: a bright
+   white line down every admin page in dark. In the base layer, so any
+   `border-*` colour utility still wins. */
+@layer base {
+  *,
+  ::before,
+  ::after,
+  ::backdrop,
+  ::file-selector-button {
+    border-color: var(--border);
+  }
+}
+
+body {
+  background: var(--surface-0);
+  color: var(--text-primary);
+  font-family: var(--font-sans);
+}
