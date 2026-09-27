@@ -8,8 +8,8 @@
 //!
 //! So visibility here is defined once, in
 //! [`stratum_control::registry::Viewer`], and it is the same rule
-//! `members::effective_role` enforces everywhere else: public, or a
-//! namespace you belong to. A per-repo grant does not appear, because a
+//! `members::effective_role` enforces everywhere else: a namespace you
+//! belong to. A per-repo grant does not appear, because a
 //! grant without membership is not access — if that ever changes, it
 //! changes in one place and this follows.
 
@@ -50,7 +50,6 @@ pub struct SearchParams {
 /// up disagreeing about who may see what — the exact failure this
 /// module's header warns about for the repo search.
 enum ViewerOwned {
-    Anonymous,
     User(String),
     Org(String),
 }
@@ -58,7 +57,6 @@ enum ViewerOwned {
 impl ViewerOwned {
     fn as_viewer(&self) -> Viewer<'_> {
         match self {
-            ViewerOwned::Anonymous => Viewer::Anonymous,
             ViewerOwned::User(u) => Viewer::User(u),
             ViewerOwned::Org(o) => Viewer::Org(o),
         }
@@ -74,26 +72,27 @@ fn resolve_viewer(state: &SharedState, headers: &HeaderMap) -> Result<ViewerOwne
         Some(_) => None,
         None => crate::app::session_user(state, headers)?,
     };
-    // A repo-bound service token is treated as anonymous rather than as
-    // its org: it was minted to reach one repository, and a search is
-    // not that repository.
-    Ok(match (&principal, &user_from_session) {
-        (Some(p), _) if p.repo_id.is_none() => match p.user_id.as_deref() {
+    // Nothing here is searchable without signing in. A repo-bound
+    // service token is refused rather than treated as its org: it was
+    // minted to reach one repository, and a search is not that
+    // repository.
+    match (&principal, &user_from_session) {
+        (Some(p), _) if p.repo_id.is_none() => Ok(match p.user_id.as_deref() {
             Some(u) => ViewerOwned::User(u.to_string()),
             None => ViewerOwned::Org(p.org_id.clone()),
-        },
-        (Some(_), _) => ViewerOwned::Anonymous,
-        (None, Some(user_id)) => ViewerOwned::User(user_id.clone()),
-        (None, None) => ViewerOwned::Anonymous,
-    })
+        }),
+        (Some(_), _) => Err(authx::forbidden(
+            "a token bound to one repository cannot search; use a personal or organization token",
+        )),
+        (None, Some(user_id)) => Ok(ViewerOwned::User(user_id.clone())),
+        (None, None) => Err(authx::unauthorized(authx::Challenge::None)),
+    }
 }
 
 /// `GET /v1/search/repos`
 ///
-/// Open to anonymous callers by design — this is what the public
-/// discovery page reads — and answers the same shape whether or not the
-/// caller is signed in, so the only difference a credential makes is how
-/// many rows come back.
+/// Signed in only: a person sees the namespaces they belong to, and an
+/// organization token its own.
 pub async fn repos(
     State(state): State<SharedState>,
     Query(params): Query<SearchParams>,
@@ -124,12 +123,12 @@ pub async fn repos(
 /// `GET /v1/search/topics`
 ///
 /// The topics people are actually using, most-used first, scoped to what
-/// the caller may see — a topic carried only by private repositories is
-/// invisible to a stranger, and so is the fact that it exists.
+/// the caller may see — a topic carried only by another namespace's
+/// repositories is invisible, and so is the fact that it exists.
 ///
 /// Beside repo search rather than under a repository, because a topic is
-/// not a property of one: the question this answers is "what is on this
-/// instance", which is the discovery page's question.
+/// not a property of one: the question this answers is "what is in the
+/// namespaces I work in".
 pub async fn topics(
     State(state): State<SharedState>,
     Query(params): Query<TopicsParams>,

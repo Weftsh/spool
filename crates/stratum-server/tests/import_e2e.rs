@@ -852,7 +852,6 @@ fn an_import_on_a_deployment_with_no_github_app_says_so_rather_than_hanging() {
             name: "orphaned",
             description: None,
             kind: stratum_control::registry::RepoKind::Mirror,
-            public: true,
             default_branch: "main",
             origin_url: Some("acme/widget"),
             origin_provider: Some("github"),

@@ -24,8 +24,9 @@ pub struct CreateMirrorBody {
     pub origin: String,
     #[serde(default)]
     pub installation_id: Option<String>,
+    /// Refused when true: see [`crate::api::NO_PUBLIC_REPOS`].
     #[serde(default)]
-    pub public: bool,
+    pub public: Option<bool>,
     #[serde(default)]
     pub description: Option<String>,
 }
@@ -55,6 +56,9 @@ pub async fn create(
     // Creating costs storage and outbound fetches, so it is the line an
     // unproved address does not cross.
     if let Err(r) = authx::require_verified(&state.db, &principal) {
+        return r;
+    }
+    if let Err(r) = crate::api::refuse_public(body.public) {
         return r;
     }
     if state.sync.provider_by_name(&body.provider).is_none() {
@@ -146,7 +150,6 @@ pub async fn create(
             name: &body.name,
             description: description.as_deref(),
             kind: RepoKind::Mirror,
-            public: body.public,
             default_branch: "main", // corrected from origin HEAD at first sync
             origin_url: Some(&origin),
             origin_provider: Some(&body.provider),
@@ -162,39 +165,6 @@ pub async fn create(
         }
         Err(e) => return internal(e),
     };
-    // Ask the origin what its own star count is, and record it beside
-    // ours — never added to it.
-    //
-    // Best-effort on purpose. A mirror that exists with no imported
-    // number is a mirror displaying only our count, which is honest;
-    // a creation that failed because GitHub was slow is a broken
-    // product. So a refusal, a timeout, an origin with no metadata API,
-    // or a private repository answering 404 all land in the same place:
-    // `origin_stars` stays NULL, meaning "we never found out", which is
-    // the fact — and is deliberately not the zero that would tell a
-    // visitor nobody upstream cared.
-    if let Some(provider) = state.sync.provider_by_name(&body.provider) {
-        let origin = origin.clone();
-        let meta = tokio::task::spawn_blocking(move || provider.repo_meta(&origin))
-            .await
-            .unwrap_or_else(|e| Err(e.to_string()));
-        match meta {
-            Ok(Some(remote)) => {
-                if let Some(stars) = remote.stars {
-                    if let Err(e) =
-                        stratum_control::stars::set_origin_stars(&state.db, &repo.id, stars as i32)
-                    {
-                        // Not fatal, and not silent: an operator
-                        // watching for exactly this finds it, and the
-                        // repository is still created.
-                        eprintln!("weft: origin stars for {} not recorded: {e}", repo.id);
-                    }
-                }
-            }
-            Ok(None) => {}
-            Err(e) => eprintln!("weft: origin metadata for {} unavailable: {e}", repo.id),
-        }
-    }
     let ctx = AuditCtx::of(&org.id, Some(&principal));
     crate::api::record_or_warn(
         &state.db,

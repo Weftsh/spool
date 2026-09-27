@@ -1,34 +1,26 @@
-//! A person as a public face, and the addresses their commits are
-//! signed with.
+//! A person's profile, and the addresses their commits are signed with.
 //!
 //! Two surfaces with opposite visibility rules live here on purpose,
 //! because the thing that keeps them apart is one file's worth of
 //! discipline rather than two modules' worth of hope:
 //!
-//! * The **profile** — bio, links, pins, public repository count — is
-//!   read by anybody, signed in or not. Everything it returns is a fact
-//!   its owner chose to publish.
+//! * The **profile** — name, bio, links — is read by anybody signed in
+//!   to this server. Everything it returns is a fact its owner chose to
+//!   share with the people they work with.
 //! * The **addresses** are read by nobody but their owner. They are the
-//!   authorship-linkage surface: the set that decides which commits in
-//!   the world count as this person's work. Publishing it would hand a
-//!   spammer a mailbox and hand an impersonator the exact string to put
-//!   in `git config user.email`.
+//!   authorship-linkage surface: the set that decides which commits
+//!   count as this person's work. Sharing it would hand a spammer a
+//!   mailbox and hand an impersonator the exact string to put in
+//!   `git config user.email`.
 //!
 //! The rule that makes authorship mean anything is that **only a row
 //! with `verified_at IS NOT NULL` may ever count** — [`user_for_author`]
 //! is the only way to ask, and it enforces that in the query rather than
 //! trusting each caller to remember. Anybody can write any address into
 //! a commit; an unproved one is a claim.
-//!
-//! Visibility of pinned repositories is not re-derived here. It is the
-//! same `public OR a namespace you belong to` predicate
-//! [`crate::registry::search_repos`] uses, resolved through
-//! [`crate::registry::Viewer`], so a change to what "visible" means
-//! moves in one place.
 
 use crate::db::ControlDb;
 use crate::ids::{now_ms, token_secret, ulid};
-use crate::registry::Viewer;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -38,9 +30,9 @@ use sha2::{Digest, Sha256};
 /// inbox is not a live credential.
 pub const EMAIL_VERIFY_TTL_SECS: i64 = 24 * 3600;
 
-/// Bounds on hostile input (I13). Every one of these is a string a
-/// stranger types into a public page, so each is capped rather than
-/// trusted; the caps are generous enough that nobody honest meets them.
+/// Bounds on hostile input (I13). Every one of these is a string
+/// somebody types into a form, so each is capped rather than trusted;
+/// the caps are generous enough that nobody honest meets them.
 pub const MAX_DISPLAY_NAME: usize = 100;
 pub const MAX_BIO: usize = 600;
 pub const MAX_LOCATION: usize = 100;
@@ -49,7 +41,6 @@ pub const MAX_PRONOUNS: usize = 40;
 pub const MAX_LINK_LABEL: usize = 60;
 pub const MAX_LINK_URL: usize = 300;
 pub const MAX_LINKS: usize = 5;
-pub const MAX_PINS: usize = 6;
 /// Each address costs a mail we send on request, so the count is capped
 /// as much to bound outbound mail as to bound the row set.
 pub const MAX_EMAILS: usize = 10;
@@ -106,11 +97,6 @@ pub struct Profile {
     pub company: Option<String>,
     pub pronouns: Option<String>,
     pub kind: AccountKind,
-    /// Whether private-repository work may show as an opaque daily
-    /// total. Public by design: a reader has to be able to tell a quiet
-    /// week from an opted-out one, and the flag reveals nothing about
-    /// what the private work was.
-    pub contrib_private_optin: bool,
     /// The README-profile repository, GitHub's convention: a repo named
     /// for the handle, rendered on the page.
     pub profile_repo: Option<String>,
@@ -139,16 +125,6 @@ pub struct EmailRow {
     pub created_at: i64,
 }
 
-/// A pinned item, resolved to something renderable.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Pin {
-    pub kind: String,
-    pub org: String,
-    pub name: String,
-    pub description: Option<String>,
-    pub public: bool,
-}
-
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct OrgProfile {
     pub display_name: Option<String>,
@@ -170,7 +146,6 @@ pub struct ProfileUpdate {
     pub location: Option<Option<String>>,
     pub company: Option<Option<String>>,
     pub pronouns: Option<Option<String>>,
-    pub contrib_private_optin: Option<bool>,
     pub profile_repo: Option<Option<String>>,
     /// Replaces the whole list when present — a patch of one link out of
     /// five is a shape the UI never produces and a merge rule nobody
@@ -243,7 +218,6 @@ fn row_to_profile(row: &postgres::Row) -> Profile {
         company: row.get("company"),
         pronouns: row.get("pronouns"),
         kind: AccountKind::parse(row.get::<_, String>("kind").as_str()),
-        contrib_private_optin: row.get("contrib_private_optin"),
         profile_repo: row.get("profile_repo"),
         created_at: row.get("created_at"),
     }
@@ -258,8 +232,8 @@ fn row_to_profile(row: &postgres::Row) -> Profile {
 /// way `Ada` and `ada` cannot resolve to two different answers.
 ///
 /// A disabled account has no profile. That is deliberate rather than a
-/// side effect: suspending somebody has to take their public page down,
-/// or the suspension is a sign-in inconvenience and nothing more. The
+/// side effect: suspending somebody has to take their page down, or the
+/// suspension is a sign-in inconvenience and nothing more. The
 /// namespace itself stays claimed, so nobody can move in behind them.
 pub fn by_handle(db: &ControlDb, handle: &str) -> Result<Option<(Profile, String)>, String> {
     if !crate::registry::valid_name(handle) {
@@ -270,7 +244,7 @@ pub fn by_handle(db: &ControlDb, handle: &str) -> Result<Option<(Profile, String
     db.lock()
         .query_opt(
             "SELECT u.id, o.name AS handle, u.name, u.display_name, u.bio, u.location, \
-             u.company, u.pronouns, u.kind, u.contrib_private_optin, u.profile_repo, \
+             u.company, u.pronouns, u.kind, u.profile_repo, \
              u.created_at, o.id AS org_id \
              FROM orgs o JOIN users u ON u.id = o.owner_user_id \
              WHERE o.kind = 'personal' AND lower(o.name) = lower($1) \
@@ -317,10 +291,8 @@ pub fn update(db: &ControlDb, user_id: &str, patch: &ProfileUpdate) -> Result<()
         patch.location.is_some(),
         patch.company.is_some(),
         patch.pronouns.is_some(),
-        patch.contrib_private_optin.is_some(),
         patch.profile_repo.is_some(),
     );
-    let optin = patch.contrib_private_optin.unwrap_or(false);
     let now = now_ms();
     // One transaction: a profile whose links landed and whose bio did
     // not is a half-saved form, and the person who submitted it has no
@@ -335,8 +307,7 @@ pub fn update(db: &ControlDb, user_id: &str, patch: &ProfileUpdate) -> Result<()
                  location = CASE WHEN $6 THEN $7 ELSE location END, \
                  company = CASE WHEN $8 THEN $9 ELSE company END, \
                  pronouns = CASE WHEN $10 THEN $11 ELSE pronouns END, \
-                 contrib_private_optin = CASE WHEN $12 THEN $13 ELSE contrib_private_optin END, \
-                 profile_repo = CASE WHEN $14 THEN $15 ELSE profile_repo END \
+                 profile_repo = CASE WHEN $12 THEN $13 ELSE profile_repo END \
                  WHERE id = $1 AND disabled_at IS NULL",
                 &[
                     &uid,
@@ -351,8 +322,6 @@ pub fn update(db: &ControlDb, user_id: &str, patch: &ProfileUpdate) -> Result<()
                     &sets.4,
                     &pronouns,
                     &sets.5,
-                    &optin,
-                    &sets.6,
                     &profile_repo,
                 ],
             )?;
@@ -390,127 +359,6 @@ pub fn links(db: &ControlDb, user_id: &str) -> Result<Vec<Link>, String> {
                 })
                 .collect()
         })
-}
-
-/// How many repositories in this namespace anybody may see.
-///
-/// Counts public rows only, for every caller including the owner. That
-/// is what makes the number safe to publish: it does not move when a
-/// private repository is created, so it cannot be watched to learn that
-/// one was.
-pub fn public_repo_count(db: &ControlDb, org_id: &str) -> Result<i64, String> {
-    db.lock()
-        .query_one(
-            "SELECT COUNT(*) FROM repos \
-             WHERE org_id = $1 AND state = 'active' AND public",
-            &[&org_id.to_string()],
-        )
-        .map_err(|e| format!("count repos: {e}"))
-        .map(|r| r.get(0))
-}
-
-/// The namespaces this viewer belongs to — the second half of the
-/// visibility predicate, resolved the way search resolves it.
-fn viewer_orgs(db: &ControlDb, viewer: &Viewer) -> Result<Vec<String>, String> {
-    Ok(match viewer {
-        Viewer::Anonymous => Vec::new(),
-        Viewer::User(user_id) => crate::members::orgs_of(db, user_id)?,
-        Viewer::Org(org_id) => vec![(*org_id).to_string()],
-    })
-}
-
-/// The pins on a namespace, filtered to what this viewer may see.
-///
-/// The filter is not belt-and-braces with [`set_pins`]'s refusal to pin
-/// a private repository — it is the half that survives time.
-/// `repos.public` is a flag an owner can flip, so a repository pinned
-/// while public and made private afterwards is exactly the row that
-/// would otherwise leak, and no amount of write-time checking catches
-/// it. A deleted repository disappears from the list for the same
-/// reason.
-pub fn pins(db: &ControlDb, org_id: &str, viewer: &Viewer) -> Result<Vec<Pin>, String> {
-    let orgs = viewer_orgs(db, viewer)?;
-    db.lock()
-        .query(
-            "SELECT p.kind, o.name AS org, r.name, r.description, r.public \
-             FROM pinned_items p \
-             JOIN repos r ON r.id = p.target_id \
-             JOIN orgs o ON o.id = r.org_id \
-             WHERE p.owner_org_id = $1 AND p.kind = 'repo' \
-               AND r.state = 'active' \
-               AND (r.public OR r.org_id = ANY($2)) \
-             ORDER BY p.position, p.id",
-            &[&org_id.to_string(), &orgs],
-        )
-        .map_err(|e| format!("read pins: {e}"))
-        .map(|rows| {
-            rows.iter()
-                .map(|r| Pin {
-                    kind: r.get("kind"),
-                    org: r.get("org"),
-                    name: r.get("name"),
-                    description: r.get("description"),
-                    public: r.get("public"),
-                })
-                .collect()
-        })
-}
-
-/// Replace the pin list. `targets` are repository ids.
-///
-/// Refuses outright to pin a repository that is not public. The plan's
-/// rule is "a private repo can never be pinned", and saying so at the
-/// write is what makes the refusal something a person sees and can act
-/// on rather than a row that silently renders to nobody.
-pub fn set_pins(db: &ControlDb, org_id: &str, targets: &[String]) -> Result<(), String> {
-    if targets.len() > MAX_PINS {
-        return Err(format!("at most {MAX_PINS} pinned items"));
-    }
-    let mut seen: Vec<&String> = Vec::new();
-    for t in targets {
-        if seen.contains(&t) {
-            return Err("the same item is pinned twice".into());
-        }
-        seen.push(t);
-    }
-    // Resolved before the write so the refusal names the repository the
-    // caller asked for rather than a constraint violation.
-    for target in targets {
-        let row = db
-            .lock()
-            .query_opt(
-                "SELECT public FROM repos WHERE id = $1 AND state = 'active'",
-                &[target],
-            )
-            .map_err(|e| format!("resolve pin: {e}"))?;
-        match row {
-            None => return Err("no such repository".into()),
-            Some(r) if !r.get::<_, bool>("public") => {
-                return Err("a private repository cannot be pinned".into())
-            }
-            Some(_) => {}
-        }
-    }
-    let org_id = org_id.to_string();
-    let targets: Vec<String> = targets.to_vec();
-    let now = now_ms();
-    db.lock()
-        .transaction(move |tx| {
-            tx.execute(
-                "DELETE FROM pinned_items WHERE owner_org_id = $1",
-                &[&org_id],
-            )?;
-            for (i, target) in targets.iter().enumerate() {
-                tx.execute(
-                    "INSERT INTO pinned_items \
-                     (id, owner_org_id, kind, target_id, position, created_at) \
-                     VALUES ($1, $2, 'repo', $3, $4, $5)",
-                    &[&ulid(), &org_id, target, &(i as i32), &now],
-                )?;
-            }
-            Ok(())
-        })
-        .map_err(|e| format!("set pins: {e}"))
 }
 
 // ---------------------------------------------------------------------
@@ -768,7 +616,7 @@ pub fn user_for_author(db: &ControlDb, address: &str) -> Result<Option<String>, 
 // Org profiles.
 // ---------------------------------------------------------------------
 
-/// An org's public face. Absent is the same as empty — an org that has
+/// An org's profile. Absent is the same as empty — an org that has
 /// never been edited renders exactly like one whose fields were cleared,
 /// so there is no second "no profile yet" state for a page to handle.
 pub fn org_profile(db: &ControlDb, org_id: &str) -> Result<OrgProfile, String> {
@@ -880,7 +728,7 @@ mod tests {
         (u.id, ns.id)
     }
 
-    fn repo(db: &ControlDb, org_id: &str, name: &str, public: bool) -> registry::Repo {
+    fn repo(db: &ControlDb, org_id: &str, name: &str) -> registry::Repo {
         registry::create_repo(
             db,
             org_id,
@@ -888,7 +736,6 @@ mod tests {
                 description: Some("a repository"),
                 name,
                 kind: RepoKind::Native,
-                public,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -942,7 +789,6 @@ mod tests {
         assert_eq!(p.name, "ada");
         assert_eq!(p.display_name, None);
         assert_eq!(p.kind, AccountKind::Human);
-        assert!(!p.contrib_private_optin);
 
         update(
             &db,
@@ -953,7 +799,6 @@ mod tests {
                 location: Some(Some("London".into())),
                 company: Some(Some("@analytical".into())),
                 pronouns: Some(Some("she/her".into())),
-                contrib_private_optin: Some(true),
                 profile_repo: Some(Some("ada".into())),
                 links: Some(vec![
                     Link {
@@ -977,7 +822,6 @@ mod tests {
         assert_eq!(p.location.as_deref(), Some("London"));
         assert_eq!(p.company.as_deref(), Some("@analytical"));
         assert_eq!(p.pronouns.as_deref(), Some("she/her"));
-        assert!(p.contrib_private_optin);
         assert_eq!(p.profile_repo.as_deref(), Some("ada"));
         let l = links(&db, &user).unwrap();
         assert_eq!(l.len(), 2);
@@ -1151,77 +995,6 @@ mod tests {
             assert!(by_handle(&db, bad).unwrap().is_none(), "{bad:?}");
         }
         assert!(by_handle(&db, "nobody").unwrap().is_none());
-    }
-
-    #[test]
-    fn pins_hold_only_public_repositories_and_only_for_viewers_who_may_see_them() {
-        let db = db("profiles-pins");
-        let (owner, ns) = person(&db, "eve", "eve@example.com");
-        let (stranger, stranger_ns) = person(&db, "mal", "mal@example.com");
-        let open = repo(&db, &ns, "open", true);
-        let shut = repo(&db, &ns, "shut", false);
-
-        // Refused at the write, so the person sees the rule.
-        let err = set_pins(&db, &ns, std::slice::from_ref(&shut.id)).unwrap_err();
-        assert!(err.contains("private"), "{err}");
-        assert!(set_pins(&db, &ns, &["01zzzzzzzzzzzzzzzzzzzzzzzz".into()]).is_err());
-        assert!(set_pins(&db, &ns, &[open.id.clone(), open.id.clone()]).is_err());
-        assert!(set_pins(&db, &ns, &vec![open.id.clone(); MAX_PINS + 1]).is_err());
-        assert!(pins(&db, &ns, &Viewer::Anonymous).unwrap().is_empty());
-
-        set_pins(&db, &ns, std::slice::from_ref(&open.id)).unwrap();
-        let seen = pins(&db, &ns, &Viewer::Anonymous).unwrap();
-        assert_eq!(seen.len(), 1);
-        assert_eq!(seen[0].name, "open");
-        assert_eq!(seen[0].org, "eve");
-        assert!(seen[0].public);
-
-        // The half that survives time: a repository pinned while public
-        // and made private afterwards disappears from the list for
-        // everybody who may not see it — including its owner's own
-        // profile as a stranger reads it.
-        registry::update_repo_meta(&db, &ns, &open.id, None, Some(false), None).unwrap();
-        assert!(pins(&db, &ns, &Viewer::Anonymous).unwrap().is_empty());
-        assert!(pins(&db, &ns, &Viewer::User(&stranger)).unwrap().is_empty());
-        // Its owner still sees it: they are a member of their own
-        // namespace, which is the same predicate search uses.
-        assert_eq!(pins(&db, &ns, &Viewer::User(&owner)).unwrap().len(), 1);
-
-        // A service token bound to one namespace is that namespace and
-        // nothing else. It is the third viewer the visibility predicate
-        // has to answer for, and the one nobody holds a session for: CI
-        // reading a profile with an org token must see exactly what a
-        // member of *that* org sees, and a token minted somewhere else
-        // must see what a stranger sees.
-        assert_eq!(pins(&db, &ns, &Viewer::Org(&ns)).unwrap().len(), 1);
-        assert!(pins(&db, &ns, &Viewer::Org(&stranger_ns))
-            .unwrap()
-            .is_empty());
-
-        // And a deleted repository is gone from every list.
-        registry::update_repo_meta(&db, &ns, &open.id, None, Some(true), None).unwrap();
-        assert_eq!(pins(&db, &ns, &Viewer::Anonymous).unwrap().len(), 1);
-        registry::delete_repo(&db, &ns, &open.id).unwrap();
-        assert!(pins(&db, &ns, &Viewer::Anonymous).unwrap().is_empty());
-        assert!(pins(&db, &ns, &Viewer::User(&owner)).unwrap().is_empty());
-    }
-
-    /// The published count moves with public repositories and with
-    /// nothing else — so it cannot be watched to learn that a private
-    /// one was created.
-    #[test]
-    fn the_public_repo_count_never_moves_for_a_private_repository() {
-        let db = db("profiles-count");
-        let (_, ns) = person(&db, "fi", "fi@example.com");
-        assert_eq!(public_repo_count(&db, &ns).unwrap(), 0);
-        let secret = repo(&db, &ns, "secret", false);
-        assert_eq!(public_repo_count(&db, &ns).unwrap(), 0);
-        let open = repo(&db, &ns, "open", true);
-        assert_eq!(public_repo_count(&db, &ns).unwrap(), 1);
-        registry::delete_repo(&db, &ns, &open.id).unwrap();
-        assert_eq!(public_repo_count(&db, &ns).unwrap(), 0);
-        registry::update_repo_meta(&db, &ns, &secret.id, None, Some(true), None).unwrap();
-        assert_eq!(public_repo_count(&db, &ns).unwrap(), 1);
     }
 
     /// The rule the contribution graph rests on: a claimed address is
@@ -1572,13 +1345,12 @@ mod tests {
     fn proving_an_address_sends_the_walker_back_over_the_past() {
         let db = db("profiles-verify-rewalk");
         let (user, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
 
         // A walk has already happened and left a frontier behind.
         crate::contribs::apply(
             &db,
             &r.id,
-            true,
             &[],
             &[crate::contribs::Advance {
                 reference: "refs/heads/main".into(),

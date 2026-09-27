@@ -78,15 +78,9 @@ pub async fn pack(
         Err(e) if stratum_engine::errclass::is_absent(&e) => return authx::not_found(),
         Err(e) => return internal(e),
     };
-    // Packs are immutable (named by tip + content hash), so a public repo's
-    // pack is cacheable at the edge for as long as the edge likes. A
-    // private repo's must never be served from a shared cache — the token
-    // is what authorizes it, and tokens expire.
-    let cache = if repo.public {
-        "public, max-age=31536000, immutable".to_string()
-    } else {
-        "private, no-store".to_string()
-    };
+    // Never served from a shared cache: the signature is what authorizes
+    // it, and signatures expire.
+    let cache = "private, no-store".to_string();
     (
         StatusCode::OK,
         [

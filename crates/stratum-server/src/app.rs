@@ -55,19 +55,6 @@ pub struct AppState {
     /// rather than offering a dead link.
     pub github_install_url: Option<String>,
     pub data_dir: std::path::PathBuf,
-    /// Built marketing/docs site (Astro dist) served at `/`; None = API-only.
-    pub site_dir: Option<std::path::PathBuf>,
-    /// The registered domain customer sites are served under, e.g.
-    /// `weft.so`. `None` switches static site hosting off entirely and
-    /// every request is answered by the ordinary router, exactly as
-    /// before the feature existed.
-    ///
-    /// Deliberately a *different registered domain* to `public_url`,
-    /// never a subdomain of it. Customer pages must not be able to set a
-    /// cookie the dashboard will receive, and the dispatch predicate
-    /// must be a suffix match on something the product never answers on.
-    /// `from_env` refuses to boot if the two overlap.
-    pub sites_domain: Option<String>,
     /// Built dashboard SPA (Vite dist) served at `/dashboard/`.
     pub dashboard_dir: Option<std::path::PathBuf>,
     /// SSH front door bind (None = SSH off).
@@ -155,8 +142,8 @@ pub fn router(state: SharedState) -> Router {
             "/v1/orgs/:org/repos/:repo/forks",
             post(crate::api::repos::fork).get(crate::api::repos::list_forks),
         )
-        // Finding a repo you were never sent a link to. Anonymous
-        // callers are welcome; they see public repositories.
+        // Finding a repo you were never sent a link to, across the
+        // namespaces the caller belongs to. Signed in only.
         .route("/v1/search/repos", get(crate::api::search::repos))
         // The topics people are actually using, for the discovery page's
         // chips — which were a fixed list of common words until now, and
@@ -171,32 +158,6 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/users/:handle",
             get(crate::api::profiles_api::get).patch(crate::api::profiles_api::patch),
-        )
-        // The graph, and the two public acts a profile page carries.
-        // All four are anonymous reads for the same reason the profile
-        // itself is: this is the page a logged-out visitor arrives at,
-        // and it is the argument for moving here.
-        .route(
-            "/v1/users/:handle/contributions",
-            get(crate::api::contribs_api::get),
-        )
-        .route(
-            "/v1/users/:handle/follow",
-            get(crate::api::follows_api::get)
-                .put(crate::api::follows_api::put)
-                .delete(crate::api::follows_api::delete),
-        )
-        .route(
-            "/v1/users/:handle/followers",
-            get(crate::api::follows_api::followers),
-        )
-        .route(
-            "/v1/users/:handle/following",
-            get(crate::api::follows_api::following),
-        )
-        .route(
-            "/v1/users/:handle/pins",
-            get(crate::api::profiles_api::get_pins).put(crate::api::profiles_api::put_pins),
         )
         .route(
             "/v1/users/:handle/emails",
@@ -602,14 +563,6 @@ pub fn router(state: SharedState) -> Router {
             "/v1/orgs/:org/repos/:repo/watch",
             get(crate::api::watch_api::get).put(crate::api::watch_api::put),
         )
-        // Reading is open to anyone who may read the repository — a
-        // stranger included, for a public one. Writing needs a person.
-        .route(
-            "/v1/orgs/:org/repos/:repo/star",
-            get(crate::api::stars_api::get)
-                .put(crate::api::stars_api::put)
-                .delete(crate::api::stars_api::delete),
-        )
         .route(
             "/v1/orgs/:org/repos/:repo/meta",
             get(crate::api::repo_meta::get),
@@ -724,10 +677,6 @@ pub fn router(state: SharedState) -> Router {
         .route(
             "/v1/orgs/:org/repos/:repo/topics",
             put(crate::api::repo_meta::put_topics),
-        )
-        .route(
-            "/v1/orgs/:org/repos/:repo/site",
-            get(crate::api::sites_api::get),
         )
         .route(
             "/v1/orgs/:org/repos/:repo/protections",
@@ -851,10 +800,6 @@ pub fn router(state: SharedState) -> Router {
             "/v1/orgs/:org/repos/:repo/ci/poll",
             post(crate::api::checks_intake::poll_now).get(crate::api::checks_intake::poll_status),
         )
-        .route(
-            "/v1/orgs/:org/repos/:repo/badge.svg",
-            get(crate::api::badges::badge),
-        )
         .route("/metrics", get(prometheus))
         // git smart HTTP
         .route("/:org/:repo/info/refs", get(info_refs))
@@ -873,25 +818,15 @@ pub fn router(state: SharedState) -> Router {
             "/:org/changesets/:key/git-receive-pack",
             post(changeset_receive_pack),
         )
-        // web assets: spec compiled in, site + dashboard from disk
+        // web assets: spec compiled in, dashboard from disk
         .route("/openapi.json", get(crate::webassets::openapi))
         .route("/dashboard", get(crate::webassets::dashboard))
         // axum wildcards need ≥1 char, so the bare trailing-slash form
         // is its own route.
         .route("/dashboard/", get(crate::webassets::dashboard))
         .route("/dashboard/*path", get(crate::webassets::dashboard))
-        .fallback(get(crate::webassets::site))
+        .fallback(get(crate::webassets::fallback))
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT))
-        // In front of everything, including the fallback above, and that
-        // is the point: the fallback serves the marketing site and then
-        // the dashboard SPA, so a customer-site request that reached
-        // routing would be answered with our product's UI under their
-        // domain. With no `STRATUM_SITES_DOMAIN` this is one comparison
-        // and every request passes straight through.
-        .layer(axum::middleware::from_fn_with_state(
-            state.clone(),
-            crate::site::serve::layer,
-        ))
         .with_state(state)
 }
 
@@ -1033,11 +968,10 @@ fn resolve_repo(
 ///
 /// Two routes are like that. The signed CDN pack URL, where the
 /// signature in the query string *is* the authorization and a browser
-/// following the link sends nothing else; and the anonymous branch of
-/// the git wire, which answers 401 to everything it is handed and so
-/// never looks at this refusal. A 401 in the first case would ask for
-/// credentials the client has no way to supply. Every REST route wants
-/// [`repo_or_masked`] instead.
+/// following the link sends nothing else; and the signed CI intake,
+/// whose body signature is the credential. A 401 there would ask for
+/// credentials the client has no way to supply. Every other REST route
+/// wants [`repo_or_masked`] instead.
 pub fn repo_or_404(
     state: &AppState,
     org_name: &str,
@@ -1069,26 +1003,18 @@ pub fn repo_or_masked(
     resolve_repo(state, org_name, repo_name)?.ok_or_else(|| authx::masked(&state.db, headers))
 }
 
-/// Resolve + authorize one REST repo request. Public repos allow
-/// anonymous reads; everything else needs a token scoped to the repo.
+/// Resolve + authorize one REST repo request: a token scoped to the
+/// repo, or a browser session whose person holds the scope on it.
 ///
-/// **Who reads a public repository.** Anyone — the docs promise "reads
-/// with any valid credential", and the git wire has always kept it. This
-/// seam did not: a *signed-in* person with no role in the org came back
-/// as `None`, indistinguishable from nobody, and a personal token minted
-/// in another namespace was masked outright. The cost was borne by the
-/// one person the fork path exists for — the outside contributor. Their
-/// change was recorded with no author (so no association badge, no
-/// "opened" notification), the conversation told them to sign in when
-/// they already had, and ticking a file they had read answered "viewed
-/// state belongs to a person, not a service token". Each surface had
-/// the same bug because each read identity off this principal.
+/// A token wins if one is presented; otherwise the browser session is
+/// used. Order matters: a developer with a dashboard session open in the
+/// same browser must still be able to test a token by pasting it into a
+/// request, and get that token's authority, not their own.
 ///
-/// So a person reading a public repository is a principal here: their
-/// own id, `repo:read` and nothing more — no `org:read`, so nothing that
-/// lists the org mistakes them for a member, and `allows` still refuses
-/// every write. A service token from another organisation reads too,
-/// but as nobody: it has no person to be, and anonymous is what it is.
+/// Anonymous is 401 — there is nothing here anybody may read without
+/// signing in — and a caller with no role on this repository gets the
+/// masked 404 a missing one gets, so a status code is never an
+/// existence oracle.
 pub fn rest_repo_auth(
     state: &AppState,
     headers: &HeaderMap,
@@ -1097,14 +1023,6 @@ pub fn rest_repo_auth(
     need: Scope,
 ) -> Result<(Org, Repo, Option<stratum_control::auth::Principal>), Response> {
     let (org, repo) = repo_or_masked(state, headers, org_name, repo_name)?;
-    let public_read = repo.public && need == Scope::RepoRead;
-    let reader = |user_id: &str| {
-        stratum_control::auth::Principal::for_user(&org.id, user_id, vec![Scope::RepoRead])
-    };
-    // A token wins if one is presented; otherwise fall back to a browser
-    // session. Order matters: a developer with a dashboard session open
-    // in the same browser must still be able to test a token by pasting
-    // it into a request, and get that token's authority, not their own.
     let principal = match authx::principal_opt(&state.db, headers, authx::Challenge::None)? {
         // A personal token carries the person, so its authority on *this*
         // repo is their effective role here, not the org-wide one it was
@@ -1117,38 +1035,24 @@ pub fn rest_repo_auth(
             } else {
                 None
             };
-            match here {
-                Some(p) => Some(p),
-                // No role here, or their membership ended between
-                // authenticating and reaching this repo — an SSH
-                // connection authenticates once and can serve much later.
-                // On a public read a person is still themselves; a
-                // repo-bound token was minted to reach one repository and
-                // this is not it. Everything else fails closed and masked.
-                None if public_read && p.repo_id.is_none() => p.user_id.as_deref().map(reader),
-                None => return Err(authx::not_found()),
-            }
+            // No role here, or their membership ended between
+            // authenticating and reaching this repo — an SSH connection
+            // authenticates once and can serve much later. Fails closed
+            // and masked.
+            here.ok_or_else(authx::not_found)?
         }
         None => match authx::session_principal(&state.db, headers, &org.id, Some(&repo.id))? {
-            authx::SessionAuth::Principal(p) => Some(p),
+            authx::SessionAuth::Principal(p) => p,
             // Signed in but not a member here: masked, exactly like a
-            // foreign token — unless the repo is public, which anyone
-            // may read, and this person does so as themselves.
-            authx::SessionAuth::NoAccess(user_id) if public_read => Some(reader(&user_id)),
+            // foreign token.
             authx::SessionAuth::NoAccess(_) => return Err(authx::not_found()),
-            authx::SessionAuth::None => None,
+            authx::SessionAuth::None => return Err(authx::unauthorized(authx::Challenge::None)),
         },
     };
-    match (&principal, public_read) {
-        (Some(p), _) => {
-            if p.org_id != org.id || !p.allows(need, Some(&repo.id)) {
-                return Err(authx::not_found());
-            }
-        }
-        (None, true) => {}
-        (None, false) => return Err(authx::unauthorized(authx::Challenge::None)),
+    if principal.org_id != org.id || !principal.allows(need, Some(&repo.id)) {
+        return Err(authx::not_found());
     }
-    Ok((org, repo, principal))
+    Ok((org, repo, Some(principal)))
 }
 
 /// Why a wire request from an AUTHENTICATED principal is denied —
@@ -1159,11 +1063,10 @@ pub(crate) enum WireDeny {
     /// distinguish "exists elsewhere" from "does not exist".
     NotFound,
     /// May read, may not push. The repository's existence is no secret
-    /// from this caller — it is public, or they hold read on it — so the
-    /// refusal can say what would work instead. Before forks shipped
-    /// this was `NotFound` too, and the first thing a would-be
-    /// contributor met was "repository not found" for a repository they
-    /// had just cloned.
+    /// from this caller — they hold read on it — so the refusal can say
+    /// what would work instead. Before forks shipped this was `NotFound`
+    /// too, and the first thing a would-be contributor met was
+    /// "repository not found" for a repository they had just cloned.
     ReadOnly(String),
     Internal(String),
 }
@@ -1180,14 +1083,6 @@ pub(crate) fn read_only_msg(org: &str, repo: &str) -> String {
 /// Resolve + authorize one wire request for a verified principal. The
 /// core both front doors share: org/repo lookup, org membership, scope
 /// check, existence masking.
-///
-/// A public repository is readable by *any* verified principal, not only
-/// one that belongs to its organization — the same rule the REST seam
-/// and the anonymous wire path already apply. A maintainer fetching a
-/// contributor's fork over SSH, or a forker fetching upstream with the
-/// token they use for everything else, is the ordinary shape of a fork
-/// workflow, and answering them "repository not found" for a repository
-/// an anonymous clone would be served protects nothing.
 pub(crate) fn wire_repo_for_principal(
     state: &AppState,
     p: &stratum_control::auth::Principal,
@@ -1205,9 +1100,6 @@ pub(crate) fn wire_repo_for_principal(
         store_url: state.store_url.clone(),
         prefix: repo.prefix().as_str().to_string(),
     };
-    if repo.public && need == Scope::RepoRead {
-        return Ok((repo, ctx));
-    }
     // Same refinement the REST seam applies: an SSH key or personal token
     // authenticated before the repo was known, and a per-repo grant is
     // exactly the case where the org role is the wrong answer. A
@@ -1227,46 +1119,13 @@ pub(crate) fn wire_repo_for_principal(
     }
     // A push from somebody who may read: the existence of the repository
     // is already theirs to know, so the refusal says what to do instead.
-    if need == Scope::RepoWrite && (repo.public || allows(Scope::RepoRead)) {
+    if need == Scope::RepoWrite && allows(Scope::RepoRead) {
         return Err(WireDeny::ReadOnly(read_only_msg(
             org_name,
             repo.name.as_str(),
         )));
     }
     Err(WireDeny::NotFound)
-}
-
-/// The same decision for an identity that authenticated but holds no
-/// role in the organization — an SSH key registered under another
-/// namespace, say. It can read what anyone can read, is told on a push
-/// to a public repository that it is a reader, and learns nothing else.
-pub(crate) fn wire_repo_for_outsider(
-    state: &AppState,
-    org_name: &str,
-    repo_name: &str,
-    need: Scope,
-) -> Result<(Repo, RepoCtx), WireDeny> {
-    let org = registry::org_by_name(&state.db, org_name)
-        .map_err(WireDeny::Internal)?
-        .ok_or(WireDeny::NotFound)?;
-    let repo = registry::repo_by_name(&state.db, &org.id, repo_name.trim_end_matches(".git"))
-        .map_err(WireDeny::Internal)?
-        .ok_or(WireDeny::NotFound)?;
-    if !repo.public {
-        return Err(WireDeny::NotFound);
-    }
-    let ctx = RepoCtx {
-        store_url: state.store_url.clone(),
-        prefix: repo.prefix().as_str().to_string(),
-    };
-    match need {
-        Scope::RepoRead => Ok((repo, ctx)),
-        Scope::RepoWrite => Err(WireDeny::ReadOnly(read_only_msg(
-            org_name,
-            repo.name.as_str(),
-        ))),
-        _ => Err(WireDeny::NotFound),
-    }
 }
 
 /// Which door of the smart-HTTP protocol a request came through. The
@@ -1291,13 +1150,12 @@ fn render_deny(d: WireDeny, door: Door) -> Response {
     }
 }
 
-/// Resolve + authorize one git-wire request. Read of a public repo is
-/// open to anyone, credentialed or not; everything else needs a token
-/// with the scope on that repo. Without credentials the answer is 401
-/// (so git retries with creds); with valid credentials but no read
-/// access it is 404 (existence masking, R8); a push by somebody who may
-/// read is refused with the read-only sentence, on whichever `door` the
-/// client is knocking at.
+/// Resolve + authorize one git-wire request: a token with the scope on
+/// that repo. Without credentials the answer is 401 (so git retries with
+/// creds); with valid credentials but no read access it is 404
+/// (existence masking, R8); a push by somebody who may read is refused
+/// with the read-only sentence, on whichever `door` the client is
+/// knocking at.
 fn wire_auth(
     state: &AppState,
     headers: &HeaderMap,
@@ -1316,18 +1174,10 @@ fn wire_auth(
                 .map_err(|d| render_deny(d, door))?;
             Ok((repo, ctx, Some(p)))
         }
-        None => {
-            let (_, repo) = repo_or_404(state, org_name, repo_name)
-                .map_err(|_| authx::unauthorized(authx::Challenge::Basic))?;
-            if !(repo.public && need == Scope::RepoRead) {
-                return Err(authx::unauthorized(authx::Challenge::Basic));
-            }
-            let ctx = RepoCtx {
-                store_url: state.store_url.clone(),
-                prefix: repo.prefix().as_str().to_string(),
-            };
-            Ok((repo, ctx, None))
-        }
+        // Nothing is readable without credentials, so there is nothing
+        // to look up: every anonymous request is asked for them, the same
+        // answer for a repository that exists and one that does not.
+        None => Err(authx::unauthorized(authx::Challenge::Basic)),
     }
 }
 
@@ -1748,7 +1598,6 @@ pub fn state_from_env() -> Result<SharedState, String> {
     );
     let meter = crate::metering::spawn_writer(db.clone());
     let cdn = cdn_config_from_env()?;
-    let sites_domain = sites_domain_from_env(&public_url)?;
     let ssh_bind = std::env::var("STRATUM_SSH_BIND")
         .ok()
         .filter(|s| !s.is_empty());
@@ -1788,10 +1637,6 @@ pub fn state_from_env() -> Result<SharedState, String> {
         mailer: crate::mail::from_env()?,
         github_install_url: std::env::var("STRATUM_GITHUB_INSTALL_URL").ok(),
         data_dir,
-        site_dir: std::env::var("STRATUM_SITE_DIR")
-            .ok()
-            .map(std::path::PathBuf::from),
-        sites_domain,
         dashboard_dir: std::env::var("STRATUM_DASHBOARD_DIR")
             .ok()
             .map(std::path::PathBuf::from),
@@ -1844,75 +1689,6 @@ fn env_i64(key: &str) -> Option<i64> {
 /// half-configured is a boot error rather than a silent fallback to
 /// unsigned URLs: for a private repo an unsigned URL would be an open
 /// door, and the failure must be loud at deploy time, not at clone time.
-/// The domain customer sites are served under, from
-/// `STRATUM_SITES_DOMAIN`, checked hard enough that a typo is a boot
-/// failure rather than an outage.
-///
-/// Three refusals, and each is a real way to take the product down:
-///
-/// * **An implausible domain.** A value of `sh` would make the dispatch
-///   layer's suffix match claim `weft.sh` — every dashboard, API and git
-///   request — as a customer's site.
-/// * **The product's own host.** Serving sites on it would defeat the
-///   cookie isolation the separate domain exists for.
-/// * **A parent of the product's host.** `STRATUM_SITES_DOMAIN=weft.sh`
-///   with the dashboard on `app.weft.sh` would swallow the dashboard.
-///
-/// The opposite direction — a sites domain *under* the product's host,
-/// like `pages.weft.sh` — is not refused here, because it is a
-/// deliberate choice a self-hosted deployment may make with one domain
-/// to its name. It is not what we deploy, and the reason is written down
-/// beside [`AppState::sites_domain`].
-fn sites_domain_from_env(public_url: &str) -> Result<Option<String>, String> {
-    let Some(raw) = std::env::var("STRATUM_SITES_DOMAIN")
-        .ok()
-        .map(|s| s.trim().trim_end_matches('.').to_ascii_lowercase())
-        .filter(|s| !s.is_empty())
-    else {
-        return Ok(None);
-    };
-    check_sites_domain(&raw, public_url).map(Some)
-}
-
-/// The decision behind [`sites_domain_from_env`], split from the read so
-/// that the two refusals can be tested at all.
-///
-/// Reaching them through the environment would mean mutating a process-
-/// wide variable from a test that runs beside others, which is the kind
-/// of shared state that makes a suite order-dependent. The rules are
-/// what matter and they are a pure function of two strings.
-fn check_sites_domain(raw: &str, public_url: &str) -> Result<String, String> {
-    let raw = raw.to_string();
-    if !crate::site::dispatch::is_plausible_domain(&raw) {
-        return Err(format!(
-            "STRATUM_SITES_DOMAIN {raw:?} is not a domain we can safely match on — \
-             it needs at least one dot and a real name (e.g. `weft.so`); a bare \
-             suffix would claim the product's own hostnames as customer sites"
-        ));
-    }
-    let product = public_url
-        .split("://")
-        .nth(1)
-        .unwrap_or(public_url)
-        .split('/')
-        .next()
-        .unwrap_or("")
-        .split(':')
-        .next()
-        .unwrap_or("")
-        .trim_end_matches('.')
-        .to_ascii_lowercase();
-    if !product.is_empty() && (product == raw || product.ends_with(&format!(".{raw}"))) {
-        return Err(format!(
-            "STRATUM_SITES_DOMAIN {raw:?} would swallow the product's own host \
-             {product:?} — customer sites must be served from a different \
-             registered domain, so their pages cannot set a cookie the dashboard \
-             receives"
-        ));
-    }
-    Ok(raw)
-}
-
 fn cdn_config_from_env() -> Result<Option<crate::cdn::CdnConfig>, String> {
     if std::env::var("STRATUM_CDN_ENABLED")
         .map(|v| v == "0")
@@ -1994,67 +1770,4 @@ pub fn open_db_from_env() -> Result<ControlDb, String> {
     let url = std::env::var("STRATUM_DB_URL")
         .map_err(|_| "STRATUM_DB_URL (postgres://user@host:port/db) is required".to_string())?;
     ControlDb::open(&url)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// The sites domain is checked at boot rather than trusted, because
-    /// both ways of getting it wrong take the product down rather than
-    /// the feature.
-    #[test]
-    fn a_sites_domain_that_could_swallow_the_product_is_a_boot_failure() {
-        // A bare suffix. `weft.sh` ends with `.sh`, so a suffix match
-        // against `sh` would claim every dashboard, API and git request
-        // as somebody's static site.
-        let e = check_sites_domain("sh", "https://weft.sh").expect_err("must refuse");
-        assert!(e.contains("not a domain we can safely match on"), "{e}");
-
-        // The product's own host, exactly.
-        let e = check_sites_domain("weft.sh", "https://weft.sh").expect_err("must refuse");
-        assert!(e.contains("swallow the product's own host"), "{e}");
-
-        // A parent of it: the dashboard on `app.weft.sh` would be served
-        // as the site labelled `app`.
-        let e = check_sites_domain("weft.sh", "https://app.weft.sh").expect_err("must refuse");
-        assert!(e.contains("swallow"), "{e}");
-    }
-
-    #[test]
-    fn a_separate_registered_domain_is_accepted() {
-        for (domain, product) in [
-            ("weft.so", "https://weft.sh"),
-            ("weft.so", "https://weft.sh/"),
-            ("weft.example", "http://127.0.0.1:8080"),
-            // A self-hosted deployment with one domain to its name may
-            // deliberately put sites under it. Not what we deploy, and
-            // not refused.
-            ("pages.weft.sh", "https://weft.sh"),
-        ] {
-            assert_eq!(
-                check_sites_domain(domain, product).as_deref(),
-                Ok(domain),
-                "{domain} against {product}"
-            );
-        }
-    }
-
-    /// The product's host is read out of a URL, so the parsing has to
-    /// survive the shapes `public_url` actually takes.
-    #[test]
-    fn the_products_host_is_found_whatever_shape_its_url_is_in() {
-        for product in [
-            "https://weft.sh",
-            "https://weft.sh/",
-            "https://weft.sh:443",
-            "https://weft.sh/dashboard/",
-            "weft.sh",
-        ] {
-            assert!(
-                check_sites_domain("weft.sh", product).is_err(),
-                "{product} should have been recognised as the product's host"
-            );
-        }
-    }
 }

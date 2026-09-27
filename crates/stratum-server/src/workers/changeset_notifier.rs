@@ -297,8 +297,8 @@ pub async fn run_one(state: &SharedState, job: &jobs::Job) -> Result<usize, Stri
 
 /// May this person read this repository at all?
 ///
-/// A public repository is readable by anybody with an account, and a
-/// private one by whoever holds a role on it — which is
+/// Every repository is private to its organisation, so readable by
+/// whoever holds a role on it — which is
 /// `members::effective_role`, the same answer `rest_repo_auth` reaches
 /// through the principal, rather than a second opinion about access.
 /// Asked per (user, repo) and memoized nowhere, because a changeset has
@@ -309,8 +309,5 @@ fn can_read(
     repo: &registry::Repo,
     user_id: &str,
 ) -> Result<bool, String> {
-    if repo.public {
-        return Ok(true);
-    }
     Ok(members::effective_role(&state.db, org_id, Some(&repo.id), user_id)?.is_some())
 }

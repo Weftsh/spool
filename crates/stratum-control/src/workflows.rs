@@ -445,8 +445,6 @@ pub struct RunnerRoute<'a> {
     /// Whether the runner's group admits every repository, or only the
     /// ones in `runner_group_repos`.
     pub all_repos: bool,
-    /// Whether the group admits **public** repositories at all.
-    pub allow_public: bool,
 }
 
 /// Take the next self-hosted job this runner may run, or `None`.
@@ -462,18 +460,11 @@ pub struct RunnerRoute<'a> {
 /// * **`runner.labels ⊇ job.labels`** — what the file asked for. A
 ///   `TEXT[] @>` against the GIN index, not a scan: a job asking for
 ///   `[self-hosted, gpu]` is invisible to a runner without `gpu`.
-/// * **the group admits the repository** — the runner owner's decision,
-///   including the public one. A public repository can be forked and a
-///   fork's change carries its own `run:` lines, so `allow_public` has
-///   to be true *as well as* the repository being in scope.
+/// * **the group admits the repository** — the runner owner's decision.
 /// * **the organisation's policy admits the repository** — the org
 ///   owner's decision, re-read here and not only at trigger time,
 ///   because a job can sit in the queue across a policy change and the
 ///   answer that matters is the one at the moment it would start.
-///
-/// What is deliberately **not** here: the budget, the suspension and the
-/// concurrency limit. All three are about our fleet's cost, and this
-/// pool has none — see [`budget`].
 ///
 /// `FOR UPDATE OF j` rather than a bare `FOR UPDATE`, because the
 /// subquery joins `repos` and `orgs`: locking those too would make one
@@ -494,7 +485,6 @@ pub fn claim_self_hosted(
                    runner_id = $3, updated_at = $1, started_at = COALESCE(started_at, $1) \
                  WHERE id = ( \
                    SELECT j.id FROM workflow_jobs j \
-                   JOIN repos rp ON rp.id = j.repo_id \
                    JOIN orgs o ON o.id = j.org_id \
                    WHERE j.pool = 'self_hosted' AND j.org_id = $4 \
                      AND (j.state = 'queued' \
@@ -504,10 +494,9 @@ pub fn claim_self_hosted(
                        JOIN workflow_jobs n ON n.id = d.needs_id \
                        WHERE d.job_id = j.id AND n.state <> 'passed') \
                      AND $5::TEXT[] @> j.labels \
-                     AND (NOT rp.public OR $6) \
-                     AND ($7 OR EXISTS ( \
+                     AND ($6 OR EXISTS ( \
                        SELECT 1 FROM runner_group_repos gr \
-                       WHERE gr.group_id = $8 AND gr.repo_id = j.repo_id)) \
+                       WHERE gr.group_id = $7 AND gr.repo_id = j.repo_id)) \
                      AND o.runner_self_hosted <> 'disabled' \
                      AND (o.runner_self_hosted = 'all' OR EXISTS ( \
                        SELECT 1 FROM org_self_hosted_repos s \
@@ -522,7 +511,6 @@ pub fn claim_self_hosted(
                 &runner.runner_id,
                 &runner.org_id,
                 &labels,
-                &runner.allow_public,
                 &runner.all_repos,
                 &runner.group_id,
             ],
@@ -1250,7 +1238,6 @@ mod tests {
                 group_id: "",
                 labels: &labels,
                 all_repos: true,
-                allow_public: true,
             };
             if let Some(job) = claim_self_hosted(db, &route, lease_ms)? {
                 return Ok(Some(job));
@@ -1272,7 +1259,6 @@ mod tests {
                 &NewRepo {
                     name: "app",
                     kind: RepoKind::Native,
-                    public: false,
                     description: None,
                     default_branch: "main",
                     origin_url: None,
@@ -2539,7 +2525,6 @@ mod tests {
                 &NewRepo {
                     name,
                     kind: RepoKind::Native,
-                    public: false,
                     description: None,
                     default_branch: "main",
                     origin_url: None,
@@ -2558,7 +2543,6 @@ mod tests {
             &NewRepo {
                 name: "app",
                 kind: RepoKind::Native,
-                public: false,
                 description: None,
                 default_branch: "main",
                 origin_url: None,

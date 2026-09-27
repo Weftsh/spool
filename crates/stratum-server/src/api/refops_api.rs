@@ -209,22 +209,6 @@ fn land_response(state: &SharedState, repo: &Repo, e: LandError) -> Response {
     }
 }
 
-/// A ref this route moved may be what a site publishes from.
-///
-/// Site publishing rides the push trigger for the commit route and the
-/// two push doors; reset and branch creation armed nothing, so a deploy
-/// that staged its chunks on another branch and then moved the published
-/// branch in one step left the site on the old tree until the next push
-/// (`weftsh/deploy-site` had to make a no-op commit after its reset to
-/// get published at all). Only the publish job is armed here, not CI: a
-/// branch created at an already-built commit is not a new build, and
-/// the fork suite pins that a stranger's branch creation launches
-/// nothing. The job reads the tip when it runs, so one enqueue covers
-/// whatever the ref now points at.
-fn published(state: &SharedState, ctx: &Ctx) {
-    crate::workers::sitepublish::enqueue(state, &ctx.repo.org_id, &ctx.repo_id);
-}
-
 /// A protected branch moves only through the land queue; reset, revert
 /// and delete are exactly the history rewrites protection exists to
 /// stop. Same sentence as the push doors.
@@ -333,7 +317,6 @@ pub async fn create_branch(
                 "repo.branch.create",
                 serde_json::json!({"oid": oid}),
             );
-            published(&state, &ctx);
             (StatusCode::CREATED, Json(serde_json::json!({ "oid": oid }))).into_response()
         }
         Err(e) => land_response(&state, &ctx.repo, e),
@@ -437,7 +420,6 @@ pub async fn reset(
     match out {
         Ok(oid) => {
             audit(&state, &ctx, "repo.reset", serde_json::json!({"to": oid}));
-            published(&state, &ctx);
             Json(serde_json::json!({ "oid": oid })).into_response()
         }
         Err(e) => land_response(&state, &ctx.repo, e),

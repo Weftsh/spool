@@ -98,7 +98,6 @@ pub struct ForkRow {
     pub id: String,
     pub org_id: String,
     pub name: String,
-    pub public: bool,
     pub parent_id: Option<String>,
     pub root_id: Option<String>,
 }
@@ -229,58 +228,6 @@ pub fn info(db: &ControlDb, repo_id: &str) -> Result<Option<ForkInfo>, String> {
     }))
 }
 
-/// Whether this repository's fork **root** is public.
-///
-/// The question `api/repos.rs::patch` has to answer before letting
-/// anybody flip a fork's visibility. It is not a formality for a
-/// zero-copy fork: the fork is literally serving upstream's bytes, so
-/// making one public without this would publish a private repository's
-/// objects without ever having copied them.
-///
-/// A repository that is not a fork answers for itself.
-pub fn root_is_public(db: &ControlDb, repo_id: &str) -> Result<bool, String> {
-    let mut c = db.lock();
-    let row = c
-        .query_opt(
-            "SELECT COALESCE(root.public, self.public) \
-             FROM repos self LEFT JOIN repos root ON root.id = self.fork_root_id \
-             WHERE self.id = $1",
-            &[&repo_id],
-        )
-        .map_err(|e| format!("read fork root visibility: {e}"))?;
-    // No row is not "yes": a repository we cannot find cannot be shown
-    // to have a public root.
-    Ok(row.map(|r| r.get::<_, bool>(0)).unwrap_or(false))
-}
-
-/// May this repository be made public?
-///
-/// The whole visibility rule, in one place, because it is two facts and
-/// splitting them across the API layer is how one of them gets forgotten:
-///
-/// - A repository that is **not** a fork answers for itself. Publishing
-///   a private repository of your own is ordinary, and a rule that
-///   consulted the root here would refuse every such edit — the root of
-///   a non-fork is itself, and itself is currently private.
-/// - A **fork** may only be published if its root is public. Not its
-///   parent: the root. A chain whose middle link became public by some
-///   other path must not become a way to publish the private repository
-///   at the top of it.
-///
-/// For a zero-copy fork this is not a formality. The fork serves
-/// upstream's actual bytes — it never copied them — so publishing one
-/// whose root is private publishes that private repository's objects.
-pub fn may_publish(db: &ControlDb, repo_id: &str) -> Result<bool, String> {
-    let Some(i) = info(db, repo_id)? else {
-        // A repository we cannot find is not one we will publish.
-        return Ok(false);
-    };
-    if !i.is_fork() {
-        return Ok(true);
-    }
-    root_is_public(db, repo_id)
-}
-
 /// The namespace a repository lives in.
 ///
 /// Promotion needs it and cannot derive it: the dependents of a deleted
@@ -331,35 +278,15 @@ pub fn personal_namespace(db: &ControlDb, user_id: &str) -> Result<Option<String
     Ok(row.map(|r| r.get::<_, String>(0)))
 }
 
-/// Public repositories forked directly from this one, and how many there
-/// are — the pair a stranger is allowed to see.
+/// Repositories forked directly from this one, wherever they live.
 ///
-/// **Why not the denormalised `fork_count`.** A fork inherits its
-/// source's visibility, but nothing stops its owner making it private
-/// afterwards. So the stored count and the listable set genuinely
-/// diverge, and reporting the stored total beside a shorter list would
-/// tell every visitor exactly how many private forks exist — a number
-/// nobody asked us to publish. Both halves of the answer come from the
-/// same query for the same reason: a count that can disagree with the
-/// list beside it is a bug with a long fuse.
-///
-/// One indexed read on `repos_fork_parent`.
-pub fn public_forks_of(db: &ControlDb, repo_id: &str) -> Result<Vec<ForkRow>, String> {
-    rows(
-        db,
-        "SELECT id, org_id, name, public, fork_parent_id, fork_root_id FROM repos \
-         WHERE fork_parent_id = $1 AND public AND state = 'active' ORDER BY name",
-        repo_id,
-    )
-}
-
-/// Repositories forked directly from this one, whatever their
-/// visibility. For the promotion and re-pointing jobs, which must see
-/// every dependent — never for a response.
+/// Every dependent, which is what the promotion and re-pointing jobs
+/// need. A response must filter this to the forks its caller may read:
+/// a fork lives in its owner's namespace, and its name is theirs.
 pub fn forks_of(db: &ControlDb, repo_id: &str) -> Result<Vec<ForkRow>, String> {
     rows(
         db,
-        "SELECT id, org_id, name, public, fork_parent_id, fork_root_id FROM repos \
+        "SELECT id, org_id, name, fork_parent_id, fork_root_id FROM repos \
          WHERE fork_parent_id = $1 AND state = 'active' ORDER BY name",
         repo_id,
     )
@@ -371,7 +298,7 @@ pub fn forks_of(db: &ControlDb, repo_id: &str) -> Result<Vec<ForkRow>, String> {
 pub fn network_of(db: &ControlDb, root_id: &str) -> Result<Vec<ForkRow>, String> {
     rows(
         db,
-        "SELECT id, org_id, name, public, fork_parent_id, fork_root_id FROM repos \
+        "SELECT id, org_id, name, fork_parent_id, fork_root_id FROM repos \
          WHERE (fork_root_id = $1 OR id = $1) AND state = 'active' ORDER BY name",
         root_id,
     )
@@ -388,9 +315,8 @@ fn rows(db: &ControlDb, sql: &str, arg: &str) -> Result<Vec<ForkRow>, String> {
             id: r.get(0),
             org_id: r.get(1),
             name: r.get(2),
-            public: r.get(3),
-            parent_id: r.get(4),
-            root_id: r.get(5),
+            parent_id: r.get(3),
+            root_id: r.get(4),
         })
         .collect())
 }
@@ -417,7 +343,7 @@ mod tests {
         (u.id, ns.id)
     }
 
-    fn repo(db: &ControlDb, org_id: &str, name: &str, public: bool) -> registry::Repo {
+    fn repo(db: &ControlDb, org_id: &str, name: &str) -> registry::Repo {
         registry::create_repo(
             db,
             org_id,
@@ -425,7 +351,6 @@ mod tests {
                 description: Some("a repository"),
                 name,
                 kind: RepoKind::Native,
-                public,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -439,7 +364,7 @@ mod tests {
     fn a_new_repository_is_not_a_fork_of_anything() {
         let db = db("forks_plain");
         let (_, org) = person(&db, "ada");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         let i = info(&db, &r.id).unwrap().unwrap();
         assert!(!i.is_fork());
         assert_eq!(i.parent_id, None);
@@ -452,8 +377,8 @@ mod tests {
     fn attaching_links_the_child_and_counts_it_on_the_parent() {
         let db = db("forks_attach");
         let (_, org) = person(&db, "ada");
-        let up = repo(&db, &org, "upstream", true);
-        let fk = repo(&db, &org, "fork", true);
+        let up = repo(&db, &org, "upstream");
+        let fk = repo(&db, &org, "fork");
 
         attach(&db, &fk.id, &up.id).unwrap();
 
@@ -476,8 +401,8 @@ mod tests {
         // justify. Increment-then-link would have exactly that bug.
         let db = db("forks_idempotent");
         let (_, org) = person(&db, "ada");
-        let up = repo(&db, &org, "upstream", true);
-        let fk = repo(&db, &org, "fork", true);
+        let up = repo(&db, &org, "upstream");
+        let fk = repo(&db, &org, "fork");
 
         attach(&db, &fk.id, &up.id).unwrap();
         attach(&db, &fk.id, &up.id).unwrap();
@@ -494,9 +419,9 @@ mod tests {
         // not rare among people trying to land one patch.
         let db = db("forks_chain");
         let (_, org) = person(&db, "ada");
-        let root = repo(&db, &org, "root", true);
-        let mid = repo(&db, &org, "mid", true);
-        let leaf = repo(&db, &org, "leaf", true);
+        let root = repo(&db, &org, "root");
+        let mid = repo(&db, &org, "mid");
+        let leaf = repo(&db, &org, "leaf");
 
         attach(&db, &mid.id, &root.id).unwrap();
         attach(&db, &leaf.id, &mid.id).unwrap();
@@ -527,7 +452,7 @@ mod tests {
     fn a_repository_cannot_fork_itself() {
         let db = db("forks_self");
         let (_, org) = person(&db, "ada");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         assert!(attach(&db, &r.id, &r.id).is_err());
     }
 
@@ -537,7 +462,7 @@ mod tests {
         // inside the transaction would have produced in the log.
         let db = db("forks_missing_parent");
         let (_, org) = person(&db, "ada");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         let err = attach(&db, &r.id, "repo_that_never_existed").unwrap_err();
         assert!(err.contains("to fork"), "{err}");
         assert!(!info(&db, &r.id).unwrap().unwrap().is_fork());
@@ -547,8 +472,8 @@ mod tests {
     fn promotion_cuts_the_link_and_gives_the_count_back() {
         let db = db("forks_detach");
         let (_, org) = person(&db, "ada");
-        let up = repo(&db, &org, "upstream", true);
-        let fk = repo(&db, &org, "fork", true);
+        let up = repo(&db, &org, "upstream");
+        let fk = repo(&db, &org, "fork");
         attach(&db, &fk.id, &up.id).unwrap();
 
         detach(&db, &fk.id).unwrap();
@@ -570,8 +495,8 @@ mod tests {
         // everybody else's work derived from it.
         let db = db("forks_upstream_gone");
         let (_, org) = person(&db, "ada");
-        let up = repo(&db, &org, "upstream", true);
-        let fk = repo(&db, &org, "fork", true);
+        let up = repo(&db, &org, "upstream");
+        let fk = repo(&db, &org, "fork");
         attach(&db, &fk.id, &up.id).unwrap();
 
         registry::purge_repo(&db, &org, &up.id).unwrap();
@@ -583,62 +508,11 @@ mod tests {
     }
 
     #[test]
-    fn a_fork_of_a_private_repository_has_no_public_root() {
-        // The question `api/repos.rs::patch` asks before letting anybody
-        // flip a fork's visibility. It is not a formality for a
-        // zero-copy fork: the fork is serving upstream's actual bytes,
-        // so making one public without this would publish a private
-        // repository's objects without ever copying them.
-        let db = db("forks_visibility");
-        let (_, org) = person(&db, "ada");
-        let private = repo(&db, &org, "secret", false);
-        let open = repo(&db, &org, "open", true);
-        let fk_private = repo(&db, &org, "fork-of-secret", false);
-        let fk_open = repo(&db, &org, "fork-of-open", true);
-
-        attach(&db, &fk_private.id, &private.id).unwrap();
-        attach(&db, &fk_open.id, &open.id).unwrap();
-
-        assert!(!root_is_public(&db, &fk_private.id).unwrap());
-        assert!(root_is_public(&db, &fk_open.id).unwrap());
-
-        // A repository that is not a fork answers for itself.
-        assert!(root_is_public(&db, &open.id).unwrap());
-        assert!(!root_is_public(&db, &private.id).unwrap());
-
-        // A repository nobody can find is not a public root.
-        assert!(!root_is_public(&db, "no_such_repo").unwrap());
-    }
-
-    #[test]
-    fn a_deep_fork_inherits_the_roots_visibility_not_its_parents() {
-        // The hole a per-parent check would leave: fork a private repo
-        // (fork is private), then fork *that* fork. Its parent is the
-        // private fork, but the answer that matters is the root's — and
-        // if the middle repository ever became public by any other path,
-        // a parent-only check would let the leaf go public too.
-        let db = db("forks_deep_visibility");
-        let (_, org) = person(&db, "ada");
-        let private = repo(&db, &org, "secret", false);
-        let mid = repo(&db, &org, "mid", false);
-        let leaf = repo(&db, &org, "leaf", false);
-
-        attach(&db, &mid.id, &private.id).unwrap();
-        attach(&db, &leaf.id, &mid.id).unwrap();
-
-        assert_eq!(
-            info(&db, &leaf.id).unwrap().unwrap().root_id.as_deref(),
-            Some(private.id.as_str())
-        );
-        assert!(!root_is_public(&db, &leaf.id).unwrap());
-    }
-
-    #[test]
     fn fork_state_moves_and_unknown_state_is_refused() {
         let db = db("forks_state");
         let (_, org) = person(&db, "ada");
-        let up = repo(&db, &org, "upstream", true);
-        let fk = repo(&db, &org, "fork", true);
+        let up = repo(&db, &org, "upstream");
+        let fk = repo(&db, &org, "fork");
         attach(&db, &fk.id, &up.id).unwrap();
 
         assert_eq!(
@@ -660,37 +534,6 @@ mod tests {
         // serving a repository whose storage may not be there.
         assert!(State::parse("nearly").is_err());
         assert_eq!(State::parse("ready").unwrap(), State::Ready);
-    }
-
-    #[test]
-    fn publishing_is_the_owners_business_unless_it_is_a_fork() {
-        // Both halves, because the dangerous mistake is symmetric: a
-        // rule that consults the root unconditionally refuses every
-        // ordinary "make my private repo public", and a rule that never
-        // consults it publishes somebody else's private bytes.
-        let db = db("forks_may_publish");
-        let (_, org) = person(&db, "ada");
-        let private = repo(&db, &org, "secret", false);
-        let open = repo(&db, &org, "open", true);
-
-        // Not forks: their own business, whatever they are now.
-        assert!(may_publish(&db, &private.id).unwrap());
-        assert!(may_publish(&db, &open.id).unwrap());
-
-        let fk_private = repo(&db, &org, "fork-of-secret", false);
-        let fk_open = repo(&db, &org, "fork-of-open", false);
-        attach(&db, &fk_private.id, &private.id).unwrap();
-        attach(&db, &fk_open.id, &open.id).unwrap();
-
-        assert!(!may_publish(&db, &fk_private.id).unwrap());
-        assert!(may_publish(&db, &fk_open.id).unwrap());
-
-        // Promotion makes it the fork's own business again — but only
-        // because promotion means it now stands on its own storage.
-        detach(&db, &fk_private.id).unwrap();
-        assert!(may_publish(&db, &fk_private.id).unwrap());
-
-        assert!(!may_publish(&db, "no_such_repo").unwrap());
     }
 
     #[test]

@@ -1308,7 +1308,6 @@ mod tests {
             &NewRepo {
                 name,
                 kind: RepoKind::Native,
-                public: false,
                 description: None,
                 default_branch: "main",
                 origin_url: None,

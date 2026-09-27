@@ -316,18 +316,6 @@ fn record_outcome(
                 if let Err(e) = jobs::enqueue_unique(db, &repo.org_id, &repo.id, "cdnpack", None) {
                     eprintln!("weft: cdnpack enqueue after sync: {e}");
                 }
-                // And the site, for the same reason and with the
-                // same history behind it: a mirrored repository
-                // whose site never updated would be this exact
-                // bug a third time. A push reaches this through
-                // `workflow::trigger::on_push`; a sync has no
-                // state handle to call a handler with, which is
-                // why publishing is a queued job at all.
-                if let Err(e) =
-                    jobs::enqueue_unique(db, &repo.org_id, &repo.id, "sitepublish", None)
-                {
-                    eprintln!("weft: sitepublish enqueue after sync: {e}");
-                }
                 // A sync appends a WAL entry exactly as a push
                 // does, and only a push ever asked for the fold.
                 // The first real mirror on weft.sh reached 102

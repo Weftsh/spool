@@ -541,7 +541,7 @@ pub async fn run_one(state: &SharedState, job: &jobs::Job) -> Result<Outcome, St
         })
         .collect();
     let counted = counts.iter().map(|c| c.count).sum();
-    let applied = contribs::apply(&state.db, &repo.id, repo.public, &counts, &advances)?;
+    let applied = contribs::apply(&state.db, &repo.id, &counts, &advances)?;
     Ok(Outcome {
         visited: visits,
         counted,

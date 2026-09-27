@@ -187,7 +187,6 @@ pub struct Group {
     pub name: String,
     /// `all` | `selected`.
     pub repo_access: String,
-    pub allow_public: bool,
     pub is_default: bool,
     /// Repository names, sorted. Empty under `all`.
     pub repos: Vec<String>,
@@ -251,7 +250,7 @@ pub struct RunnerView {
     pub job: Option<RunningJob>,
 }
 
-const GROUP_COLS: &str = "id, org_id, name, repo_access, allow_public, is_default, \
+const GROUP_COLS: &str = "id, org_id, name, repo_access, is_default, \
                           created_at, updated_at";
 
 const RUNNER_COLS: &str = "r.id, r.org_id, r.group_id, r.name, r.labels, r.os, r.arch, \
@@ -296,8 +295,8 @@ pub fn ensure_default_group(db: &ControlDb, org_id: &str) -> Result<String, Erro
     let mut conn = db.lock();
     conn.execute(
         "INSERT INTO runner_groups \
-           (id, org_id, name, repo_access, allow_public, is_default, created_at, updated_at) \
-         VALUES ($1, $2, $3, 'all', FALSE, TRUE, $4, $4) ON CONFLICT DO NOTHING",
+           (id, org_id, name, repo_access, is_default, created_at, updated_at) \
+         VALUES ($1, $2, $3, 'all', TRUE, $4, $4) ON CONFLICT DO NOTHING",
         &[&id, &org_id, &DEFAULT_GROUP, &now],
     )
     .map_err(db_err("create default runner group"))?;
@@ -356,7 +355,6 @@ fn row_to_group(r: &postgres::Row) -> Group {
         org_id: r.get("org_id"),
         name: r.get("name"),
         repo_access: r.get("repo_access"),
-        allow_public: r.get("allow_public"),
         is_default: r.get("is_default"),
         repos: Vec::new(),
         runners: 0,
@@ -442,7 +440,6 @@ pub fn create_group(
     org_id: &str,
     name: &str,
     repo_access: Option<&str>,
-    allow_public: Option<bool>,
     repos: Option<&[String]>,
     actx: &AuditCtx,
 ) -> Result<Group, Error> {
@@ -454,7 +451,6 @@ pub fn create_group(
     }
     let access = repo_access.unwrap_or("all");
     check_repo_access(access)?;
-    let public = allow_public.unwrap_or(false);
     let id = ulid();
     let now = now_ms();
     let names = repos.unwrap_or(&[]).to_vec();
@@ -479,9 +475,9 @@ pub fn create_group(
     conn.transaction(move |tx| {
         tx.execute(
             "INSERT INTO runner_groups \
-               (id, org_id, name, repo_access, allow_public, is_default, created_at, updated_at) \
-             VALUES ($1,$2,$3,$4,$5,FALSE,$6,$6)",
-            &[&gid, &org, &group_name, &access, &public, &now],
+               (id, org_id, name, repo_access, is_default, created_at, updated_at) \
+             VALUES ($1,$2,$3,$4,FALSE,$5,$5)",
+            &[&gid, &org, &group_name, &access, &now],
         )?;
         for rid in &repo_ids {
             tx.execute(
@@ -497,7 +493,7 @@ pub fn create_group(
             "runner_group.created",
             Some(&serde_json::json!({
                 "group": group_name, "id": gid,
-                "repo_access": access, "allow_public": public,
+                "repo_access": access,
             })),
         )?;
         Ok(())
@@ -519,7 +515,6 @@ pub fn update_group(
     id: &str,
     name: Option<&str>,
     repo_access: Option<&str>,
-    allow_public: Option<bool>,
     repos: Option<&[String]>,
     actx: &AuditCtx,
 ) -> Result<Option<Group>, Error> {
@@ -542,7 +537,6 @@ pub fn update_group(
     let now = now_ms();
     let new_name = name.unwrap_or(&current.name).to_string();
     let new_access = repo_access.unwrap_or(&current.repo_access).to_string();
-    let new_public = allow_public.unwrap_or(current.allow_public);
     let mut conn = db.lock();
     let repo_ids = match repos {
         Some(names) => Some(repo_ids(&mut conn, org_id, names)?),
@@ -565,13 +559,13 @@ pub fn update_group(
     let ctx = actx.clone();
     let audited = serde_json::json!({
         "group": new_name, "id": gid,
-        "repo_access": new_access, "allow_public": new_public,
+        "repo_access": new_access,
     });
     conn.transaction(move |tx| {
         tx.execute(
-            "UPDATE runner_groups SET name = $2, repo_access = $3, allow_public = $4, \
-               updated_at = $5 WHERE id = $1",
-            &[&gid, &new_name, &new_access, &new_public, &now],
+            "UPDATE runner_groups SET name = $2, repo_access = $3, \
+               updated_at = $4 WHERE id = $1",
+            &[&gid, &new_name, &new_access, &now],
         )?;
         if let Some(ids) = &repo_ids {
             tx.execute(
@@ -759,23 +753,17 @@ pub fn self_hosted_allowed(db: &ControlDb, org_id: &str, repo_id: &str) -> Resul
 /// machine can never be routed, whatever labels it asks for, and saying
 /// so at trigger time is the difference between a settings page to visit
 /// and a build that sits queued forever.
-pub fn any_group_admits(
-    db: &ControlDb,
-    org_id: &str,
-    repo_id: &str,
-    public: bool,
-) -> Result<bool, Error> {
+pub fn any_group_admits(db: &ControlDb, org_id: &str, repo_id: &str) -> Result<bool, Error> {
     ensure_default_group(db, org_id)?;
     let hit = db
         .lock()
         .query_opt(
             "SELECT 1 FROM runner_groups g WHERE g.org_id = $1 \
-               AND (NOT $3 OR g.allow_public) \
                AND (g.repo_access = 'all' \
                     OR EXISTS (SELECT 1 FROM runner_group_repos gr \
                                WHERE gr.group_id = g.id AND gr.repo_id = $2)) \
              LIMIT 1",
-            &[&org_id, &repo_id, &public],
+            &[&org_id, &repo_id],
         )
         .map_err(db_err("read runner group admission"))?;
     Ok(hit.is_some())
@@ -787,7 +775,6 @@ pub fn any_runner_for(
     db: &ControlDb,
     org_id: &str,
     repo_id: &str,
-    public: bool,
     labels: &[String],
 ) -> Result<bool, Error> {
     let labels = labels.to_vec();
@@ -796,13 +783,12 @@ pub fn any_runner_for(
         .query_opt(
             "SELECT 1 FROM runners r JOIN runner_groups g ON g.id = r.group_id \
              WHERE r.org_id = $1 AND r.removed_at IS NULL \
-               AND r.labels @> $4::TEXT[] \
-               AND (NOT $3 OR g.allow_public) \
+               AND r.labels @> $3::TEXT[] \
                AND (g.repo_access = 'all' \
                     OR EXISTS (SELECT 1 FROM runner_group_repos gr \
                                WHERE gr.group_id = g.id AND gr.repo_id = $2)) \
              LIMIT 1",
-            &[&org_id, &repo_id, &public, &labels],
+            &[&org_id, &repo_id, &labels],
         )
         .map_err(db_err("read runners for labels"))?;
     Ok(hit.is_some())
@@ -1316,7 +1302,7 @@ mod tests {
     fn world(hint: &str) -> World {
         let db = ControlDb::open(&stratum_testkit::pg::test_db_url(hint)).unwrap();
         let org = registry::create_org(&db, "acme").unwrap();
-        let repo = repo_in(&db, &org.id, "app", false);
+        let repo = repo_in(&db, &org.id, "app");
         let ctx = AuditCtx::system(&org.id, "test");
         World {
             db,
@@ -1326,14 +1312,13 @@ mod tests {
         }
     }
 
-    fn repo_in(db: &ControlDb, org_id: &str, name: &str, public: bool) -> String {
+    fn repo_in(db: &ControlDb, org_id: &str, name: &str) -> String {
         registry::create_repo(
             db,
             org_id,
             &NewRepo {
                 name,
                 kind: RepoKind::Native,
-                public,
                 description: None,
                 default_branch: "main",
                 origin_url: None,
@@ -1397,7 +1382,6 @@ mod tests {
             group_id: &group.id,
             labels: &runner.labels,
             all_repos: group.repo_access == "all",
-            allow_public: group.allow_public,
         }
     }
 
@@ -1425,7 +1409,6 @@ mod tests {
         // Open to every repository, closed to public ones — the two
         // defaults this feature's security rests on.
         assert_eq!(groups[0].repo_access, "all");
-        assert!(!groups[0].allow_public);
     }
 
     /// A registration token works once, and every other way of
@@ -1612,7 +1595,7 @@ mod tests {
         // is the job's own and not whichever repository happened to be
         // first: the page links to `owner/repo/…` and a name from the
         // wrong row sends somebody to a build that is not this one.
-        let tools = repo_in(&w.db, &w.org, "tools", false);
+        let tools = repo_in(&w.db, &w.org, "tools");
         let job_id = queue(&w, &tools, &["self-hosted"], "test");
         let group = default_group(&w);
         let claimed = workflows::claim_self_hosted(&w.db, &route(&r.runner, &group), 60_000)
@@ -1720,56 +1703,16 @@ mod tests {
         );
     }
 
-    /// A public repository is not admitted by default, and that default
-    /// is the lock: a public repository can be forked, and a fork's
-    /// change carries its own `run:` lines.
-    #[test]
-    fn a_public_repository_needs_the_group_to_say_so() {
-        let w = world("runners-public");
-        let public = repo_in(&w.db, &w.org, "open", true);
-        let r = enrol(&w, "box", &[], None);
-        let group = default_group(&w);
-        queue(&w, &public, &["self-hosted"], "test");
-
-        assert!(!any_group_admits(&w.db, &w.org, &public, true).unwrap());
-        assert!(
-            workflows::claim_self_hosted(&w.db, &route(&r.runner, &group), 60_000)
-                .unwrap()
-                .is_none(),
-            "a public repository reached a machine that never allowed one"
-        );
-
-        update_group(
-            &w.db,
-            &w.org,
-            &group.id,
-            None,
-            None,
-            Some(true),
-            None,
-            &w.ctx,
-        )
-        .unwrap();
-        let group = default_group(&w);
-        assert!(any_group_admits(&w.db, &w.org, &public, true).unwrap());
-        assert!(
-            workflows::claim_self_hosted(&w.db, &route(&r.runner, &group), 60_000)
-                .unwrap()
-                .is_some()
-        );
-    }
-
     /// A `selected` group admits exactly the repositories it names.
     #[test]
     fn a_selected_group_admits_only_the_repositories_it_names() {
         let w = world("runners-selected-group");
-        let other = repo_in(&w.db, &w.org, "other", false);
+        let other = repo_in(&w.db, &w.org, "other");
         let g = create_group(
             &w.db,
             &w.org,
             "builders",
             Some("selected"),
-            None,
             Some(&["app".to_string()]),
             &w.ctx,
         )
@@ -1803,7 +1746,6 @@ mod tests {
                 &w.org,
                 "typo",
                 Some("selected"),
-                None,
                 Some(&["ap".to_string()]),
                 &w.ctx,
             ),
@@ -1829,7 +1771,7 @@ mod tests {
         );
 
         // `selected`, naming a different repository: still refused.
-        let other = repo_in(&w.db, &w.org, "other", false);
+        let other = repo_in(&w.db, &w.org, "other");
         let _ = other;
         set_policy(
             &w.db,
@@ -2044,11 +1986,11 @@ mod tests {
     #[test]
     fn groups_refuse_a_duplicate_name_and_protect_the_default() {
         let w = world("runners-groups");
-        let g = create_group(&w.db, &w.org, "builders", None, None, None, &w.ctx).unwrap();
+        let g = create_group(&w.db, &w.org, "builders", None, None, &w.ctx).unwrap();
         assert!(!g.is_default);
         assert_eq!(g.runners, 0);
         assert!(matches!(
-            create_group(&w.db, &w.org, "builders", None, None, None, &w.ctx),
+            create_group(&w.db, &w.org, "builders", None, None, &w.ctx),
             Err(Error::Conflict(_))
         ));
         // The default group's name is the one printed in every
@@ -2062,7 +2004,6 @@ mod tests {
                 Some("renamed"),
                 None,
                 None,
-                None,
                 &w.ctx
             ),
             Err(Error::Invalid(_))
@@ -2073,18 +2014,9 @@ mod tests {
         ));
         // Renaming a *non*-default group onto a taken name is a conflict
         // rather than a silent no-op.
-        create_group(&w.db, &w.org, "other", None, None, None, &w.ctx).unwrap();
+        create_group(&w.db, &w.org, "other", None, None, &w.ctx).unwrap();
         assert!(matches!(
-            update_group(
-                &w.db,
-                &w.org,
-                &g.id,
-                Some("other"),
-                None,
-                None,
-                None,
-                &w.ctx
-            ),
+            update_group(&w.db, &w.org, &g.id, Some("other"), None, None, &w.ctx),
             Err(Error::Conflict(_))
         ));
 
@@ -2121,13 +2053,13 @@ mod tests {
         let labels = vec!["self-hosted".to_string(), "gpu".to_string()];
 
         // No machines at all.
-        assert!(!any_runner_for(&w.db, &w.org, &w.repo, false, &labels).unwrap());
+        assert!(!any_runner_for(&w.db, &w.org, &w.repo, &labels).unwrap());
         // A machine without the label.
         let plain = enrol(&w, "plain", &[], None);
-        assert!(!any_runner_for(&w.db, &w.org, &w.repo, false, &labels).unwrap());
+        assert!(!any_runner_for(&w.db, &w.org, &w.repo, &labels).unwrap());
         // One with it.
         let gpu = enrol(&w, "gpu-box", &["gpu"], None);
-        assert!(any_runner_for(&w.db, &w.org, &w.repo, false, &labels).unwrap());
+        assert!(any_runner_for(&w.db, &w.org, &w.repo, &labels).unwrap());
         // …and the claim agrees, which is the point: a trigger that says
         // "yes" over a claim that says "no" is a job queued forever.
         queue(&w, &w.repo, &["self-hosted", "gpu"], "gpu-job");
@@ -2145,7 +2077,7 @@ mod tests {
         // Removing the only machine that could serve it takes the
         // trigger's answer back with it.
         remove(&w.db, &w.org, &gpu.runner.id, &w.ctx).unwrap();
-        assert!(!any_runner_for(&w.db, &w.org, &w.repo, false, &labels).unwrap());
+        assert!(!any_runner_for(&w.db, &w.org, &w.repo, &labels).unwrap());
     }
 
     /// `busy` beats the clock, and the clock is a window rather than an
@@ -2213,24 +2145,16 @@ mod tests {
     #[test]
     fn a_group_refuses_a_repo_access_outside_its_enumeration() {
         let w = world("runners-group-access-enum");
-        let err = create_group(
-            &w.db,
-            &w.org,
-            "builders",
-            Some("private"),
-            None,
-            None,
-            &w.ctx,
-        )
-        .expect_err("\"private\" is not a repo_access");
+        let err = create_group(&w.db, &w.org, "builders", Some("private"), None, &w.ctx)
+            .expect_err("\"private\" is not a repo_access");
         assert!(matches!(err, Error::Invalid(_)), "{err:?}");
         assert!(err.to_string().contains("\"private\""), "{err}");
 
         // …and again on the way in through an update, where the same
         // string arrives from the same settings form.
-        let g = create_group(&w.db, &w.org, "builders", None, None, None, &w.ctx).unwrap();
+        let g = create_group(&w.db, &w.org, "builders", None, None, &w.ctx).unwrap();
         assert!(matches!(
-            update_group(&w.db, &w.org, &g.id, None, Some("some"), None, None, &w.ctx),
+            update_group(&w.db, &w.org, &g.id, None, Some("some"), None, &w.ctx),
             Err(Error::Invalid(_))
         ));
         // The refused update changed nothing.
@@ -2248,23 +2172,14 @@ mod tests {
     fn a_group_name_has_a_shape_on_creation_and_on_rename() {
         let w = world("runners-group-name-shape");
         for bad in ["", "has space", "semi;colon", &"a".repeat(65)] {
-            let err = create_group(&w.db, &w.org, bad, None, None, None, &w.ctx)
+            let err = create_group(&w.db, &w.org, bad, None, None, &w.ctx)
                 .expect_err("the group name was accepted");
             assert!(matches!(err, Error::Invalid(_)), "{bad:?}: {err:?}");
         }
 
-        let g = create_group(&w.db, &w.org, "builders", None, None, None, &w.ctx).unwrap();
+        let g = create_group(&w.db, &w.org, "builders", None, None, &w.ctx).unwrap();
         assert!(matches!(
-            update_group(
-                &w.db,
-                &w.org,
-                &g.id,
-                Some("has space"),
-                None,
-                None,
-                None,
-                &w.ctx
-            ),
+            update_group(&w.db, &w.org, &g.id, Some("has space"), None, None, &w.ctx),
             Err(Error::Invalid(_))
         ));
         // A name that does have the shape, and is nobody else's, lands.
@@ -2273,7 +2188,6 @@ mod tests {
             &w.org,
             &g.id,
             Some("build-boxes"),
-            None,
             None,
             None,
             &w.ctx,
@@ -2291,24 +2205,16 @@ mod tests {
     #[test]
     fn updating_a_group_that_is_not_there_is_simply_absent() {
         let w = world("runners-update-missing-group");
-        assert!(update_group(
-            &w.db,
-            &w.org,
-            "not-an-id",
-            Some("x"),
-            None,
-            None,
-            None,
-            &w.ctx
-        )
-        .unwrap()
-        .is_none());
+        assert!(
+            update_group(&w.db, &w.org, "not-an-id", Some("x"), None, None, &w.ctx)
+                .unwrap()
+                .is_none()
+        );
         assert!(update_group(
             &w.db,
             &w.org,
             "01zzzzzzzzzzzzzzzzzzzzzzzz",
             Some("x"),
-            None,
             None,
             None,
             &w.ctx
@@ -2325,13 +2231,12 @@ mod tests {
     #[test]
     fn rewriting_a_groups_repositories_changes_what_it_admits() {
         let w = world("runners-group-repos-rewrite");
-        let other = repo_in(&w.db, &w.org, "other", false);
+        let other = repo_in(&w.db, &w.org, "other");
         let g = create_group(
             &w.db,
             &w.org,
             "builders",
             Some("selected"),
-            None,
             Some(&["app".to_string()]),
             &w.ctx,
         )
@@ -2353,7 +2258,6 @@ mod tests {
             &g.id,
             None,
             Some("selected"),
-            None,
             Some(&["other".to_string()]),
             &w.ctx,
         )
@@ -2384,7 +2288,6 @@ mod tests {
                 &w.db,
                 &w.org,
                 &g.id,
-                None,
                 None,
                 None,
                 Some(&["othe".to_string()]),

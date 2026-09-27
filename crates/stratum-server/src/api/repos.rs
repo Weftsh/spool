@@ -21,8 +21,9 @@ pub struct CreateRepoBody {
     pub name: String,
     #[serde(default)]
     pub description: Option<String>,
+    /// Refused when `true` — see [`crate::api::NO_PUBLIC_REPOS`].
     #[serde(default)]
-    pub public: bool,
+    pub public: Option<bool>,
     #[serde(default = "default_branch")]
     pub default_branch: String,
 }
@@ -97,30 +98,18 @@ pub struct RepoView {
     /// visibility, its default branch, its branch protections and who
     /// may reach it.
     ///
-    /// `false` for an anonymous reader, and `false` rather than absent
-    /// when the answer is no — a client that had to distinguish "not
+    /// `false` rather than absent when the answer is no — a client that had to distinguish "not
     /// admin" from "not told" would end up guessing, and guessing here
     /// means either hiding a control from somebody who may use it or
     /// showing one that will refuse them.
     pub viewer_admin: bool,
     /// Whether the caller holds a role *here* — an organization
-    /// membership, or a per-repo grant — as opposed to reading this
-    /// repository because it is public.
-    ///
-    /// The distinction only exists on a public repository, and it is the
-    /// whole of what it is for. Every other `viewer_*` answer is about
-    /// what somebody may *do*; this one is about whether they are on the
-    /// inside at all. Insights is gated on it: a repository's traffic —
-    /// how much it is cloned, how many bytes it serves, how far behind
-    /// its origin runs — belongs to the people who own it, and publishing
-    /// the code does not publish how the code is used.
+    /// membership, or a per-repo grant. Insights is gated on it: a
+    /// repository's traffic belongs to the people who own it.
     ///
     /// Weaker than `viewer_write`, and deliberately: somebody with the
     /// `viewer` role is a member who may not push, and they are exactly
-    /// who this is for.
-    ///
-    /// `false` for an anonymous reader and for a signed-in stranger
-    /// alike, and `false` rather than absent, for the reason
+    /// who this is for. `false` rather than absent, for the reason
     /// `viewer_admin` is.
     pub viewer_member: bool,
     /// Whether the caller may push to this repository — and so whether
@@ -144,9 +133,9 @@ pub struct RepoView {
     /// why — `{ forwarding, blocked, needs_permission, approve_url }`,
     /// see `mirrors::push_view`. `null` for a native repository.
     pub push: Option<serde_json::Value>,
-    /// Public forks made directly from this repository. Not the stored
-    /// total: see `forks::public_forks_of` for why a visible count and a
-    /// stored one are different numbers.
+    /// Forks made directly from this repository that the caller may
+    /// read. Not the stored total: see [`visible_forks`] for why a
+    /// visible count and a stored one are different numbers.
     pub fork_count: usize,
     /// People subscribed to everything that happens here.
     ///
@@ -183,14 +172,7 @@ fn viewer_admin(state: &SharedState, headers: &HeaderMap, org_id: &str, repo_id:
     authx::require(&state.db, headers, org_id, Some(repo_id), Scope::OrgAdmin).is_ok()
 }
 
-/// Whether this caller holds a role on this repository, rather than
-/// merely being able to read it because it is public.
-///
-/// `authx::require` is the whole of the answer, and the reason it is the
-/// right seam is what it does *not* do: unlike `app::rest_repo_auth` it
-/// has no public-read fallback, so an anonymous caller and a signed-in
-/// stranger both fail it on a public repository while a `viewer`-role
-/// member passes. That is exactly the line "members only" draws.
+/// Whether this caller holds a role on this repository.
 ///
 /// `Scope::RepoRead` and not something stronger: the weakest role on a
 /// repository is one that may read it, so requiring anything more would
@@ -254,26 +236,20 @@ fn view(state: &SharedState, headers: &HeaderMap, org_name: &str, repo: Repo) ->
             let parent = registry::repo_by_id(&state.db, &org_id, &parent_id)
                 .ok()
                 .flatten()?;
-            // A private upstream is not named to somebody who could not
+            // An upstream is not named to somebody who could not
             // otherwise know it exists. The fork is still a fork; it
-            // simply does not say whose. Somebody who may read the
-            // upstream is told, though: this used to test `public`
-            // alone, so a member forking their own org's private
-            // repository got a fork page that said "Forking the
-            // upstream…" and never named the repository they had
-            // pressed the button on a second earlier.
-            (parent.public
-                || authx::require(
-                    &state.db,
-                    headers,
-                    &org_id,
-                    Some(&parent_id),
-                    Scope::RepoRead,
-                )
-                .is_ok())
+            // simply does not say whose.
+            authx::require(
+                &state.db,
+                headers,
+                &org_id,
+                Some(&parent_id),
+                Scope::RepoRead,
+            )
+            .is_ok()
             .then(|| format!("{}/{}", org.name, parent.name))
         });
-    let fork_count = stratum_control::forks::public_forks_of(&state.db, &repo.id)
+    let fork_count = visible_forks(state, headers, &repo.id)
         .map(|f| f.len())
         .unwrap_or(0);
     // Same rule as the fork count above: an indexed read that is not
@@ -340,6 +316,9 @@ pub async fn create(
     if let Err(r) = authx::require_verified(&state.db, &principal) {
         return r;
     }
+    if let Err(r) = crate::api::refuse_public(body.public) {
+        return r;
+    }
     let actx = AuditCtx::of(&org.id, Some(&principal));
     match create_one(state.clone(), org.id.clone(), actx, body).await {
         Ok(repo) => (
@@ -371,7 +350,6 @@ async fn create_one(
             name: &body.name,
             description: description.as_deref(),
             kind: RepoKind::Native,
-            public: body.public,
             default_branch: &body.default_branch,
             origin_url: None,
             origin_provider: None,
@@ -405,16 +383,14 @@ pub async fn get(
         Ok(x) => x,
         Err(r) => return r,
     };
-    if !repo.public {
-        if let Err(r) = authx::require(
-            &state.db,
-            &headers,
-            &org.id,
-            Some(&repo.id),
-            Scope::RepoRead,
-        ) {
-            return r;
-        }
+    if let Err(r) = authx::require(
+        &state.db,
+        &headers,
+        &org.id,
+        Some(&repo.id),
+        Scope::RepoRead,
+    ) {
+        return r;
     }
     Json(view(&state, &headers, &org_name, repo)).into_response()
 }
@@ -551,12 +527,12 @@ async fn cancel_live_ci(state: &SharedState, org_name: &str, repo_name: &str, re
 ///
 /// Both fields are three-state on purpose: absent leaves the value
 /// alone, present changes it, and `"description": null` (or an empty
-/// string) clears it. A PATCH that only sets a description must not
-/// silently republish a private repository.
+/// string) clears it.
 #[derive(Deserialize)]
 pub struct PatchRepoBody {
     #[serde(default, deserialize_with = "double_option")]
     pub description: Option<Option<String>>,
+    /// Refused when `true` — see [`crate::api::NO_PUBLIC_REPOS`].
     #[serde(default)]
     pub public: Option<bool>,
     /// The branch clones start on and changes land on by default. Repo
@@ -602,18 +578,17 @@ pub async fn patch(
         Ok(x) => x,
         Err(r) => return r,
     };
-    // Publishing a repository is the one edit here with consequences
-    // outside the org — it puts the code in front of anonymous search —
-    // so it takes org admin, not repo write.
-    // Publishing and moving the default branch are authority, not
-    // preference: both take an admin. A description alone takes write.
-    let need =
-        if body.public.is_some() || body.default_branch.is_some() || body.installation_id.is_some()
-        {
-            Scope::OrgAdmin
-        } else {
-            Scope::RepoWrite
-        };
+    if let Err(r) = crate::api::refuse_public(body.public) {
+        return r;
+    }
+    // Moving the default branch and attaching an installation are
+    // authority, not preference: both take an admin. A description alone
+    // takes write.
+    let need = if body.default_branch.is_some() || body.installation_id.is_some() {
+        Scope::OrgAdmin
+    } else {
+        Scope::RepoWrite
+    };
     let principal = match authx::require(&state.db, &headers, &org.id, Some(&repo.id), need) {
         Ok(p) => p,
         Err(r) => return r,
@@ -668,29 +643,6 @@ pub async fn patch(
             Err(e) => return crate::api::reads::err_to_response(e),
         }
     }
-    // Publishing a fork publishes the repository it was forked from.
-    //
-    // A fork here is zero-copy: it shares upstream's immutable objects
-    // and never copied them, so a fork of a private repository that went
-    // public would serve that private repository's actual bytes to
-    // anonymous readers. The rule is against the fork **root**, not the
-    // parent — a chain whose middle link became public by some other
-    // path must not become a route to the private repository at the top.
-    //
-    // Checked before anything is written, and only when publishing:
-    // making a fork private is always allowed.
-    if body.public == Some(true) {
-        match stratum_control::forks::may_publish(&state.db, &repo.id) {
-            Ok(true) => {}
-            Ok(false) => {
-                return json_error(
-                    StatusCode::FORBIDDEN,
-                    "a fork of a private repository cannot be made public",
-                )
-            }
-            Err(e) => return internal(e),
-        }
-    }
     let description = match body.description.as_ref() {
         None => None,
         Some(raw) => match registry::clean_description(raw.as_deref().unwrap_or("")) {
@@ -700,7 +652,7 @@ pub async fn patch(
     };
     // Validated before anything is written, like the description above
     // it. A homepage that is refused must not leave a repository whose
-    // visibility changed and whose link did not.
+    // description changed and whose link did not.
     let homepage = match body.homepage.as_ref() {
         None => None,
         Some(raw) => match registry::clean_homepage(raw.as_deref().unwrap_or("")) {
@@ -713,7 +665,6 @@ pub async fn patch(
         &org.id,
         &repo.id,
         description.as_ref().map(|d| d.as_deref()),
-        body.public,
         homepage.as_ref().map(|h| h.as_deref()),
     );
     match updated {
@@ -748,30 +699,6 @@ pub async fn patch(
             "repo.default_branch",
             Some(&serde_json::json!({ "default_branch": db_branch })),
         );
-    }
-    if let Some(public) = body.public {
-        // The bytes move pools with the repository. Best-effort: the
-        // sweep resyncs `private` from `repos.public` within the hour.
-        if let Err(e) = stratum_control::storage::set_private(
-            &state.db,
-            stratum_control::storage::OWNER_REPO,
-            &repo.id,
-            !public,
-        ) {
-            eprintln!("weft: storage visibility {}: {e}", repo.id);
-        }
-        // Who made this public, and when, is the question asked after a
-        // leak. It is not allowed to be a hole in the trail.
-        let ctx = AuditCtx::of(&org.id, Some(&principal));
-        if let Err(e) = stratum_control::audit::record(
-            &state.db,
-            &ctx,
-            Some(&repo.id),
-            "repo.visibility",
-            Some(&serde_json::json!({ "public": public })),
-        ) {
-            return internal(e);
-        }
     }
     match registry::repo_by_id(&state.db, &org.id, &repo.id) {
         Ok(Some(r)) => Json(view(&state, &headers, &org_name, r)).into_response(),
@@ -859,6 +786,16 @@ pub async fn batch_create(
     }
     if body.repos.len() > 1000 {
         return json_error(StatusCode::BAD_REQUEST, "batch limited to 1000 repos");
+    }
+    // Refused as a whole, before anything is created: one repository in
+    // a thousand asking to be public is a script written for somewhere
+    // else, and half a batch is harder to clean up than none.
+    if let Some(r) = body
+        .repos
+        .iter()
+        .find_map(|r| crate::api::refuse_public(r.public).err())
+    {
+        return r;
     }
     // Bounded fan-out: 32 creates in flight, results in request order.
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(32));
@@ -1013,25 +950,22 @@ pub async fn fork(
         Err(r) => return r,
     };
     // You may fork what you may read.
-    if !src.public {
-        if let Err(r) = authx::require(
-            &state.db,
-            &headers,
-            &src_org.id,
-            Some(&src.id),
-            Scope::RepoRead,
-        ) {
-            return r;
-        }
+    if let Err(r) = authx::require(
+        &state.db,
+        &headers,
+        &src_org.id,
+        Some(&src.id),
+        Scope::RepoRead,
+    ) {
+        return r;
     }
     let body = body.map(|Json(b)| b).unwrap_or_default();
 
     // Who is forking. Resolved as a *person*, deliberately not from the
     // repository principal: that answers "what authority has this caller
-    // in this org", so for a signed-in stranger forking a public
-    // repository it is `None` — which means "not a member", not "not a
-    // person". Reading identity off it refuses exactly the caller
-    // forking exists to serve.
+    // in this org", and a person with a per-repo grant is not a member —
+    // which means "not a member", not "not a person". Reading identity
+    // off it would refuse a caller forking exists to serve.
     let user_id = match crate::api::caller_person(&state, &headers) {
         Ok(Some(u)) => u,
         Ok(None) => {
@@ -1083,8 +1017,7 @@ pub async fn fork(
     // and leaves the person to hunt for their own fork by hand. GitHub
     // takes you to it. So: taken by *your fork of this very
     // repository*, that fork is the answer — 200, not 202, because
-    // nothing was made, and it stays the answer at the free-tier cap
-    // below for the same reason. Taken by anything else, it is a real
+    // nothing was made. Taken by anything else, it is a real
     // collision, and the refusal says which repository is in the way
     // and that a name gets past it.
     match registry::repo_by_name(&state.db, &target.id, &name) {
@@ -1109,10 +1042,6 @@ pub async fn fork(
         Ok(None) => {}
         Err(e) => return internal(e),
     }
-    // A fork inherits its source's visibility. Forking a private
-    // repository gives a private repository — and because a repository
-    // can only be public if its own root is, this stays true down a
-    // chain without re-deriving it here.
     let created = registry::create_repo(
         &state.db,
         &target.id,
@@ -1120,7 +1049,6 @@ pub async fn fork(
             name: &name,
             description: src.description.as_deref(),
             kind: RepoKind::Native,
-            public: src.public,
             default_branch: &src.default_branch,
             origin_url: None,
             origin_provider: None,
@@ -1189,7 +1117,28 @@ pub struct ForkEntry {
     pub name: String,
 }
 
-/// Repositories forked directly from this one. Public forks only.
+/// The forks of this repository the caller may read.
+///
+/// A fork lives in its owner's namespace, and its name is theirs: the
+/// stored `fork_count` counts every fork, but a caller is told only about
+/// the ones they could open. One authorization check per fork, through
+/// the same seam every repository read uses — a repository's forks are
+/// few, and a second opinion about who may read one is how two
+/// surfaces come to disagree.
+pub(crate) fn visible_forks(
+    state: &SharedState,
+    headers: &HeaderMap,
+    repo_id: &str,
+) -> Result<Vec<stratum_control::forks::ForkRow>, String> {
+    Ok(stratum_control::forks::forks_of(&state.db, repo_id)?
+        .into_iter()
+        .filter(|f| {
+            authx::require(&state.db, headers, &f.org_id, Some(&f.id), Scope::RepoRead).is_ok()
+        })
+        .collect())
+}
+
+/// Repositories forked directly from this one that the caller may read.
 pub async fn list_forks(
     State(state): State<SharedState>,
     Path((org_name, repo_name)): Path<(String, String)>,
@@ -1199,18 +1148,16 @@ pub async fn list_forks(
         Ok(x) => x,
         Err(r) => return r,
     };
-    if !repo.public {
-        if let Err(r) = authx::require(
-            &state.db,
-            &headers,
-            &org.id,
-            Some(&repo.id),
-            Scope::RepoRead,
-        ) {
-            return r;
-        }
+    if let Err(r) = authx::require(
+        &state.db,
+        &headers,
+        &org.id,
+        Some(&repo.id),
+        Scope::RepoRead,
+    ) {
+        return r;
     }
-    let rows = match stratum_control::forks::public_forks_of(&state.db, &repo.id) {
+    let rows = match visible_forks(&state, &headers, &repo.id) {
         Ok(r) => r,
         Err(e) => return internal(e),
     };

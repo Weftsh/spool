@@ -1,37 +1,11 @@
-//! The contribution graph: whose work this was, on which day, and how
-//! much of it a given reader is allowed to see.
-//!
-//! This is the migration argument the product rests on. Somebody leaving
-//! another forge loses a decade of visible history the day they leave,
-//! unless the graph can be rebuilt from **their actual commits** the
-//! moment their repositories mirror over. So authorship here is derived
-//! from commit data we already store, never from activity on this
-//! platform — a square is green because a commit exists, not because
+//! Who wrote what: one row per (person, repository, day), derived from
+//! commit data we already store, never from activity on this platform —
+//! a person counts as a contributor because a commit exists, not because
 //! somebody used the website.
 //!
-//! Three rules hold the whole design up.
-//!
-//! **Raw rows, never a rendered total.** `contributions` is one row per
-//! (person, repository, day). It has to be, because `repos.public` can
-//! be flipped in either direction: a private repository made public must
-//! retroactively show its work in detail, and a public one made private
-//! must stop showing it. Neither is possible from a pre-summed count.
-//!
-//! **Visibility is decided at read time, from the repository's current
-//! row.** The `public` column on `contributions` is a snapshot of what
-//! was true when the walker ran, and this module never reads it for a
-//! visibility decision — [`graph`] joins `repos` and uses the live
-//! value. A denormalised flag and a live one that disagree is exactly
-//! the shape of a leak that nobody notices for a year, and the join
-//! costs nothing here because the read needs the repository's name
-//! anyway.
-//!
-//! **A private repository contributes a number and nothing else.** When
-//! its owner has opted in, private work lands in the day's `count` and
-//! is absent from `repos` — no name, no id, no title, no link, at any
-//! layer. The response carries `private_included` so a reader can tell a
-//! quiet week from an opted-out one, which is the only fact about
-//! private work that is ever published.
+//! **Raw rows, never a rendered total.** A repository's contributor list
+//! is summed from them at read time, so a rewalk after an address is
+//! verified or an account is disabled needs no second bookkeeping.
 //!
 //! The frontier that makes the walk incremental lives in
 //! `contrib_cursor`, and [`apply`] advances it by compare-and-swap for
@@ -43,53 +17,6 @@ use crate::db::ControlDb;
 use crate::ids::now_ms;
 use serde::Serialize;
 use std::collections::BTreeMap;
-
-/// Bounds on a graph request (I13). A year is what the UI renders; the
-/// cap is what stops a caller asking for the Holocene.
-pub const MAX_DAYS: i32 = 3653; // ten years, leap days included
-
-/// One repository's share of one day. Only ever built for repositories
-/// the reader may already see by name.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct DayRepo {
-    pub org: String,
-    pub name: String,
-    pub count: i32,
-}
-
-/// One square.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Day {
-    /// Days since the Unix epoch, in the commit author's own timezone —
-    /// the date the person who wrote it would say they wrote it on.
-    pub day: i32,
-    /// `YYYY-MM-DD`, so a client never has to agree with us about what
-    /// `day` means.
-    pub date: String,
-    /// Everything on this day the reader may count, private work
-    /// included when it is counted at all.
-    pub count: i32,
-    /// The public repositories behind `count`. The difference between
-    /// `count` and the sum of these is private work, and that difference
-    /// is the *only* thing said about it.
-    pub repos: Vec<DayRepo>,
-}
-
-/// A graph, as one reader may see it.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub struct Graph {
-    pub from: String,
-    pub to: String,
-    /// Only days with something on them. A client renders the gaps; the
-    /// server sending 365 zeroes would be sending nothing 365 times.
-    pub days: Vec<Day>,
-    pub total: i32,
-    /// Whether private work is inside these numbers. `false` means
-    /// either the person has not opted in or they have no private work —
-    /// deliberately indistinguishable, because distinguishing them would
-    /// publish the existence of private work.
-    pub private_included: bool,
-}
 
 // ---------------------------------------------------------------------
 // Days. Pure arithmetic, no dependency, unit-tested below.
@@ -237,7 +164,6 @@ pub enum Applied {
 pub fn apply(
     db: &ControlDb,
     repo_id: &str,
-    public: bool,
     counts: &[Counted],
     advances: &[Advance],
 ) -> Result<Applied, String> {
@@ -306,12 +232,13 @@ pub fn apply(
             }
             for c in counts {
                 tx.execute(
+                    // `public` is a column the hosted edition reads;
+                    // nothing here is public, so it is always false.
                     "INSERT INTO contributions (user_id, repo_id, day, count, public) \
-                     VALUES ($1, $2, $3, $4, $5) \
+                     VALUES ($1, $2, $3, $4, FALSE) \
                      ON CONFLICT (user_id, repo_id, day) \
-                     DO UPDATE SET count = contributions.count + EXCLUDED.count, \
-                                   public = EXCLUDED.public",
-                    &[&c.user_id, &repo, &c.day, &c.count, &public],
+                     DO UPDATE SET count = contributions.count + EXCLUDED.count",
+                    &[&c.user_id, &repo, &c.day, &c.count],
                 )?;
             }
             Ok(Applied::Committed)
@@ -528,121 +455,6 @@ pub fn repos_for_rewalk(db: &ControlDb, user_id: &str) -> Result<Vec<String>, St
 // Reading.
 // ---------------------------------------------------------------------
 
-/// Whether this person publishes an aggregate of their private work.
-pub fn private_optin(db: &ControlDb, user_id: &str) -> Result<bool, String> {
-    db.lock()
-        .query_opt(
-            "SELECT contrib_private_optin FROM users WHERE id = $1",
-            &[&user_id.to_string()],
-        )
-        .map_err(|e| format!("read contribution settings: {e}"))
-        .map(|r| r.is_some_and(|r| r.get(0)))
-}
-
-/// Why a graph could not be produced. Two cases, kept apart because
-/// they are two different HTTP answers: a range the caller got wrong is
-/// a 400 with a sentence, and a database that would not answer is a 500.
-/// Matching on the text of one error string to tell them apart is how a
-/// message improvement silently turns a 400 into a 500.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GraphError {
-    /// The caller asked for a window that is not one.
-    BadRange(String),
-    Failed(String),
-}
-
-/// One person's graph over `[from, to]`, as anybody may see it.
-///
-/// There is no viewer parameter, and that is deliberate rather than an
-/// omission. A contribution graph is a public page: what it shows must
-/// not depend on who is looking, or the same URL means two things and
-/// the one a screenshot proves is whichever the screenshotter had.
-/// Private work is included on the *owner's* standing decision — the
-/// opt-in — and when it is, it is a number with nothing attached to it.
-pub fn graph(db: &ControlDb, user_id: &str, from: i32, to: i32) -> Result<Graph, GraphError> {
-    if to < from {
-        return Err(GraphError::BadRange(
-            "the range ends before it starts".into(),
-        ));
-    }
-    if to - from >= MAX_DAYS {
-        return Err(GraphError::BadRange(format!(
-            "at most {MAX_DAYS} days at a time"
-        )));
-    }
-    let optin = private_optin(db, user_id).map_err(GraphError::Failed)?;
-    // One query, and the visibility decision is `r.public` — the live
-    // row — not the snapshot on `contributions`. The org name comes
-    // along because a public square carries the repository's name, and
-    // `NULL`s it out for a private one so a private name cannot reach
-    // the serializer even by mistake.
-    //
-    // `state = 'active'` for the same reason every other listing has it.
-    // A repository is soft-deleted first and swept later, so its rows
-    // outlive the decision to remove it; counting them would put a
-    // number on the graph whose only explanation is a repository that
-    // is gone, and *naming* one would render a link to a 404. When GC
-    // purges the repository the rows go with it (`ON DELETE CASCADE`),
-    // so this is what the graph will say anyway — just sooner.
-    let rows = db
-        .lock()
-        .query(
-            "SELECT c.day, \
-                    SUM(c.count)::INT AS n, \
-                    r.public AS is_public, \
-                    CASE WHEN r.public THEN o.name END AS org, \
-                    CASE WHEN r.public THEN r.name END AS repo \
-             FROM contributions c \
-             JOIN repos r ON r.id = c.repo_id \
-             JOIN orgs o ON o.id = r.org_id \
-             WHERE c.user_id = $1 AND c.day BETWEEN $2 AND $3 \
-               AND r.state = 'active' \
-             GROUP BY c.day, r.public, org, repo \
-             ORDER BY c.day, org, repo",
-            &[&user_id.to_string(), &from, &to],
-        )
-        .map_err(|e| GraphError::Failed(format!("read contributions: {e}")))?;
-
-    let mut days: Vec<Day> = Vec::new();
-    let mut total = 0;
-    for r in &rows {
-        let day: i32 = r.get("day");
-        let n: i32 = r.get("n");
-        let is_public: bool = r.get("is_public");
-        if !is_public && !optin {
-            continue;
-        }
-        total += n;
-        let slot = match days.last_mut() {
-            Some(d) if d.day == day => d,
-            _ => {
-                days.push(Day {
-                    day,
-                    date: iso_of_day(day),
-                    count: 0,
-                    repos: Vec::new(),
-                });
-                days.last_mut().expect("just pushed")
-            }
-        };
-        slot.count += n;
-        if is_public {
-            slot.repos.push(DayRepo {
-                org: r.get::<_, Option<String>>("org").unwrap_or_default(),
-                name: r.get::<_, Option<String>>("repo").unwrap_or_default(),
-                count: n,
-            });
-        }
-    }
-    Ok(Graph {
-        from: iso_of_day(from),
-        to: iso_of_day(to),
-        days,
-        total,
-        private_included: optin,
-    })
-}
-
 /// One person's share of one repository.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct Contributor {
@@ -659,8 +471,7 @@ pub struct Contributor {
     pub last_at: i64,
 }
 
-/// The most people one request may ask for (I13, the same bound
-/// [`MAX_DAYS`] puts on a graph).
+/// The most people one request may ask for (I13).
 ///
 /// A repository with five thousand contributors is a page nobody can
 /// render, and the rail this feeds shows a couple of dozen faces at
@@ -673,18 +484,13 @@ pub const MAX_CONTRIBUTORS: i32 = 100;
 /// **This makes no visibility decision, and must not start.** The caller
 /// has already resolved `repo_id` — through the same authorization it
 /// uses for every other repo-scoped read — and by the time we are here
-/// the answer to "may this reader see this repository" is yes. That is
-/// why there is no `public` filter: `contributions.public` is a snapshot
-/// of what was true when the walker ran, and filtering on it here would
-/// silently drop every row a member reads back from their *own* private
-/// repository. If a future caller needs a check, it belongs where the
-/// repository is resolved, next to every other one, not hidden in an
-/// aggregate.
+/// the answer to "may this reader see this repository" is yes. If a
+/// future caller needs a check, it belongs where the repository is
+/// resolved, next to every other one, not hidden in an aggregate.
 ///
-/// `limit` is clamped rather than refused, unlike [`graph`]'s window. A
-/// bad range is a caller asking a question with no answer, so naming it
-/// is the only useful reply; a large `limit` is a caller asking a
-/// perfectly good question and wanting more of the answer than we serve.
+/// `limit` is clamped rather than refused: a large `limit` is a caller
+/// asking a perfectly good question and wanting more of the answer than
+/// we serve.
 /// Handing them the first hundred is what they wanted, near enough, and
 /// a 400 on `?limit=500` would break an avatar rail over a number nobody
 /// typed. The floor is 1 for a different reason: `?limit=0` reaches
@@ -698,8 +504,8 @@ pub const MAX_CONTRIBUTORS: i32 = 100;
 ///
 /// Both joins are inner, and that is the answer to the account that is
 /// no longer there. Disabling is this platform's delete (see
-/// [`crate::users::set_disabled`]) and it takes the person's public page
-/// down, so listing them would render a face linking to a 404; a hard
+/// [`crate::users::set_disabled`]) and it takes the person's page down,
+/// so listing them would render a face linking to a 404; a hard
 /// delete takes the contribution rows with it by cascade and never
 /// reaches this query at all. Either way the row is *dropped*, never
 /// coalesced to an empty handle — an unnamed avatar is a link nobody can
@@ -759,7 +565,16 @@ mod tests {
         (u.id, ns.id)
     }
 
-    fn repo(db: &ControlDb, org_id: &str, name: &str, public: bool) -> registry::Repo {
+    /// Every commit counted against this repository, whoever wrote it.
+    fn total(db: &ControlDb, repo_id: &str) -> i64 {
+        contributors(db, repo_id, MAX_CONTRIBUTORS)
+            .unwrap()
+            .iter()
+            .map(|c| c.commits)
+            .sum()
+    }
+
+    fn repo(db: &ControlDb, org_id: &str, name: &str) -> registry::Repo {
         registry::create_repo(
             db,
             org_id,
@@ -767,7 +582,6 @@ mod tests {
                 description: None,
                 name,
                 kind: RepoKind::Native,
-                public,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -795,7 +609,6 @@ mod tests {
             apply(
                 db,
                 repo_id,
-                true,
                 counts,
                 &[Advance {
                     reference: reference.into(),
@@ -879,7 +692,7 @@ mod tests {
     fn a_walk_is_enqueued_with_or_without_a_pusher() {
         let db = db("contribs_enqueue");
         let (uid, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
 
         // No pusher: a mirror sync, which is how a decade of somebody
         // else's history arrives. The payload is NULL, and a statement
@@ -913,7 +726,7 @@ mod tests {
     fn the_loser_of_a_frontier_race_writes_nothing_at_all() {
         let db = db("contribs_cas");
         let (uid, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         let head = "refs/heads/main".to_string();
 
         assert!(cursors(&db, &r.id).unwrap().is_empty());
@@ -924,18 +737,17 @@ mod tests {
             to: to.into(),
         };
         assert_eq!(
-            apply(&db, &r.id, true, &[counted(&uid, 100, 3)], &[plan("aa")]).unwrap(),
+            apply(&db, &r.id, &[counted(&uid, 100, 3)], &[plan("aa")]).unwrap(),
             Applied::Committed
         );
         // The second one walked the same commits and must write neither
         // its counts nor its cursor: adding both would double every
         // square, which is a number nobody could ever explain.
         assert_eq!(
-            apply(&db, &r.id, true, &[counted(&uid, 100, 3)], &[plan("aa")]).unwrap(),
+            apply(&db, &r.id, &[counted(&uid, 100, 3)], &[plan("aa")]).unwrap(),
             Applied::LostRace
         );
-        let g = graph(&db, &uid, 90, 110).unwrap();
-        assert_eq!(g.total, 3, "the loser's counts landed anyway: {g:?}");
+        assert_eq!(total(&db, &r.id), 3, "the loser's counts landed anyway");
         assert_eq!(
             cursors(&db, &r.id).unwrap().get(&head).map(String::as_str),
             Some("aa")
@@ -947,7 +759,6 @@ mod tests {
         let out = apply(
             &db,
             &r.id,
-            true,
             &[counted(&uid, 100, 9)],
             // The order matters, and it is this way round on purpose:
             // the ref that *would* advance comes first, so an
@@ -976,14 +787,13 @@ mod tests {
             "a losing walk advanced one ref and not the other, stranding \
              every commit between the two tips: {after:?}"
         );
-        assert_eq!(graph(&db, &uid, 90, 110).unwrap().total, 3);
+        assert_eq!(total(&db, &r.id), 3);
 
         // A real second walk, from the frontier it actually read, adds.
         assert_eq!(
             apply(
                 &db,
                 &r.id,
-                true,
                 &[counted(&uid, 100, 2)],
                 &[Advance {
                     reference: head.clone(),
@@ -994,87 +804,7 @@ mod tests {
             .unwrap(),
             Applied::Committed
         );
-        assert_eq!(graph(&db, &uid, 90, 110).unwrap().total, 5);
-    }
-
-    /// Visibility is the repository's current answer, not the one that
-    /// was true when the walker ran.
-    #[test]
-    fn a_private_repository_is_a_number_and_flipping_it_is_retroactive() {
-        let db = db("contribs_visibility");
-        let (uid, org) = person(&db, "ada", "ada@example.com");
-        let open = repo(&db, &org, "widget", true);
-        let shut = repo(&db, &org, "skunkworks", false);
-        let adv = |to: &str| Advance {
-            reference: "refs/heads/main".into(),
-            from: None,
-            to: to.into(),
-        };
-        apply(&db, &open.id, true, &[counted(&uid, 200, 1)], &[adv("aa")]).unwrap();
-        apply(&db, &shut.id, false, &[counted(&uid, 200, 4)], &[adv("bb")]).unwrap();
-
-        // Opted out: the private work is not there at all, and there is
-        // no field a reader could subtract to find it.
-        let g = graph(&db, &uid, 190, 210).unwrap();
-        assert_eq!(g.total, 1);
-        assert!(!g.private_included);
-        assert_eq!(g.days[0].repos.len(), 1);
-        assert_eq!(g.days[0].repos[0].name, "widget");
-
-        crate::profiles::update(
-            &db,
-            &uid,
-            &crate::profiles::ProfileUpdate {
-                contrib_private_optin: Some(true),
-                ..Default::default()
-            },
-        )
-        .unwrap();
-        let g = graph(&db, &uid, 190, 210).unwrap();
-        assert_eq!(g.total, 5, "the private work is in the day's number");
-        assert!(g.private_included);
-        assert_eq!(
-            g.days[0].repos.len(),
-            1,
-            "a private repository named itself: {:?}",
-            g.days[0].repos
-        );
-        assert_eq!(g.days[0].count, 5);
-
-        // Made public, the same rows show in full detail — which is the
-        // whole reason they are stored raw rather than pre-summed.
-        registry::update_repo_meta(&db, &org, &shut.id, None, Some(true), None).unwrap();
-        let g = graph(&db, &uid, 190, 210).unwrap();
-        assert_eq!(g.total, 5);
-        let names: Vec<&str> = g.days[0].repos.iter().map(|r| r.name.as_str()).collect();
-        assert!(names.contains(&"skunkworks"), "{names:?}");
-    }
-
-    /// A repository somebody deleted is not on their graph, and above
-    /// all is not a link to a 404.
-    #[test]
-    fn a_deleted_repositorys_work_leaves_the_graph_with_it() {
-        let db = db("contribs_deleted");
-        let (uid, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
-        apply(
-            &db,
-            &r.id,
-            true,
-            &[counted(&uid, 300, 2)],
-            &[Advance {
-                reference: "refs/heads/main".into(),
-                from: None,
-                to: "aa".into(),
-            }],
-        )
-        .unwrap();
-        assert_eq!(graph(&db, &uid, 290, 310).unwrap().total, 2);
-
-        registry::delete_repo(&db, &org, &r.id).unwrap();
-        let g = graph(&db, &uid, 290, 310).unwrap();
-        assert_eq!(g.total, 0, "a deleted repository still counted: {g:?}");
-        assert!(g.days.is_empty(), "{g:?}");
+        assert_eq!(total(&db, &r.id), 5);
     }
 
     /// The repair must not be worse than the thing it repairs.
@@ -1082,12 +812,11 @@ mod tests {
     fn a_rewalk_clears_what_it_will_recount_rather_than_doubling_it() {
         let db = db("contribs_rewalk");
         let (uid, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         let head = "refs/heads/main".to_string();
         apply(
             &db,
             &r.id,
-            true,
             &[counted(&uid, 400, 3)],
             &[Advance {
                 reference: head.clone(),
@@ -1096,7 +825,7 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(graph(&db, &uid, 390, 410).unwrap().total, 3);
+        assert_eq!(total(&db, &r.id), 3);
 
         // The set a newly proved address sends the walker back over.
         let repos = repos_for_rewalk(&db, &uid).unwrap();
@@ -1107,7 +836,7 @@ mod tests {
         // are gone, so the re-walk that follows adds to nothing rather
         // than adding to what it is about to recount.
         assert_eq!(
-            graph(&db, &uid, 390, 410).unwrap().total,
+            total(&db, &r.id),
             0,
             "a re-walk left the old counts in place, so recounting the \
              same commits would double every square"
@@ -1123,7 +852,6 @@ mod tests {
         apply(
             &db,
             &r.id,
-            true,
             &[counted(&uid, 400, 3)],
             &[Advance {
                 reference: head,
@@ -1132,7 +860,7 @@ mod tests {
             }],
         )
         .unwrap();
-        assert_eq!(graph(&db, &uid, 390, 410).unwrap().total, 3);
+        assert_eq!(total(&db, &r.id), 3);
 
         // Somebody with no namespaces has nothing to re-walk, and a
         // repository deleted between the listing and the reset is
@@ -1142,32 +870,14 @@ mod tests {
         assert_eq!(rewalk(&db, &[]).unwrap(), 0);
     }
 
-    #[test]
-    fn a_window_that_is_not_a_window_is_refused_by_name() {
-        let db = db("contribs_window");
-        let (uid, _) = person(&db, "ada", "ada@example.com");
-        assert!(matches!(
-            graph(&db, &uid, 10, 9),
-            Err(GraphError::BadRange(_))
-        ));
-        assert!(matches!(
-            graph(&db, &uid, 0, MAX_DAYS),
-            Err(GraphError::BadRange(_))
-        ));
-        assert!(graph(&db, &uid, 0, MAX_DAYS - 1).is_ok());
-        // Somebody with no account has no graph rather than an error.
-        assert_eq!(graph(&db, "u_nobody", 0, 10).unwrap().total, 0);
-        assert!(!private_optin(&db, "u_nobody").unwrap());
-    }
-
     /// The rail the About panel renders: everyone who worked here, most
     /// first, summed over every day and no other repository.
     #[test]
     fn contributors_are_ranked_by_their_total_across_every_day() {
         let db = db("contribs_contributors");
         let (ada, org) = person(&db, "ada", "ada@example.com");
-        let widget = repo(&db, &org, "widget", true);
-        let other = repo(&db, &org, "gadget", true);
+        let widget = repo(&db, &org, "widget");
+        let other = repo(&db, &org, "gadget");
         let bob = named(&db, "bob");
         let cid = named(&db, "cid");
 
@@ -1205,7 +915,7 @@ mod tests {
 
         // Asked about a repository nobody has touched, the answer is an
         // empty rail rather than an error.
-        let empty = repo(&db, &org, "quiet", true);
+        let empty = repo(&db, &org, "quiet");
         assert!(contributors(&db, &empty.id, 10).unwrap().is_empty());
     }
 
@@ -1214,7 +924,7 @@ mod tests {
     fn an_equal_count_is_broken_by_handle_so_the_order_never_moves() {
         let db = db("contribs_contributors_tiebreak");
         let (_, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         // Created in reverse, so anything that leans on insertion order
         // — or on whatever order the aggregate happens to emit — comes
         // back the wrong way round.
@@ -1240,7 +950,7 @@ mod tests {
     fn a_request_for_everybody_is_clamped_rather_than_refused() {
         let db = db("contribs_contributors_clamp");
         let (_, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         // One more than the cap, so the cap is the thing being measured
         // and not the size of the fixture.
         let counts: Vec<Counted> = (0..=MAX_CONTRIBUTORS)
@@ -1270,7 +980,7 @@ mod tests {
     fn an_account_that_is_gone_is_dropped_rather_than_listed_nameless() {
         let db = db("contribs_contributors_gone");
         let (ada, org) = person(&db, "ada", "ada@example.com");
-        let r = repo(&db, &org, "widget", true);
+        let r = repo(&db, &org, "widget");
         let bob = named(&db, "bob");
         // An account with no personal namespace has no name to be
         // listed under. It is a real state, not a hypothetical: signup

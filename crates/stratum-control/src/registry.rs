@@ -75,7 +75,6 @@ pub struct Repo {
     /// reachable — see [`clean_homepage`].
     pub homepage: Option<String>,
     pub kind: RepoKind,
-    pub public: bool,
     pub default_branch: String,
     pub origin_url: Option<String>,
     pub origin_provider: Option<String>,
@@ -97,42 +96,6 @@ impl RepoPrefix {
     }
 }
 
-/// Object-store key prefix for one organization's package blobs.
-/// Constructible only by this module, and only from an [`Org`] — which
-/// is only ever returned by an org-scoped lookup.
-///
-/// No `LAYOUT` segment. A layout names how a repository's *packs* are
-/// arranged and is the thing a migration would rewrite; a package blob
-/// is its own bytes under its own digest and has no arrangement to
-/// version. Putting one here would be a segment nothing ever reads.
-#[derive(Debug, Clone)]
-pub struct PackagePrefix(String);
-
-impl PackagePrefix {
-    // Deliberately no `as_str`, unlike `RepoPrefix`. Nothing needs the
-    // bare prefix: a package blob is reached by digest through [`blob`]
-    // and nothing lists the prefix, so an accessor here would be a
-    // second way to build a key with no caller to justify it. An OCI
-    // adapter that needs to list will add one, with the caller that
-    // wants it.
-
-    /// The key one blob lives at. Takes the digest as `sha256:<hex>` or
-    /// bare hex and stores it bare, so the key is a path segment in
-    /// every store: a colon is legal in an S3 key but is percent-encoded
-    /// by some clients and not others, and a key that round-trips
-    /// differently depending on who wrote it is a key you cannot delete.
-    pub fn blob(&self, digest: &str) -> String {
-        let hex = digest.strip_prefix("sha256:").unwrap_or(digest);
-        format!("{}/{hex}", self.0)
-    }
-}
-
-impl Org {
-    pub fn package_prefix(&self) -> PackagePrefix {
-        PackagePrefix(format!("o/{}/pkg", self.id))
-    }
-}
-
 impl Repo {
     pub fn prefix(&self) -> RepoPrefix {
         RepoPrefix(format!("o/{}/r/{}/{LAYOUT}", self.org_id, self.id))
@@ -146,7 +109,6 @@ impl Repo {
             description: row.get("description"),
             homepage: row.get("homepage"),
             kind: RepoKind::parse(row.get("kind")),
-            public: row.get("public"),
             default_branch: row.get("default_branch"),
             origin_url: row.get("origin_url"),
             origin_provider: row.get("origin_provider"),
@@ -159,7 +121,7 @@ impl Repo {
     }
 }
 
-const REPO_COLS: &str = "id, org_id, name, description, homepage, kind, public, \
+const REPO_COLS: &str = "id, org_id, name, description, homepage, kind, \
      default_branch, origin_url, origin_provider, origin_installation, last_sync_at, \
      last_synced_commit, sync_error, created_at";
 
@@ -235,9 +197,8 @@ const RESERVED: &[&str] = &[
     "docs",
     "llms.txt",
     "llms-full.txt",
-    // Public site pages — one per `web/site/src/pages/*.astro`, kept in
-    // step by the test that reads that directory. `search` has no page
-    // of its own but is the name the search box would want.
+    // The hosted product's site pages. Reserved here too, so a namespace
+    // moved between the two editions keeps the same address in both.
     "ai-policy",
     "discover",
     "github-runners",
@@ -564,7 +525,6 @@ pub struct NewRepo<'a> {
     pub name: &'a str,
     pub description: Option<&'a str>,
     pub kind: RepoKind,
-    pub public: bool,
     pub default_branch: &'a str,
     pub origin_url: Option<&'a str>,
     pub origin_provider: Option<&'a str>,
@@ -580,16 +540,15 @@ pub fn create_repo(db: &ControlDb, org_id: &str, new: &NewRepo) -> Result<Repo, 
     let created_at = now_ms();
     db.lock()
         .execute(
-            "INSERT INTO repos (id, org_id, name, description, kind, public, default_branch, \
+            "INSERT INTO repos (id, org_id, name, description, kind, default_branch, \
              origin_url, origin_provider, origin_installation, created_at) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)",
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
             &[
                 &id,
                 &org_id,
                 &new.name,
                 &new.description,
                 &new.kind.as_str(),
-                &new.public,
                 &new.default_branch,
                 &new.origin_url,
                 &new.origin_provider,
@@ -723,21 +682,6 @@ pub fn purge_repo(db: &ControlDb, org_id: &str, id: &str) -> Result<(), String> 
 
 /// Tombstone: the repo vanishes from routing/auth instantly; the S3 prefix
 /// sweep is the GC worker's job.
-///
-/// The site goes with it, and it has to be done here rather than left to
-/// the foreign key. This is a **soft** delete — the row stays with
-/// `state = 'deleted'` until the purge sweep removes it — so
-/// `ON DELETE CASCADE` does not fire, and a `sites` row would sit there
-/// holding its hostname for a repository nobody can reach. Serving
-/// already refuses it, because that path resolves the repository and
-/// only an active one resolves; what lingered was the *name*, and the
-/// name is unique across the fleet, so the next repository that wanted
-/// it would silently be counted up to `-2` instead.
-///
-/// After the tombstone rather than before: a failure here leaves exactly
-/// what today's behaviour already leaves, a deleted repository with a
-/// stale site row, and says so — where doing it first would risk taking
-/// a live repository's site down and then failing to delete it.
 pub fn delete_repo(db: &ControlDb, org_id: &str, id: &str) -> Result<bool, String> {
     let n = db
         .lock()
@@ -747,9 +691,6 @@ pub fn delete_repo(db: &ControlDb, org_id: &str, id: &str) -> Result<bool, Strin
             &[&org_id, &id, &now_ms()],
         )
         .map_err(|e| e.to_string())?;
-    if n > 0 {
-        crate::sites::remove(db, id)?;
-    }
     Ok(n > 0)
 }
 
@@ -780,23 +721,6 @@ pub fn count_repos(db: &ControlDb, org_id: &str) -> Result<u64, String> {
     db.lock()
         .query_one(
             "SELECT COUNT(*) FROM repos WHERE org_id = $1 AND state = 'active'",
-            &[&org_id],
-        )
-        .map(|r| r.get::<_, i64>(0) as u64)
-        .map_err(|e| e.to_string())
-}
-
-/// How many of an organization's repositories are private.
-///
-/// The billing page's number: on a `free` organization every one of
-/// these is read-only until it subscribes again, and a page that could
-/// not count them told a person holding three that "the first private
-/// repository starts a subscription".
-pub fn count_private_repos(db: &ControlDb, org_id: &str) -> Result<u64, String> {
-    db.lock()
-        .query_one(
-            "SELECT COUNT(*) FROM repos \
-               WHERE org_id = $1 AND state = 'active' AND public = FALSE",
             &[&org_id],
         )
         .map(|r| r.get::<_, i64>(0) as u64)
@@ -1016,12 +940,10 @@ pub fn update_repo_meta(
     org_id: &str,
     repo_id: &str,
     description: Option<Option<&str>>,
-    public: Option<bool>,
     homepage: Option<Option<&str>>,
 ) -> Result<bool, String> {
     let desc_set = description.is_some();
     let desc = description.flatten();
-    let public_set = public.is_some();
     let home_set = homepage.is_some();
     let home = homepage.flatten();
     let n = db
@@ -1029,19 +951,9 @@ pub fn update_repo_meta(
         .execute(
             "UPDATE repos SET \
              description = CASE WHEN $3 THEN $4 ELSE description END, \
-             public = CASE WHEN $5 THEN $6 ELSE public END, \
-             homepage = CASE WHEN $7 THEN $8 ELSE homepage END \
+             homepage = CASE WHEN $5 THEN $6 ELSE homepage END \
              WHERE org_id = $1 AND id = $2 AND state = 'active'",
-            &[
-                &org_id,
-                &repo_id,
-                &desc_set,
-                &desc,
-                &public_set,
-                &public.unwrap_or(false),
-                &home_set,
-                &home,
-            ],
+            &[&org_id, &repo_id, &desc_set, &desc, &home_set, &home],
         )
         .map_err(|e| e.to_string())?;
     Ok(n > 0)
@@ -1058,7 +970,6 @@ pub struct RepoHit {
     pub org: String,
     pub name: String,
     pub description: Option<String>,
-    pub public: bool,
     pub kind: RepoKind,
     pub created_at: i64,
 }
@@ -1070,11 +981,9 @@ pub struct RepoHit {
 /// hands in: an id in a query parameter would be a request to be shown
 /// somebody else's namespace.
 pub enum Viewer<'a> {
-    /// Nobody signed in: public repositories, and nothing else.
-    Anonymous,
-    /// A person. Public repositories plus every namespace they belong
-    /// to — which is exactly what `members::effective_role` grants,
-    /// because a per-repo grant without membership is not access.
+    /// A person: every namespace they belong to — which is exactly what
+    /// `members::effective_role` grants, because a per-repo grant
+    /// without membership is not access.
     User(&'a str),
     /// A service token bound to one org, and not to a single repo.
     Org(&'a str),
@@ -1184,18 +1093,17 @@ pub fn search_repos(
     // rule is one readable line of SQL and the list of namespaces comes
     // from the same function every authorization seam uses.
     let orgs: Vec<String> = match viewer {
-        Viewer::Anonymous => Vec::new(),
         Viewer::User(user_id) => crate::members::orgs_of(db, user_id)?,
         Viewer::Org(org_id) => vec![(*org_id).to_string()],
     };
     let rows = db
         .lock()
         .query(
-            "SELECT r.id, r.org_id, o.name AS org, r.name, r.description, r.public, \
+            "SELECT r.id, r.org_id, o.name AS org, r.name, r.description, \
              r.kind, r.created_at \
              FROM repos r JOIN orgs o ON o.id = r.org_id \
              WHERE r.state = 'active' \
-               AND (r.public OR r.org_id = ANY($1)) \
+               AND r.org_id = ANY($1) \
                AND (lower(r.name) LIKE $2 ESCAPE '\\' \
                     OR lower(o.name) LIKE $2 ESCAPE '\\' \
                     OR lower(COALESCE(r.description, '')) LIKE $2 ESCAPE '\\' \
@@ -1219,7 +1127,6 @@ pub fn search_repos(
             org: row.get("org"),
             name: row.get("name"),
             description: row.get("description"),
-            public: row.get("public"),
             kind: RepoKind::parse(row.get("kind")),
             created_at: row.get("created_at"),
         })
@@ -1232,9 +1139,9 @@ pub fn search_repos(
 /// Beside `search_repos` and not in `topics.rs` on purpose: it applies
 /// the *same* visibility rule, and a visibility rule implemented twice
 /// is one that will eventually disagree with itself. The org list is
-/// resolved exactly as it is there — public, or a namespace you belong
-/// to — so a topic carried only by private repositories is invisible to
-/// a stranger, and so is the fact that it exists.
+/// resolved exactly as it is there — the namespaces you belong to — so
+/// a topic carried only by another namespace's repositories is invisible
+/// to you, and so is the fact that it exists.
 ///
 /// This exists because the discovery page's topic chips were a fixed
 /// list of ten common words: they matched whatever a repository happened
@@ -1251,7 +1158,6 @@ pub fn topics_in_use(
 ) -> Result<Vec<(String, i64)>, String> {
     let limit = limit.clamp(1, 200) as i64;
     let orgs: Vec<String> = match viewer {
-        Viewer::Anonymous => Vec::new(),
         Viewer::User(user_id) => crate::members::orgs_of(db, user_id)?,
         Viewer::Org(org_id) => vec![(*org_id).to_string()],
     };
@@ -1261,7 +1167,7 @@ pub fn topics_in_use(
             "SELECT t.topic, COUNT(*) AS n \
              FROM repo_topics t JOIN repos r ON r.id = t.repo_id \
              WHERE r.state = 'active' \
-               AND (r.public OR r.org_id = ANY($1)) \
+               AND r.org_id = ANY($1) \
              GROUP BY t.topic \
              ORDER BY n DESC, t.topic ASC \
              LIMIT $2",
@@ -1343,7 +1249,6 @@ mod tests {
                 description: None,
                 name: "notes",
                 kind: RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -1474,7 +1379,6 @@ mod tests {
                     name: spelling,
                     description: None,
                     kind: RepoKind::Native,
-                    public: true,
                     default_branch: "main",
                     origin_url: None,
                     origin_provider: None,
@@ -1519,7 +1423,6 @@ mod tests {
                 description: None,
                 name: "app",
                 kind: RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -1537,7 +1440,6 @@ mod tests {
                 description: None,
                 name: "app",
                 kind: RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -1559,7 +1461,6 @@ mod tests {
                 description: None,
                 name: "app",
                 kind: RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -1581,7 +1482,6 @@ mod tests {
                     description: None,
                     name: &format!("repo-{i}"),
                     kind: RepoKind::Native,
-                    public: false,
                     default_branch: "main",
                     origin_url: None,
                     origin_provider: None,
@@ -1758,7 +1658,6 @@ mod tests {
                     name,
                     description: desc,
                     kind: RepoKind::Native,
-                    public: true,
                     default_branch: "main",
                     origin_url: None,
                     origin_provider: None,
@@ -1784,7 +1683,7 @@ mod tests {
         // Typed: both, because somebody typing a word means "anything to
         // do with this" and does not know which field carries it.
         let mut typed =
-            names(search_repos(&db, "kubernetes", None, &Viewer::Anonymous, None, 50).unwrap());
+            names(search_repos(&db, "kubernetes", None, &Viewer::Org(&acme.id), None, 50).unwrap());
         typed.sort();
         assert_eq!(
             typed,
@@ -1796,27 +1695,47 @@ mod tests {
         // repository merely mentioning the word would make the facet
         // useless for the one job it has.
         assert_eq!(
-            names(search_repos(&db, "", Some("kubernetes"), &Viewer::Anonymous, None, 50).unwrap()),
+            names(
+                search_repos(
+                    &db,
+                    "",
+                    Some("kubernetes"),
+                    &Viewer::Org(&acme.id),
+                    None,
+                    50
+                )
+                .unwrap()
+            ),
             ["operator"]
         );
 
         // Topics are stored lowercased, so the facet is case-insensitive
         // and `/topics/Rust` is the same page as `/topics/rust`.
         assert_eq!(
-            names(search_repos(&db, "", Some("RUST"), &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "", Some("RUST"), &Viewer::Org(&acme.id), None, 50).unwrap()),
             ["operator"]
         );
 
         // Text and facet compose rather than replace each other.
         assert_eq!(
             names(
-                search_repos(&db, "operator", Some("rust"), &Viewer::Anonymous, None, 50).unwrap()
+                search_repos(
+                    &db,
+                    "operator",
+                    Some("rust"),
+                    &Viewer::Org(&acme.id),
+                    None,
+                    50
+                )
+                .unwrap()
             ),
             ["operator"]
         );
         assert!(
-            names(search_repos(&db, "notes", Some("rust"), &Viewer::Anonymous, None, 50).unwrap())
-                .is_empty(),
+            names(
+                search_repos(&db, "notes", Some("rust"), &Viewer::Org(&acme.id), None, 50).unwrap()
+            )
+            .is_empty(),
             "the facet did not narrow the text query"
         );
 
@@ -1825,7 +1744,7 @@ mod tests {
         // somebody typed by hand should come back empty, not 400.
         for t in ["absent", "not a topic", "-leading-hyphen", ""] {
             assert!(
-                search_repos(&db, "", Some(t), &Viewer::Anonymous, None, 50)
+                search_repos(&db, "", Some(t), &Viewer::Org(&acme.id), None, 50)
                     .unwrap()
                     .is_empty(),
                 "{t:?} should match nothing"
@@ -1835,12 +1754,12 @@ mod tests {
 
     /// The whole of search's authorization, exercised against real rows.
     ///
-    /// The assertion that matters is the negative one: a private repo is
-    /// absent for everyone outside its namespace, and *present* for a
-    /// member — so the test would fail both if the filter leaked and if
-    /// it were simply broken and returned nothing.
+    /// The assertion that matters is the negative one: a repo is absent
+    /// for everyone outside its namespace, and *present* for a member —
+    /// so the test would fail both if the filter leaked and if it were
+    /// simply broken and returned nothing.
     #[test]
-    fn search_shows_public_repos_to_anyone_and_private_ones_only_to_members() {
+    fn search_shows_a_namespaces_repos_only_to_its_members() {
         let db = ControlDb::open(&stratum_testkit::pg::test_db_url("registry-search")).unwrap();
         let acme = create_org(&db, "acme").unwrap();
         let other = create_org(&db, "zzz-other").unwrap();
@@ -1865,7 +1784,7 @@ mod tests {
         )
         .unwrap();
 
-        let mk = |org: &str, name: &str, public: bool, desc: Option<&str>| {
+        let mk = |org: &str, name: &str, desc: Option<&str>| {
             create_repo(
                 &db,
                 org,
@@ -1873,7 +1792,6 @@ mod tests {
                     name,
                     description: desc,
                     kind: RepoKind::Native,
-                    public,
                     default_branch: "main",
                     origin_url: None,
                     origin_provider: None,
@@ -1882,33 +1800,32 @@ mod tests {
             )
             .unwrap()
         };
-        mk(&acme.id, "widget", true, Some("the public widget"));
-        mk(&acme.id, "payments", false, Some("private ledger work"));
-        mk(&other.id, "widget-fork", true, None);
+        mk(&acme.id, "widget", Some("the acme widget"));
+        mk(&acme.id, "payments", Some("ledger work"));
+        mk(&other.id, "widget-fork", None);
 
         let names = |v: Vec<RepoHit>| {
             v.into_iter()
                 .map(|h| format!("{}/{}", h.org, h.name))
                 .collect::<Vec<_>>()
         };
+        let as_member = Viewer::User(&member.id);
+        let as_stranger = Viewer::User(&stranger.id);
 
-        // Anonymous: the two public repos, in namespace order, and no
-        // sign that `acme/payments` is there at all.
+        // A member of acme sees acme's repositories, and no sign that the
+        // other namespace's are there at all.
         assert_eq!(
-            names(search_repos(&db, "", None, &Viewer::Anonymous, None, 50).unwrap()),
-            ["acme/widget", "zzz-other/widget-fork"]
+            names(search_repos(&db, "", None, &as_member, None, 50).unwrap()),
+            ["acme/payments", "acme/widget"]
         );
-        // A member of acme sees their private repo as well.
+        // Someone in a *different* org sees only their own: membership
+        // widens nothing outside its own namespace.
         assert_eq!(
-            names(search_repos(&db, "", None, &Viewer::User(&member.id), None, 50).unwrap()),
-            ["acme/payments", "acme/widget", "zzz-other/widget-fork"]
+            names(search_repos(&db, "", None, &as_stranger, None, 50).unwrap()),
+            ["zzz-other/widget-fork"]
         );
-        // Someone in a *different* org gets exactly the anonymous
-        // answer: membership widens nothing outside its own namespace.
         assert_eq!(
-            names(
-                search_repos(&db, "payments", None, &Viewer::User(&stranger.id), None, 50).unwrap()
-            ),
+            names(search_repos(&db, "payments", None, &as_stranger, None, 50).unwrap()),
             [] as [String; 0]
         );
         // A service token bound to the org stands in for the org.
@@ -1919,89 +1836,82 @@ mod tests {
 
         // Matching: name, namespace and description all count.
         assert_eq!(
-            names(search_repos(&db, "WIDG", None, &Viewer::Anonymous, None, 50).unwrap()),
-            ["acme/widget", "zzz-other/widget-fork"]
+            names(search_repos(&db, "WIDG", None, &as_member, None, 50).unwrap()),
+            ["acme/widget"]
         );
         assert_eq!(
-            names(search_repos(&db, "zzz-other", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "zzz-other", None, &as_stranger, None, 50).unwrap()),
             ["zzz-other/widget-fork"]
         );
         assert_eq!(
-            names(search_repos(&db, "public widget", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "acme widget", None, &as_member, None, 50).unwrap()),
             ["acme/widget"]
         );
         // A description only a member can see does not match for anyone
         // else — the text is as private as the repository.
         assert_eq!(
-            names(search_repos(&db, "ledger", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "ledger", None, &as_stranger, None, 50).unwrap()),
             [] as [String; 0]
         );
         assert_eq!(
-            names(search_repos(&db, "ledger", None, &Viewer::User(&member.id), None, 50).unwrap()),
+            names(search_repos(&db, "ledger", None, &as_member, None, 50).unwrap()),
             ["acme/payments"]
         );
 
         // Wildcards are data. `%` matching everything would be the
         // difference between a search and a dump.
         assert_eq!(
-            names(search_repos(&db, "%", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "%", None, &as_member, None, 50).unwrap()),
             [] as [String; 0]
         );
         assert_eq!(
-            names(search_repos(&db, "_", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "_", None, &as_member, None, 50).unwrap()),
             [] as [String; 0]
         );
         // A NUL byte is text PostgreSQL refuses outright; nothing can be
         // named with one, so it matches nothing rather than 500ing.
         assert_eq!(
-            names(search_repos(&db, "wid\0get", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "wid\0get", None, &as_member, None, 50).unwrap()),
             [] as [String; 0]
         );
-        assert!(search_repos(
-            &db,
-            &"a".repeat(MAX_QUERY + 1),
-            None,
-            &Viewer::Anonymous,
-            None,
-            50
-        )
-        .unwrap_err()
-        .contains("at most"));
+        assert!(
+            search_repos(&db, &"a".repeat(MAX_QUERY + 1), None, &as_member, None, 50)
+                .unwrap_err()
+                .contains("at most")
+        );
 
         // Paging walks the visible set once, and a cursor cannot widen
-        // it: replaying the member's cursor as an anonymous caller still
-        // hides the private repo behind it.
-        let first = search_repos(&db, "", None, &Viewer::User(&member.id), None, 1).unwrap();
+        // it: replaying the member's cursor as somebody else still hides
+        // the repositories behind it that are not theirs.
+        let first = search_repos(&db, "", None, &as_member, None, 1).unwrap();
         assert_eq!(names(first.clone()), ["acme/payments"]);
         let cursor = cursor_of(&first[0]);
         assert_eq!(
-            names(
-                search_repos(&db, "", None, &Viewer::User(&member.id), Some(&cursor), 50).unwrap()
-            ),
-            ["acme/widget", "zzz-other/widget-fork"]
+            names(search_repos(&db, "", None, &as_member, Some(&cursor), 50).unwrap()),
+            ["acme/widget"]
         );
         assert_eq!(
-            names(search_repos(&db, "", None, &Viewer::Anonymous, Some(&cursor), 50).unwrap()),
-            ["acme/widget", "zzz-other/widget-fork"]
+            names(search_repos(&db, "", None, &as_stranger, Some(&cursor), 50).unwrap()),
+            ["zzz-other/widget-fork"]
         );
         // A cursor pointing before everything is the first page, not an
         // error, and a nonsense one is simply no cursor.
         assert_eq!(
-            search_repos(&db, "", None, &Viewer::Anonymous, Some("nonsense"), 50)
+            search_repos(&db, "", None, &as_member, Some("nonsense"), 50)
                 .unwrap()
                 .len(),
             2
         );
 
         // Deleting removes it from search on the very next request.
-        let doomed = mk(&acme.id, "doomed", true, None);
+        let doomed = mk(&acme.id, "doomed", None);
         assert_eq!(
-            names(search_repos(&db, "doomed", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "doomed", None, &as_member, None, 50).unwrap()),
             ["acme/doomed"]
         );
         delete_repo(&db, &acme.id, &doomed.id).unwrap();
         assert_eq!(
-            names(search_repos(&db, "doomed", None, &Viewer::Anonymous, None, 50).unwrap()),
+            names(search_repos(&db, "doomed", None, &as_member, None, 50).unwrap()),
             [] as [String; 0]
         );
     }
@@ -2027,7 +1937,6 @@ mod tests {
                     name,
                     description: Some(desc),
                     kind: RepoKind::Native,
-                    public: true,
                     default_branch: "main",
                     origin_url: None,
                     origin_provider: None,
@@ -2043,15 +1952,15 @@ mod tests {
         ] {
             db.lock().execute(sql, &[]).unwrap();
         }
-        let hit = search_repos(&db, "idg", None, &Viewer::Anonymous, None, 50).unwrap();
+        let hit = search_repos(&db, "idg", None, &Viewer::Org(&org.id), None, 50).unwrap();
         assert_eq!(hit.len(), 1);
         assert_eq!(hit[0].name, "widget");
-        let hit = search_repos(&db, "fast", None, &Viewer::Anonymous, None, 50).unwrap();
+        let hit = search_repos(&db, "fast", None, &Viewer::Org(&org.id), None, 50).unwrap();
         assert_eq!(hit.len(), 1, "description search survives too");
     }
 
-    /// Description and visibility are edited independently: a PATCH that
-    /// only sets a description must not republish a private repository.
+    /// Description and homepage are edited independently: a PATCH that
+    /// sets one must leave the other alone.
     #[test]
     fn updating_one_field_leaves_the_other_alone() {
         let db = ControlDb::open(&stratum_testkit::pg::test_db_url("registry-meta")).unwrap();
@@ -2063,7 +1972,6 @@ mod tests {
                 name: "app",
                 description: Some("first"),
                 kind: RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -2073,23 +1981,14 @@ mod tests {
         .unwrap();
         assert_eq!(repo.description.as_deref(), Some("first"));
 
-        assert!(
-            update_repo_meta(&db, &org.id, &repo.id, Some(Some("second")), None, None).unwrap()
-        );
+        assert!(update_repo_meta(&db, &org.id, &repo.id, Some(Some("second")), None).unwrap());
         let now = repo_by_id(&db, &org.id, &repo.id).unwrap().unwrap();
         assert_eq!(now.description.as_deref(), Some("second"));
-        assert!(!now.public, "a description edit must not publish");
-
-        assert!(update_repo_meta(&db, &org.id, &repo.id, None, Some(true), None).unwrap());
-        let now = repo_by_id(&db, &org.id, &repo.id).unwrap().unwrap();
-        assert_eq!(now.description.as_deref(), Some("second"));
-        assert!(now.public);
 
         // Clearing is `Some(None)`, and is distinct from "leave alone".
-        assert!(update_repo_meta(&db, &org.id, &repo.id, Some(None), None, None).unwrap());
+        assert!(update_repo_meta(&db, &org.id, &repo.id, Some(None), None).unwrap());
         let now = repo_by_id(&db, &org.id, &repo.id).unwrap().unwrap();
         assert_eq!(now.description, None);
-        assert!(now.public, "clearing a description must not unpublish");
 
         // The homepage obeys the same three rules, and each of them is a
         // separate `CASE WHEN` arm that can be got wrong on its own.
@@ -2100,7 +1999,6 @@ mod tests {
             &org.id,
             &repo.id,
             None,
-            None,
             Some(Some("https://example.com")),
         )
         .unwrap());
@@ -2110,7 +2008,7 @@ mod tests {
         // Not mentioning it leaves it alone — the arm a naive
         // `homepage = $n` would break, silently wiping a project's site
         // every time somebody edited their description.
-        assert!(update_repo_meta(&db, &org.id, &repo.id, Some(Some("third")), None, None).unwrap());
+        assert!(update_repo_meta(&db, &org.id, &repo.id, Some(Some("third")), None).unwrap());
         let now = repo_by_id(&db, &org.id, &repo.id).unwrap().unwrap();
         assert_eq!(
             now.homepage.as_deref(),
@@ -2121,19 +2019,18 @@ mod tests {
 
         // And clearing it is its own request, which must not disturb
         // anything beside it.
-        assert!(update_repo_meta(&db, &org.id, &repo.id, None, None, Some(None)).unwrap());
+        assert!(update_repo_meta(&db, &org.id, &repo.id, None, Some(None)).unwrap());
         let now = repo_by_id(&db, &org.id, &repo.id).unwrap().unwrap();
         assert_eq!(now.homepage, None);
         assert_eq!(now.description.as_deref(), Some("third"));
-        assert!(now.public);
 
         // A repo in another namespace is not this org's to edit, and a
         // deleted one is gone: both answer "no rows", never a silent
         // success.
         let other = create_org(&db, "other").unwrap();
-        assert!(!update_repo_meta(&db, &other.id, &repo.id, Some(Some("x")), None, None).unwrap());
+        assert!(!update_repo_meta(&db, &other.id, &repo.id, Some(Some("x")), None).unwrap());
         delete_repo(&db, &org.id, &repo.id).unwrap();
-        assert!(!update_repo_meta(&db, &org.id, &repo.id, Some(Some("x")), None, None).unwrap());
+        assert!(!update_repo_meta(&db, &org.id, &repo.id, Some(Some("x")), None).unwrap());
     }
 
     #[test]

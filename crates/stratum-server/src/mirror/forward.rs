@@ -367,7 +367,6 @@ mod tests {
             description: None,
             homepage: None,
             kind: stratum_control::registry::RepoKind::Mirror,
-            public: true,
             default_branch: "main".into(),
             origin_url: Some("acme/widget".into()),
             origin_provider: Some("github".into()),

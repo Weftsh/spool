@@ -320,18 +320,17 @@ impl Handler for SshConn {
         // both mask the same way — a changeset workspace is readable by
         // exactly whoever may read every one of its members, so a denial
         // there is a denial of the whole path.
-        // A hosted runner's own fetch is never refused for transfer and
-        // never billed — decided here, where the credential is in hand.
+        // A runner's own fetch is recorded as a runner's — decided here,
+        // where the credential is in hand.
         let runner = crate::metering::is_runner(&state.db, principal.as_ref());
         let resolved = match &path {
             WirePath::Repo { org, repo } => Resolved::Repo(
                 match &principal {
                     Some(p) => crate::app::wire_repo_for_principal(&state, p, org, repo, need),
                     // A key this server knows, under a namespace it has
-                    // no role in: a public repository is still served,
-                    // and a push to one is refused in words rather than
-                    // masked — the key's owner can read it anyway.
-                    None => crate::app::wire_repo_for_outsider(&state, org, repo, need),
+                    // no role in: masked, exactly like one that does not
+                    // exist.
+                    None => Err(crate::app::WireDeny::NotFound),
                 }
                 .map(|(r, ctx)| {
                     Box::new(RepoTarget {

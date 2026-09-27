@@ -1,8 +1,8 @@
-//! Web asset serving: the OpenAPI spec (compiled in — single source of
-//! truth shared with the docs site), the marketing/docs site at `/`, and
-//! the dashboard SPA at `/dashboard/` with an index.html fallback for
-//! client-side routes. Both directories are optional: unset env vars mean
-//! the server is API-only and unmatched paths 404 as before.
+//! Web asset serving: the OpenAPI spec (compiled in — the one copy the
+//! docs and the server share), and the dashboard SPA at `/dashboard/`
+//! and at the forge addresses (`/{owner}/{repo}/…`), with an index.html
+//! fallback for client-side routes. The dashboard directory is optional:
+//! unset, the server is API-only and unmatched paths 404.
 
 use crate::app::SharedState;
 use axum::extract::State;
@@ -10,8 +10,8 @@ use axum::http::{header, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use std::path::{Path, PathBuf};
 
-/// The OpenAPI 3.1 document. `include_str!` from the site's public dir so
-/// the served spec and the one the docs site ships can never diverge.
+/// The OpenAPI 3.1 document. `include_str!` from `docs/` so the served
+/// spec and the one the documentation links to can never diverge.
 const OPENAPI_JSON: &str = include_str!("../../../docs/openapi.json");
 
 pub async fn openapi() -> Response {
@@ -78,9 +78,9 @@ async fn serve_file(path: PathBuf) -> Option<Response> {
     )
 }
 
-/// Try `<root>/<path>`, then `<root>/<path>/index.html` (Astro emits
-/// directory-per-page), then an optional SPA fallback to the root
-/// `index.html` (the dashboard's client-side router owns unknown paths).
+/// Try `<root>/<path>`, then `<root>/<path>/index.html`, then an optional
+/// SPA fallback to the root `index.html` (the dashboard's client-side
+/// router owns unknown paths).
 async fn serve_from(root: &Path, url_path: &str, spa_fallback: bool) -> Response {
     let Some(target) = safe_join(root, url_path) else {
         return StatusCode::NOT_FOUND.into_response();
@@ -105,34 +105,26 @@ async fn serve_from(root: &Path, url_path: &str, spa_fallback: bool) -> Response
     StatusCode::NOT_FOUND.into_response()
 }
 
-/// Router fallback: anything no API or git route claimed is looked up in
-/// the site build (when configured), and failing that may be a public
-/// forge page — `/{owner}` or `/{owner}/{repo}/…` — which the dashboard
-/// SPA renders.
+/// Router fallback: anything no API or git route claimed. `/` is the
+/// dashboard's front door; anything else may be a forge page —
+/// `/{owner}` or `/{owner}/{repo}/…` — which the dashboard SPA renders.
 ///
 /// The forge pages are served *here*, from the fallback, rather than
-/// from a root `.route("/:owner")`, and that is the whole design. matchit
-/// prefers a parameterised segment to no route at all, so a root param
-/// route would swallow `/mirror`, `/repos`, `/monorepo`, `/gitfarm` and
-/// `/discover` — which are not routes but Astro files answered by this
-/// same fallback. Looking the site up first means the static site keeps
-/// precedence by construction, with nothing to remember when a page is
-/// added.
+/// from a root `.route("/:owner")`: matchit prefers a parameterised
+/// segment to no route at all, so a root param route would swallow every
+/// path the fallback is meant to 404.
 ///
 /// The git wire needs no special handling and gets none: `/:org/:repo/
 /// info/refs`, `git-upload-pack` and `git-receive-pack` are real routes
 /// registered in `app::router`, so matchit answers them before anything
 /// reaches the fallback. Nor is there any sniffing of `Accept` or the
 /// method to tell a browser from a git client — the fallback is
-/// registered `get(site)`, and by the time a request is here it has
+/// registered `get(fallback)`, and by the time a request is here it has
 /// already failed to be a git request by its *path*, which is a fact
 /// about the URL rather than a guess about the client.
-pub async fn site(State(state): State<SharedState>, uri: Uri) -> Response {
-    if let Some(root) = &state.site_dir {
-        let served = serve_from(root, uri.path(), false).await;
-        if served.status() != StatusCode::NOT_FOUND {
-            return served;
-        }
+pub async fn fallback(State(state): State<SharedState>, uri: Uri) -> Response {
+    if uri.path() == "/" && state.dashboard_dir.is_some() {
+        return axum::response::Redirect::to("/dashboard/").into_response();
     }
     forge_spa(&state, uri.path()).await
 }
@@ -158,7 +150,7 @@ const SPA_SEGMENTS: &[&str] = &[
     "topics",
 ];
 
-/// The dashboard shell for a public forge URL, or 404.
+/// The dashboard shell for a forge URL, or 404.
 ///
 /// Three gates, in ascending cost, and the last one is a judgement call
 /// worth stating. A name that is ill-formed or reserved is settled
@@ -212,9 +204,8 @@ async fn forge_spa(state: &crate::app::AppState, path: &str) -> Response {
     }
     // A control-plane failure lands in the same arm as "no such
     // namespace" on purpose: this function's only job is to choose
-    // between the site's 404 and the SPA, and if we cannot establish
-    // that the name is a namespace, the 404 we were already giving is
-    // the honest answer.
+    // between a 404 and the SPA, and if we cannot establish that the
+    // name is a namespace, the 404 is the honest answer.
     match stratum_control::registry::org_by_name(&state.db, owner) {
         Ok(Some(_)) => match serve_file(root.join("index.html")).await {
             Some(r) => r,

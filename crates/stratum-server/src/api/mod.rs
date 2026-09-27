@@ -5,7 +5,6 @@ use std::collections::HashMap;
 
 pub mod audit_api;
 pub mod auth_api;
-pub mod badges;
 pub mod cdn_api;
 pub mod change_views_api;
 pub mod changes_api;
@@ -16,7 +15,6 @@ pub mod checks_intake;
 pub mod commits;
 pub mod contribs_api;
 pub mod exports;
-pub mod follows_api;
 pub mod github_api;
 pub mod github_auth;
 pub mod imports_api;
@@ -36,9 +34,7 @@ pub mod repos;
 pub mod runner_api;
 pub mod runners_api;
 pub mod search;
-pub mod sites_api;
 pub mod sshkeys_api;
-pub mod stars_api;
 pub mod teams_api;
 pub mod tokens;
 pub mod watch_api;
@@ -126,6 +122,26 @@ pub fn present<'a>(params: &'a HashMap<String, String>, key: &str) -> Option<&'a
         .get(key)
         .map(String::as_str)
         .filter(|s| !s.is_empty())
+}
+
+/// What a request that asks for a public repository is told.
+///
+/// Every repository on this server belongs to its organization and is
+/// read only by the people it grants. A body that still says
+/// `"public": true` — a script written for the hosted edition, an old
+/// SDK — is refused in words rather than quietly given a private
+/// repository it did not ask for; `"public": false` is what already
+/// happens, and is accepted.
+pub const NO_PUBLIC_REPOS: &str =
+    "this server has no public repositories: every repository is private to its \
+     organization — omit \"public\" or set it to false";
+
+/// [`NO_PUBLIC_REPOS`] as a 400, for a body field that asked for one.
+pub fn refuse_public(public: Option<bool>) -> Result<(), Response> {
+    if public == Some(true) {
+        return Err(json_error(StatusCode::BAD_REQUEST, NO_PUBLIC_REPOS));
+    }
+    Ok(())
 }
 
 pub fn json_error(status: StatusCode, msg: impl Into<String>) -> Response {

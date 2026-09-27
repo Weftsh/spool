@@ -1207,7 +1207,6 @@ mod tests {
                 name: "app",
                 description: None,
                 kind: stratum_control::RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,

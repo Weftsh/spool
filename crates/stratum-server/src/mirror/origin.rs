@@ -41,20 +41,6 @@ pub trait OriginProvider: Send + Sync {
     fn can_push(&self, _repo: &Repo) -> bool {
         true
     }
-
-    /// What the origin says about a repository, if it says anything.
-    ///
-    /// Default `Ok(None)`, and that is the honest answer for a provider
-    /// with no metadata API: a bare git URL over HTTPS can be fetched
-    /// and cannot be interviewed. Returning a zero here instead would
-    /// let every generic mirror publish "0 upstream" as though it had
-    /// asked and been told.
-    ///
-    /// `Err` is for "we asked and it went wrong", which callers treat as
-    /// "we do not know" — never as zero.
-    fn repo_meta(&self, _origin_url: &str) -> Result<Option<RemoteRepo>, String> {
-        Ok(None)
-    }
 }
 
 /// Mirrors any git-fetchable URL. Webhooks are verified against the
@@ -1181,60 +1167,7 @@ impl RemoteRepo {
     }
 }
 
-impl GithubApp {
-    /// `owner/name` out of an origin URL, or `None` if this is not one
-    /// of ours. Tolerates a `.git` suffix and a trailing slash, because
-    /// both are things people paste.
-    fn full_name_of(&self, origin_url: &str) -> Option<String> {
-        // Two shapes reach here and both are real. Mirror creation
-        // accepts a bare `owner/name` shorthand as well as a full URL —
-        // the e2e suites use the shorthand throughout — and a parser
-        // that only understood URLs would return `None` for the common
-        // case and quietly import no count at all. That is the worst
-        // kind of failure this feature can have: silent, and it looks
-        // exactly like an origin that has no stars.
-        let rest = match origin_url.strip_prefix(&format!("{}/", self.git_base)) {
-            Some(rest) => rest,
-            None if !origin_url.contains("://") => origin_url,
-            None => return None,
-        };
-        let rest = rest.trim_end_matches('/').trim_end_matches(".git");
-        let mut parts = rest.split('/');
-        let owner = parts.next().filter(|s| !s.is_empty())?;
-        let name = parts.next().filter(|s| !s.is_empty())?;
-        // Exactly two segments. Anything deeper is a URL into a
-        // repository, not the repository itself, and guessing at it
-        // would send a request nobody asked for.
-        if parts.next().is_some() {
-            return None;
-        }
-        Some(format!("{owner}/{name}"))
-    }
-}
-
 impl OriginProvider for GithubApp {
-    fn repo_meta(&self, origin_url: &str) -> Result<Option<RemoteRepo>, String> {
-        let Some(full_name) = self.full_name_of(origin_url) else {
-            return Ok(None);
-        };
-        let url = format!("{}/repos/{full_name}", self.api_base);
-        // Unauthenticated: this is only ever asked about an origin
-        // somebody is mirroring, and a public repository answers
-        // anybody. A private one answers 404, which lands in `Err` and
-        // is read as "we do not know" — the correct outcome, and one we
-        // should not spend an installation token to reach.
-        let text = ureq::get(&url)
-            .set("Accept", "application/vnd.github+json")
-            .timeout(Duration::from_secs(10))
-            .call()
-            .map_err(|e| format!("GET {url}: {e}"))?
-            .into_string()
-            .map_err(|e| format!("read {url}: {e}"))?;
-        let v: serde_json::Value =
-            serde_json::from_str(&text).map_err(|e| format!("repository metadata: {e}"))?;
-        Ok(Some(RemoteRepo::from_json(&v)))
-    }
-
     fn verify_signature(&self, signature: Option<&str>, body: &[u8]) -> Result<(), String> {
         verify_hmac_sig(&self.webhook_secret, signature, body)
     }
@@ -1422,77 +1355,6 @@ mod tests {
         )
     }
 
-    /// Which origins name a repository we can ask about, and which do
-    /// not.
-    ///
-    /// Pure string work, and every branch of it decides whether an
-    /// imported star count appears at all — so a wrong `None` here is
-    /// silent, and looks exactly like an upstream with no stars. The
-    /// coverage gate found three of these arms unexercised: the full-URL
-    /// form, a URL belonging to somebody else, and a path with more
-    /// segments than a repository has.
-    #[test]
-    fn full_name_of_reads_both_shapes_and_refuses_the_rest() {
-        let gh = app();
-
-        // The shorthand mirror creation accepts, and the shape every
-        // e2e uses.
-        assert_eq!(
-            gh.full_name_of("acme/widget"),
-            Some("acme/widget".to_string())
-        );
-        // The full URL under our own git base. This arm had no test,
-        // and it is the one a person pasting from a browser produces.
-        assert_eq!(
-            gh.full_name_of("https://github.com/acme/widget"),
-            Some("acme/widget".to_string())
-        );
-        // Both tolerated endings, because both are things people paste.
-        assert_eq!(
-            gh.full_name_of("https://github.com/acme/widget.git"),
-            Some("acme/widget".to_string())
-        );
-        assert_eq!(
-            gh.full_name_of("https://github.com/acme/widget/"),
-            Some("acme/widget".to_string())
-        );
-
-        // A URL somewhere else entirely. Refused rather than guessed
-        // at: asking api.github.com about a repository hosted on
-        // another forge would send a request nobody asked for and
-        // attribute somebody else's count to it.
-        assert_eq!(gh.full_name_of("https://gitlab.com/acme/widget"), None);
-        assert_eq!(gh.full_name_of("file:///srv/origins/acme/widget"), None);
-
-        // Deeper than a repository: a URL *into* one.
-        assert_eq!(
-            gh.full_name_of("https://github.com/acme/widget/tree/main"),
-            None
-        );
-        assert_eq!(gh.full_name_of("acme/widget/extra"), None);
-
-        // Not enough to name one.
-        assert_eq!(gh.full_name_of("acme"), None);
-        assert_eq!(gh.full_name_of(""), None);
-        assert_eq!(gh.full_name_of("acme/"), None);
-        assert_eq!(gh.full_name_of("/widget"), None);
-    }
-
-    /// An origin we cannot name is answered "we do not know", never
-    /// "zero".
-    ///
-    /// The distinction is the whole of the imported-count feature: a
-    /// mirrored project showing a confident `0 on GitHub` beside its
-    /// own honest count is the lie the two-field shape exists to
-    /// prevent. This arm returns before any network call, so it is
-    /// testable without one.
-    #[test]
-    fn repo_meta_says_nothing_about_an_origin_it_cannot_name() {
-        let gh = app();
-        assert_eq!(gh.repo_meta("https://gitlab.com/acme/widget"), Ok(None));
-        assert_eq!(gh.repo_meta("acme"), Ok(None));
-    }
-
     #[test]
     fn b64url_matches_known_vectors() {
         assert_eq!(b64url(b""), "");
@@ -1519,7 +1381,6 @@ mod tests {
             org_id: "o1".into(),
             name: "private".into(),
             kind: stratum_control::registry::RepoKind::Mirror,
-            public: false,
             default_branch: "main".into(),
             origin_url: Some("acme/private".into()),
             origin_provider: Some("github".into()),
@@ -2122,7 +1983,6 @@ mod tests {
             org_id: "o1".into(),
             name: "widget".into(),
             kind: stratum_control::registry::RepoKind::Mirror,
-            public: false,
             default_branch: "main".into(),
             origin_url: Some("acme/widget".into()),
             origin_provider: Some("github".into()),
@@ -2169,7 +2029,6 @@ mod tests {
             org_id: "o1".into(),
             name: "hello-world".into(),
             kind: stratum_control::registry::RepoKind::Mirror,
-            public: true,
             default_branch: "main".into(),
             origin_url: Some("octocat/Hello-World".into()),
             origin_provider: Some("github".into()),

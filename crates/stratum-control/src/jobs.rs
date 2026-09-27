@@ -113,11 +113,6 @@ const DEDUPLICATED_KINDS: &[&str] = &[
     "checkspoll",
     "notify-mail",
     "notify-changeset",
-    // `sitepublish` — `jobs_active_per_repo` (0110). One publish per
-    // repository at a time: the job reads the tip when it runs, so a
-    // second push while one is queued is already covered by the one
-    // that will run.
-    "sitepublish",
 ];
 
 /// Enqueue at most one active job of `kind` for `repo_id`, returning

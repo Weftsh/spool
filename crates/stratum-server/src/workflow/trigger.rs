@@ -98,18 +98,6 @@ pub fn job_spec(job: &Job, matrix: &BTreeMap<String, String>) -> serde_json::Val
 
 /// What one push door saw move.
 pub async fn on_push(state: &SharedState, repo: &Repo, updates: &[Update]) {
-    // Site publishing rides here rather than beside each of the three
-    // callers (HTTP push, SSH push, the commits API), because this is
-    // the one hook all three already share. The job reads the tip when
-    // it runs, so one enqueue covers every ref this push moved — and
-    // the queue deduplicates it per repository anyway.
-    //
-    // A mirror sync does not reach here and arms it separately, in
-    // `mirror::sync`; the two together are every way a repository's
-    // content changes.
-    if updates.iter().any(|u| u.name.starts_with("refs/heads/")) {
-        crate::workers::sitepublish::enqueue(state, &repo.org_id, &repo.id);
-    }
     for u in updates {
         let Some(branch) = u.name.strip_prefix("refs/heads/") else {
             // Tags and everything else: workflows trigger on branches.
@@ -630,7 +618,7 @@ fn pool_refusal(state: &SharedState, repo: &Repo, wf: &Workflow) -> Option<Strin
         Ok(true) => {}
         Err(e) => warn("self-hosted runner policy", e),
     }
-    match runners::any_group_admits(&state.db, &repo.org_id, &repo.id, repo.public) {
+    match runners::any_group_admits(&state.db, &repo.org_id, &repo.id) {
         Ok(false) => {
             return Some(
                 "no runner group admits this repository; add it to a group \
@@ -646,7 +634,7 @@ fn pool_refusal(state: &SharedState, repo: &Repo, wf: &Workflow) -> Option<Strin
     // order the file wrote them so the sentence is recognisable as the
     // `runs-on:` line its author typed.
     for job in self_hosted {
-        match runners::any_runner_for(&state.db, &repo.org_id, &repo.id, repo.public, &job.labels) {
+        match runners::any_runner_for(&state.db, &repo.org_id, &repo.id, &job.labels) {
             Ok(false) => {
                 return Some(format!(
                     "no runner with labels [{}] is registered for this repository",

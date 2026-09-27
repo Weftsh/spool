@@ -27,8 +27,7 @@ fn bucket_upper_ms(b: u32) -> u64 {
 #[derive(Debug, Clone)]
 pub struct Event {
     pub repo_id: String,
-    /// What the request was, and — through [`crate::usage::EGRESS_KINDS`]
-    /// — whether its bytes bill. The vocabulary:
+    /// What the request was. The vocabulary:
     ///
     /// * `clone` / `fetch` — a full or incremental fetch served inline;
     ///   `bytes` is what left the server.
@@ -41,11 +40,9 @@ pub struct Event {
     /// * `api` — an advert or `ls-refs`: a request absorbed, no bytes.
     /// * `freshness` — a mirror's synchronous origin sync.
     /// * `runner_clone` / `runner_fetch` / `runner_pack` — the same as
-    ///   `clone` / `fetch` / `cdn_pack`, by a **hosted runner** fetching
-    ///   the repository it is about to build. Counted for the repository's
-    ///   metrics and Prometheus, never for the transfer meter: that
-    ///   traffic is ours, and the minutes already pay for it.
-    /// * `package` — a package download, when there is a registry.
+    ///   `clone` / `fetch` / `cdn_pack`, by a **runner** fetching the
+    ///   repository it is about to build, so a build is not counted as a
+    ///   person cloning.
     pub kind: &'static str,
     pub count: u64,
     pub bytes: u64,
@@ -181,8 +178,8 @@ fn percentile(hist: &BTreeMap<u32, u64>, q: f64) -> Option<u64> {
     hist.keys().last().map(|&b| bucket_upper_ms(b))
 }
 
-/// Org-day rollup for billing: repos with any activity, request count,
-/// egress bytes over the UTC day containing `day_start_ms`.
+/// Org-day rollup for the usage page: repos with any activity, request
+/// count, egress bytes over the UTC day containing `day_start_ms`.
 pub struct DayUsage {
     pub active_repos: u64,
     pub requests: u64,
@@ -211,18 +208,8 @@ pub fn org_day_usage(db: &ControlDb, org_id: &str, day_start_ms: i64) -> Result<
     Ok(row)
 }
 
-/// The part of an org's day that reaches the bill: hosted minutes,
-/// bytes out of private repositories, and the day's average private
-/// bytes stored. `bytes_out` on the row is everything served, public
-/// included; these three are what the meters sum over a period.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub struct DayBilled {
-    pub hosted_minutes: i64,
-    pub private_bytes_out: i64,
-    pub private_bytes_stored: i64,
-}
-
-#[allow(clippy::too_many_arguments)]
+/// Fold one org's day into `usage_daily`. An upsert that **replaces**,
+/// so the day can be recomputed on every tick that still covers it.
 pub fn upsert_usage(
     db: &ControlDb,
     org_id: &str,
@@ -231,16 +218,13 @@ pub fn upsert_usage(
     total_repos: u64,
     requests: u64,
     bytes_out: u64,
-    billed: DayBilled,
 ) -> Result<(), String> {
     db.lock()
         .execute(
-            "INSERT INTO usage_daily (org_id, day, active_repos, total_repos, requests, bytes_out, \
-                                      hosted_minutes, private_bytes_out, private_bytes_stored) \
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9) \
+            "INSERT INTO usage_daily (org_id, day, active_repos, total_repos, requests, bytes_out) \
+             VALUES ($1, $2, $3, $4, $5, $6) \
              ON CONFLICT (org_id, day) DO UPDATE SET active_repos=$3, total_repos=$4, \
-             requests=$5, bytes_out=$6, hosted_minutes=$7, private_bytes_out=$8, \
-             private_bytes_stored=$9",
+             requests=$5, bytes_out=$6",
             &[
                 &org_id,
                 &day,
@@ -248,88 +232,7 @@ pub fn upsert_usage(
                 &(total_repos as i64),
                 &(requests as i64),
                 &(bytes_out as i64),
-                &billed.hosted_minutes,
-                &billed.private_bytes_out,
-                &billed.private_bytes_stored,
             ],
-        )
-        .map(|_| ())
-        .map_err(|e| e.to_string())
-}
-
-/// Hosted-runner minutes of the jobs that **started** in the UTC day
-/// beginning at `day_start_ms`, rounded up per job the way the budget
-/// rounds them ([`crate::workflows::budget_since`]). A job still
-/// running counts up to `now`; a job that ran across midnight is the
-/// day it started on, whole, so the days add up to the period. GitHub
-/// Actions jobs on our runners are in it at their multiplier, the same
-/// as the budget counts them — the bill and the gate must agree.
-pub fn org_day_hosted_minutes(
-    db: &ControlDb,
-    org_id: &str,
-    day_start_ms: i64,
-    now: i64,
-) -> Result<i64, String> {
-    let day_end = day_start_ms + 86_400_000;
-    db.lock()
-        .query_one(
-            "SELECT (SELECT COALESCE(SUM(CEIL( \
-               GREATEST(COALESCE(j.completed_at, $2) - j.started_at, 0)::numeric / 60000.0)), 0)::BIGINT \
-             FROM workflow_jobs j \
-             WHERE j.org_id = $1 AND j.pool = 'hosted' \
-               AND j.started_at IS NOT NULL AND j.started_at >= $3 AND j.started_at < $4) \
-             + (SELECT COALESCE(SUM(g.multiplier * CEIL( \
-               GREATEST(COALESCE(g.completed_at, $2) - g.started_at, 0)::numeric / 60000.0)), 0)::BIGINT \
-             FROM github_jobs g \
-             WHERE g.org_id = $1 \
-               AND g.started_at IS NOT NULL AND g.started_at >= $3 AND g.started_at < $4)",
-            &[&org_id, &now, &day_start_ms, &day_end],
-        )
-        .map(|r| r.get(0))
-        .map_err(|e| format!("day hosted minutes: {e}"))
-}
-
-/// The day's average private **repository** bytes stored, from the
-/// storage sweep's samples (`storage_daily`); zero for a day with no
-/// sample yet.
-///
-/// `owner_kind` is not optional here and the omission was a real bug.
-/// `storage_daily` holds a row per kind per day, so the scalar subquery
-/// below returns *two* rows for an organization that stores packages as
-/// well as repositories, and Postgres answers that with an error rather
-/// than a number. The rollup propagates it, so `upsert_usage` and
-/// `mark_usage_reported` never ran — for every organization on the
-/// fleet, not just the one with packages — and a whole day's usage
-/// simply was not recorded. It failed at exactly the moment the
-/// registry started being used, and it failed quietly: the tick logs
-/// one line and the next hour tries again.
-///
-/// Repositories and not the total, deliberately: this number is the
-/// `storage` meter's, and package bytes are metered and charged on
-/// their own line. Adding them here would put them on the invoice
-/// twice.
-pub fn org_day_private_bytes_stored(
-    db: &ControlDb,
-    org_id: &str,
-    day: &str,
-) -> Result<i64, String> {
-    db.lock()
-        .query_one(
-            "SELECT COALESCE(( \
-               SELECT CASE WHEN samples > 0 THEN private_bytes_sum / samples ELSE 0 END \
-               FROM storage_daily \
-               WHERE org_id = $1 AND day = $2 AND owner_kind = $3), 0)::BIGINT",
-            &[&org_id, &day, &crate::storage::OWNER_REPO],
-        )
-        .map(|r| r.get(0))
-        .map_err(|e| format!("day private bytes stored: {e}"))
-}
-
-pub fn mark_usage_reported(db: &ControlDb, org_id: &str, day: &str) -> Result<(), String> {
-    db.lock()
-        .execute(
-            "UPDATE usage_daily SET reported_at = $3 WHERE org_id = $1 AND day = $2",
-            &[&org_id, &day, &crate::ids::now_ms()],
         )
         .map(|_| ())
         .map_err(|e| e.to_string())
@@ -342,18 +245,13 @@ pub struct UsageDay {
     pub total_repos: i64,
     pub requests: i64,
     pub bytes_out: i64,
-    pub hosted_minutes: i64,
-    pub private_bytes_out: i64,
-    pub private_bytes_stored: i64,
-    pub reported_at: Option<i64>,
 }
 
 pub fn usage_days(db: &ControlDb, org_id: &str, limit: usize) -> Result<Vec<UsageDay>, String> {
     let rows = db
         .lock()
         .query(
-            "SELECT day, active_repos, total_repos, requests, bytes_out, reported_at, \
-                    hosted_minutes, private_bytes_out, private_bytes_stored \
+            "SELECT day, active_repos, total_repos, requests, bytes_out \
              FROM usage_daily WHERE org_id = $1 ORDER BY day DESC LIMIT $2",
             &[&org_id, &(limit.clamp(1, 400) as i64)],
         )
@@ -366,10 +264,6 @@ pub fn usage_days(db: &ControlDb, org_id: &str, limit: usize) -> Result<Vec<Usag
             total_repos: r.get(2),
             requests: r.get(3),
             bytes_out: r.get(4),
-            hosted_minutes: r.get(6),
-            private_bytes_out: r.get(7),
-            private_bytes_stored: r.get(8),
-            reported_at: r.get(5),
         })
         .collect())
 }
@@ -407,7 +301,6 @@ mod tests {
                 description: None,
                 name: "r",
                 kind: registry::RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -443,130 +336,21 @@ mod tests {
         assert_eq!(usage.bytes_out, 4000);
     }
 
-    /// The billed part of a day: hosted minutes are the jobs that
-    /// started that day (rounded up, a running one counted to `now`),
-    /// stored bytes are the day's sample average, and both survive the
-    /// upsert into `usage_daily` and come back off it.
+    /// A day folds into `usage_daily` and comes back off it, and a
+    /// second fold of the same day replaces the first rather than adding
+    /// to it — the rollup re-folds today on every tick.
     #[test]
-    fn the_billed_columns_fold_and_read_back() {
-        let db = ControlDb::open(&stratum_testkit::pg::test_db_url("control-billed")).unwrap();
+    fn a_day_folds_and_reads_back_and_a_refold_replaces_it() {
+        let db = ControlDb::open(&stratum_testkit::pg::test_db_url("control-usage")).unwrap();
         let org = registry::create_org(&db, "o").unwrap();
-        let repo = registry::create_repo(
-            &db,
-            &org.id,
-            &registry::NewRepo {
-                description: None,
-                name: "r",
-                kind: registry::RepoKind::Native,
-                public: false,
-                default_branch: "main",
-                origin_url: None,
-                origin_provider: None,
-                origin_installation: None,
-            },
-        )
-        .unwrap();
-        let day_start = 1_800_000_000_000 - 1_800_000_000_000 % 86_400_000;
-        let now = day_start + 10 * 3_600_000;
-        {
-            let mut c = db.lock();
-            c.execute(
-                "INSERT INTO workflow_runs (id, org_id, repo_id, file, name, commit_sha, event, \
-                 state, created_at, updated_at) VALUES ('run1', $1, $2, 'ci', 'ci', 'abc', 'push', \
-                 'passed', $3, $3)",
-                &[&org.id, &repo.id, &day_start],
-            )
-            .unwrap();
-            // 90 s → 2 minutes; still running for 30 s → 1 minute; one
-            // started yesterday → not this day's; a self-hosted one → never.
-            for (id, pool, started, done) in [
-                (
-                    "j1",
-                    "hosted",
-                    day_start + 60_000,
-                    Some(day_start + 150_000),
-                ),
-                ("j2", "hosted", now - 30_000, None),
-                ("j3", "hosted", day_start - 1, Some(day_start + 5_000)),
-                (
-                    "j4",
-                    "self_hosted",
-                    day_start + 60_000,
-                    Some(day_start + 900_000),
-                ),
-            ] {
-                c.execute(
-                    "INSERT INTO workflow_jobs (id, run_id, org_id, repo_id, job_id, key, state, \
-                     pool, created_at, updated_at, started_at, completed_at) \
-                     VALUES ($1, 'run1', $2, $3, 'test', $1, 'passed', $4, $5, $5, $5, $6)",
-                    &[&id, &org.id, &repo.id, &pool, &started, &done],
-                )
-                .unwrap();
-            }
-        }
-        assert_eq!(
-            org_day_hosted_minutes(&db, &org.id, day_start, now).unwrap(),
-            3
-        );
-        assert_eq!(
-            org_day_hosted_minutes(&db, &org.id, day_start - 86_400_000, now).unwrap(),
-            1,
-            "yesterday's job is yesterday's minute"
-        );
-        assert_eq!(
-            org_day_hosted_minutes(&db, "ghost", day_start, now).unwrap(),
-            0
-        );
-
         let day = "2027-01-15";
-        assert_eq!(org_day_private_bytes_stored(&db, &org.id, day).unwrap(), 0);
-        crate::storage::sample_day(&db, &org.id, day, crate::storage::OWNER_REPO, 4_000, 9_000)
-            .unwrap();
-        crate::storage::sample_day(&db, &org.id, day, crate::storage::OWNER_REPO, 8_000, 9_000)
-            .unwrap();
-        assert_eq!(
-            org_day_private_bytes_stored(&db, &org.id, day).unwrap(),
-            6_000,
-            "the day's average, not its last sample"
-        );
-
-        // A second owner kind on the same day. Without the `owner_kind`
-        // filter this is not a wrong number — the scalar subquery
-        // returns two rows and Postgres refuses outright, which took
-        // the whole billing rollup down with it for every organization
-        // on the fleet. And the number stays the repository one:
-        // package bytes are charged on their own meter, so counting
-        // them here would put them on the invoice twice.
-        crate::storage::sample_day(
-            &db,
-            &org.id,
-            day,
-            crate::storage::OWNER_PACKAGE,
-            50_000,
-            50_000,
-        )
-        .unwrap();
-        assert_eq!(
-            org_day_private_bytes_stored(&db, &org.id, day).unwrap(),
-            6_000,
-            "package bytes leaked into the repository storage meter"
-        );
-
-        let billed = DayBilled {
-            hosted_minutes: 3,
-            private_bytes_out: 4_000,
-            private_bytes_stored: 6_000,
-        };
-        upsert_usage(&db, &org.id, day, 1, 1, 4, 4_000, billed).unwrap();
-        upsert_usage(&db, &org.id, day, 1, 1, 5, 5_000, billed).unwrap();
+        upsert_usage(&db, &org.id, day, 1, 1, 4, 4_000).unwrap();
+        upsert_usage(&db, &org.id, day, 1, 2, 5, 5_000).unwrap();
         let days = usage_days(&db, &org.id, 10).unwrap();
         assert_eq!(days.len(), 1);
         assert_eq!(days[0].requests, 5, "the upsert replaces, it does not add");
-        assert_eq!(days[0].hosted_minutes, 3);
-        assert_eq!(days[0].private_bytes_out, 4_000);
-        assert_eq!(days[0].private_bytes_stored, 6_000);
-        assert_eq!(days[0].reported_at, None);
-        let json = serde_json::to_value(&days[0]).unwrap();
-        assert_eq!(json["private_bytes_stored"], 6_000, "{json}");
+        assert_eq!(days[0].bytes_out, 5_000);
+        assert_eq!(days[0].total_repos, 2);
+        assert!(usage_days(&db, "ghost", 10).unwrap().is_empty());
     }
 }

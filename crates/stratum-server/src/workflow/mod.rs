@@ -46,5 +46,4 @@ pub mod model;
 pub mod parse;
 pub mod plan;
 pub mod read;
-pub mod siteconfig;
 pub mod trigger;

@@ -1,28 +1,20 @@
-//! Public profiles, and the addresses behind them.
+//! Profiles, and the addresses behind them.
 //!
-//! `/v1/users/…` is a new top-level family, and the thing to keep
-//! straight while reading it is that the routes in this one file have
-//! three different audiences:
+//! `/v1/users/…` is a top-level family, and the thing to keep straight
+//! while reading it is that the routes in this one file have three
+//! different audiences:
 //!
-//! * **Anybody** reads a profile, its links, its pins and its public
-//!   repository count. That is the point of the surface — a logged-out
-//!   visitor has to see it, which is the whole "public and
-//!   unauthenticated by default" promise.
+//! * **Anybody signed in** reads a person's or an organization's
+//!   profile: it is the directory entry for the people and teams on this
+//!   server. Nobody reads one anonymously.
 //! * **Only its owner** reads or writes the address list. It is the
 //!   authorship-linkage surface: whoever knows a person's `git config
 //!   user.email` values knows exactly what to put in a commit to look
 //!   like them, and knows a mailbox to spam.
-//! * **An org administrator** writes an org's profile, which anybody
-//!   reads.
+//! * **An org administrator** writes an org's profile.
 //!
 //! Every self-only handler routes through [`require_self`], so "who is
 //! allowed" is one function rather than a habit repeated eight times.
-//! Nothing here re-derives repository visibility: pins come back through
-//! [`stratum_control::profiles::pins`] with a
-//! [`Viewer`](stratum_control::registry::Viewer), which is the same rule
-//! `api/search.rs` uses, and the count published is a count of public
-//! repositories for every caller alike, so it cannot be watched to learn
-//! that a private one exists.
 
 use crate::api::{internal, json_error};
 use crate::app::SharedState;
@@ -33,7 +25,6 @@ use axum::response::{IntoResponse, Response};
 use axum::Json;
 use serde::Deserialize;
 use stratum_control::profiles::{self, AddEmail, Link, OrgProfileUpdate, Profile, ProfileUpdate};
-use stratum_control::registry::Viewer;
 
 /// `None` for an absent key, `Some(None)` for an explicit `null`.
 ///
@@ -63,8 +54,6 @@ pub struct PatchProfileBody {
     #[serde(default)]
     pub pronouns: Patch<String>,
     #[serde(default)]
-    pub contrib_private_optin: Option<bool>,
-    #[serde(default)]
     pub profile_repo: Patch<String>,
     /// Replaces the list outright when present.
     #[serde(default)]
@@ -76,24 +65,6 @@ pub struct LinkBody {
     #[serde(default)]
     pub label: Option<String>,
     pub url: String,
-}
-
-#[derive(Deserialize)]
-pub struct PinsBody {
-    pub pins: Vec<PinBody>,
-}
-
-/// A pin names a repository the way a URL does — namespace and name —
-/// rather than by id. An id is not something anyone has in hand, and a
-/// pin list is built by clicking repositories in a picker.
-#[derive(Deserialize)]
-pub struct PinBody {
-    pub org: String,
-    pub repo: String,
-    /// Only `repo` in this slice. Present so the refusal for anything
-    /// else is explicit rather than a silently ignored field.
-    #[serde(default)]
-    pub kind: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -120,14 +91,6 @@ pub struct PatchOrgProfileBody {
     pub contact_email: Patch<String>,
 }
 
-/// The viewer for a visibility-filtered read.
-fn viewer_of(caller: &Option<String>) -> Viewer<'_> {
-    match caller {
-        Some(user_id) => Viewer::User(user_id),
-        None => Viewer::Anonymous,
-    }
-}
-
 /// Resolve a handle to a profile, or 404.
 fn profile_or_404(state: &SharedState, handle: &str) -> Result<(Profile, String), Response> {
     match profiles::by_handle(&state.db, handle) {
@@ -139,9 +102,9 @@ fn profile_or_404(state: &SharedState, handle: &str) -> Result<(Profile, String)
 
 /// The gate on every self-only route.
 ///
-/// A handle is a public URL, so refusing with 403 rather than 404 leaks
-/// nothing that `GET /v1/users/:handle` does not already answer to
-/// anyone — and it is the honest answer, which is what lets somebody
+/// Refusing with 403 rather than 404 leaks nothing that
+/// `GET /v1/users/:handle` does not already answer to anybody signed in
+/// — and it is the honest answer, which is what lets somebody
 /// signed in as the wrong account work out why their request failed
 /// instead of concluding the page is broken.
 ///
@@ -159,7 +122,16 @@ fn require_self(
     }
 }
 
-fn profile_json(p: &Profile, links: &[Link], public_repos: i64) -> serde_json::Value {
+/// The gate on every profile read: somebody signed in. Anonymous is 401,
+/// because a browser can act on that.
+fn require_signed_in(state: &SharedState, headers: &HeaderMap) -> Result<(), Response> {
+    match crate::api::caller_person(state, headers)? {
+        Some(_) => Ok(()),
+        None => Err(authx::unauthorized(authx::Challenge::None)),
+    }
+}
+
+fn profile_json(p: &Profile, links: &[Link]) -> serde_json::Value {
     serde_json::json!({
         "handle": p.handle,
         "name": p.name,
@@ -169,17 +141,22 @@ fn profile_json(p: &Profile, links: &[Link], public_repos: i64) -> serde_json::V
         "company": p.company,
         "pronouns": p.pronouns,
         "kind": p.kind.as_str(),
-        "contrib_private_optin": p.contrib_private_optin,
         "profile_repo": p.profile_repo,
         "created_at": p.created_at,
         "links": links,
-        "public_repos": public_repos,
     })
 }
 
-/// `GET /v1/users/:handle` — public.
-pub async fn get(State(state): State<SharedState>, Path(handle): Path<String>) -> Response {
-    let (profile, org_id) = match profile_or_404(&state, &handle) {
+/// `GET /v1/users/:handle` — anybody signed in.
+pub async fn get(
+    State(state): State<SharedState>,
+    Path(handle): Path<String>,
+    headers: HeaderMap,
+) -> Response {
+    if let Err(r) = require_signed_in(&state, &headers) {
+        return r;
+    }
+    let (profile, _) = match profile_or_404(&state, &handle) {
         Ok(x) => x,
         Err(r) => return r,
     };
@@ -187,11 +164,7 @@ pub async fn get(State(state): State<SharedState>, Path(handle): Path<String>) -
         Ok(l) => l,
         Err(e) => return internal(e),
     };
-    let count = match profiles::public_repo_count(&state.db, &org_id) {
-        Ok(c) => c,
-        Err(e) => return internal(e),
-    };
-    Json(profile_json(&profile, &links, count)).into_response()
+    Json(profile_json(&profile, &links)).into_response()
 }
 
 /// `PATCH /v1/users/:handle` — the account itself, and nobody else.
@@ -201,7 +174,7 @@ pub async fn patch(
     headers: HeaderMap,
     Json(body): Json<PatchProfileBody>,
 ) -> Response {
-    let (profile, org_id) = match require_self(&state, &headers, &handle) {
+    let (profile, _) = match require_self(&state, &headers, &handle) {
         Ok(x) => x,
         Err(r) => return r,
     };
@@ -211,7 +184,6 @@ pub async fn patch(
         location: body.location.0,
         company: body.company.0,
         pronouns: body.pronouns.0,
-        contrib_private_optin: body.contrib_private_optin,
         profile_repo: body.profile_repo.0,
         links: body.links.map(|links| {
             links
@@ -237,130 +209,7 @@ pub async fn patch(
         Ok(l) => l,
         Err(e) => return internal(e),
     };
-    let count = match profiles::public_repo_count(&state.db, &org_id) {
-        Ok(c) => c,
-        Err(e) => return internal(e),
-    };
-    Json(profile_json(&profile, &links, count)).into_response()
-}
-
-/// `GET /v1/users/:handle/pins` — public, filtered to what the caller
-/// may see.
-pub async fn get_pins(
-    State(state): State<SharedState>,
-    Path(handle): Path<String>,
-    headers: HeaderMap,
-) -> Response {
-    let (_, org_id) = match profile_or_404(&state, &handle) {
-        Ok(x) => x,
-        Err(r) => return r,
-    };
-    let caller = match crate::api::caller_person(&state, &headers) {
-        Ok(c) => c,
-        Err(r) => return r,
-    };
-    match profiles::pins(&state.db, &org_id, &viewer_of(&caller)) {
-        Ok(pins) => Json(serde_json::json!({ "pins": pins })).into_response(),
-        Err(e) => internal(e),
-    }
-}
-
-/// `PUT /v1/users/:handle/pins` — the account itself.
-///
-/// Repositories are resolved **through the caller's own visibility**
-/// before the control plane is asked to pin them. That is what keeps the
-/// two refusals apart honestly: a private repository the caller can see
-/// answers "a private repository cannot be pinned", which is actionable;
-/// one they cannot see answers "no such repository", which is the same
-/// thing a name that does not exist answers. Resolving first and
-/// refusing after would have made the pin form an existence oracle for
-/// every private repository on the platform.
-pub async fn put_pins(
-    State(state): State<SharedState>,
-    Path(handle): Path<String>,
-    headers: HeaderMap,
-    Json(body): Json<PinsBody>,
-) -> Response {
-    let (profile, org_id) = match require_self(&state, &headers, &handle) {
-        Ok(x) => x,
-        Err(r) => return r,
-    };
-    if body.pins.len() > profiles::MAX_PINS {
-        return json_error(
-            StatusCode::BAD_REQUEST,
-            format!("at most {} pinned items", profiles::MAX_PINS),
-        );
-    }
-    let viewer = Viewer::User(&profile.user_id);
-    let mut ids = Vec::with_capacity(body.pins.len());
-    for pin in &body.pins {
-        match pin.kind.as_deref() {
-            None | Some("repo") => {}
-            Some(other) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("cannot pin {other:?}; only repositories can be pinned"),
-                )
-            }
-        }
-        match visible_repo_id(&state, &profile.user_id, &pin.org, &pin.repo) {
-            Ok(Some(id)) => ids.push(id),
-            Ok(None) => {
-                return json_error(
-                    StatusCode::BAD_REQUEST,
-                    format!("no such repository {}/{}", pin.org, pin.repo),
-                )
-            }
-            Err(r) => return r,
-        }
-    }
-    match profiles::set_pins(&state.db, &org_id, &ids) {
-        Ok(()) => match profiles::pins(&state.db, &org_id, &viewer) {
-            Ok(pins) => Json(serde_json::json!({ "pins": pins })).into_response(),
-            Err(e) => internal(e),
-        },
-        Err(e) => json_error(StatusCode::BAD_REQUEST, e),
-    }
-}
-
-/// A repository id, but only if this **person** may know the repository
-/// exists. `Ok(None)` covers "no such namespace", "no such repository"
-/// and "not yours to see" alike, which is the masking `repo_or_masked`
-/// applies on the repo routes, expressed for a caller who is naming
-/// somebody else's namespace.
-///
-/// A person, and not a [`Viewer`]: [`put_pins`] is the only caller and
-/// it always asks on behalf of the account whose pins are being written,
-/// which `require_self` has already established is a person. Taking the
-/// wider type meant carrying an anonymous arm and an org-token arm that
-/// nothing could ever reach — arms no test could pin, on the one seam
-/// here that decides whether a private repository's existence leaks.
-fn visible_repo_id(
-    state: &SharedState,
-    user_id: &str,
-    org_name: &str,
-    repo_name: &str,
-) -> Result<Option<String>, Response> {
-    use stratum_control::registry;
-    let org = match registry::org_by_name(&state.db, org_name) {
-        Ok(Some(o)) => o,
-        Ok(None) => return Ok(None),
-        Err(e) => return Err(internal(e)),
-    };
-    let repo = match registry::repo_by_name(&state.db, &org.id, repo_name) {
-        Ok(Some(r)) => r,
-        Ok(None) => return Ok(None),
-        Err(e) => return Err(internal(e)),
-    };
-    if repo.public {
-        return Ok(Some(repo.id));
-    }
-    // Private: only a member of the holding namespace may learn it is
-    // there. Same predicate as search's `r.org_id = ANY(orgs_of(you))`.
-    let member = stratum_control::members::orgs_of(&state.db, user_id)
-        .map_err(internal)?
-        .contains(&org.id);
-    Ok(member.then_some(repo.id))
+    Json(profile_json(&profile, &links)).into_response()
 }
 
 /// `GET /v1/users/:handle/emails` — the account itself, never public.
@@ -490,21 +339,21 @@ pub async fn delete_email(
     }
 }
 
-/// `GET /v1/orgs/:org/profile` — public.
+/// `GET /v1/orgs/:org/profile` — anybody signed in.
 pub async fn get_org_profile(
     State(state): State<SharedState>,
     Path(org_name): Path<String>,
+    headers: HeaderMap,
 ) -> Response {
+    if let Err(r) = require_signed_in(&state, &headers) {
+        return r;
+    }
     let org = match crate::app::org_or_404(&state, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
     let profile = match profiles::org_profile(&state.db, &org.id) {
         Ok(p) => p,
-        Err(e) => return internal(e),
-    };
-    let count = match profiles::public_repo_count(&state.db, &org.id) {
-        Ok(c) => c,
         Err(e) => return internal(e),
     };
     Json(serde_json::json!({
@@ -514,7 +363,6 @@ pub async fn get_org_profile(
         "location": profile.location,
         "website": profile.website,
         "contact_email": profile.contact_email,
-        "public_repos": count,
     }))
     .into_response()
 }
@@ -552,5 +400,5 @@ pub async fn patch_org_profile(
     if let Err(e) = profiles::set_org_profile(&state.db, &org.id, &patch) {
         return json_error(StatusCode::BAD_REQUEST, e);
     }
-    get_org_profile(State(state), Path(org_name)).await
+    get_org_profile(State(state), Path(org_name), headers).await
 }

@@ -21,20 +21,18 @@ pub const DIR: &str = ".weft";
 /// projects have one to five.
 pub const MAX_FILES: usize = 32;
 
-/// The names under [`DIR`] that configure this repository's static site.
+/// The names under [`DIR`] that configure a repository's static site on
+/// the hosted edition. This one does not host sites, and ignores them.
 ///
-/// Reserved rather than walked as a workflow, and reserved *here* rather
-/// than at either call site, for the reason the module exists: the route
-/// that lists workflows and the trigger that runs them must agree about
-/// what a file is. A site config has no `jobs:`, so leaving it in the
-/// walk would refuse every one of them as a malformed workflow — and the
-/// trigger would write that refusal into the repository's checks, which
-/// is the worst place to learn that a file you meant as configuration
-/// was read as something else.
+/// Still reserved rather than walked as a workflow, and reserved *here*
+/// rather than at either call site, because the route that lists
+/// workflows and the trigger that runs them must agree about what a file
+/// is. A site config has no `jobs:`, so leaving it in the walk would
+/// refuse every one of them as a malformed workflow — and the trigger
+/// would write that refusal into the checks of every repository moved
+/// here from the hosted edition.
 ///
-/// Both extensions are reserved because both are valid YAML names and a
-/// reader who writes the other one should get configuration, not a
-/// confusing workflow refusal.
+/// Both extensions are reserved because both are valid YAML names.
 pub const SITE_CONFIG: [&str; 2] = ["site.yml", "site.yaml"];
 
 /// Is this name configuration rather than a workflow?
@@ -142,44 +140,6 @@ pub fn read_dir(reader: &LayoutReader, rev: &str) -> Result<Option<Vec<(String, 
     Ok(Some(out))
 }
 
-/// What a repository says about its site at some rev.
-///
-/// Three answers rather than nested options, because the caller has to
-/// tell them apart and two of them are ordinary: a rev nobody can
-/// resolve is a 404, a repository with no site config is the common case
-/// and not a problem, and only the third has anything to parse.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum SiteFile {
-    /// The rev does not resolve.
-    NoRev,
-    /// It resolves, and this repository has no site configuration.
-    Absent,
-    /// The configuration file, as `(name, source)`.
-    Present(String, String),
-}
-
-/// The site configuration under [`DIR`] at `rev`.
-///
-/// Both reserved names are accepted, and [`SITE_CONFIG`] order decides
-/// which wins if a repository somehow holds both — so the answer is a
-/// property of the names, not of the order git happened to sort the tree
-/// in.
-pub fn read_config(reader: &LayoutReader, rev: &str) -> Result<SiteFile, String> {
-    let Some(es) = entries(reader, rev)? else {
-        return Ok(SiteFile::NoRev);
-    };
-    for want in SITE_CONFIG {
-        let Some(e) = es.iter().find(|e| e.name == want) else {
-            continue;
-        };
-        let Some(src) = blob(reader, e)? else {
-            continue;
-        };
-        return Ok(SiteFile::Present(want.to_string(), src));
-    }
-    Ok(SiteFile::Absent)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -199,8 +159,7 @@ mod tests {
         assert_eq!(stem("noext"), "noext");
     }
 
-    /// The whole point of reserving the name here rather than at either
-    /// call site: a site config is YAML in `.weft/`, so without this it
+    /// A site config is YAML in `.weft/`, so without the reservation it
     /// is a workflow with no `jobs:` and the trigger writes that refusal
     /// into the repository's checks.
     #[test]

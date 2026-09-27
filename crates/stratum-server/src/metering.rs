@@ -63,26 +63,6 @@ pub fn egress_kind(clone: bool, offloaded: bool, runner: bool) -> &'static str {
     }
 }
 
-/// The kind bytes served from a published static site are recorded
-/// under.
-///
-/// A function rather than a literal at the call site, and that is not
-/// style. [`the_kinds_agree_with_what_bills`] walks the kinds these
-/// functions *produce*; a kind spelled inline at a handler is invisible
-/// to it, and site traffic was recorded that way for exactly as long as
-/// it took to notice that it never reached a bill.
-///
-/// Its own kind from the first commit, deliberately at the same rate as
-/// git egress for now: the kind costs nothing and a later decision to
-/// price hosting differently needs history to set the rate from, which
-/// merging it into `clone` would have thrown away.
-///
-/// There is no runner variant. A site is served on a hostname with no
-/// credential on it at all, so there is nobody to recognise as ours.
-pub fn site_kind() -> &'static str {
-    "site"
-}
-
 /// The kind the CDN pack an offloaded clone was sent to fetch is
 /// recorded under.
 pub fn pack_kind(runner: bool) -> &'static str {

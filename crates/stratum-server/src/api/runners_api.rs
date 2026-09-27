@@ -91,7 +91,6 @@ fn group_json(g: &Group) -> serde_json::Value {
         "id": g.id,
         "name": g.name,
         "repo_access": g.repo_access,
-        "allow_public": g.allow_public,
         "is_default": g.is_default,
         "repos": g.repos,
         "runners": g.runners,
@@ -139,8 +138,6 @@ pub struct GroupBody {
     pub name: Option<String>,
     #[serde(default)]
     pub repo_access: Option<String>,
-    #[serde(default)]
-    pub allow_public: Option<bool>,
     #[serde(default)]
     pub repos: Option<Vec<String>>,
 }
@@ -261,7 +258,6 @@ pub async fn create_group(
         &org.id,
         name,
         body.repo_access.as_deref(),
-        body.allow_public,
         body.repos.as_deref(),
         &actx,
     ) {
@@ -291,7 +287,6 @@ pub async fn patch_group(
         &id,
         body.name.as_deref(),
         body.repo_access.as_deref(),
-        body.allow_public,
         body.repos.as_deref(),
         &actx,
     ) {
@@ -557,7 +552,6 @@ pub async fn claim(State(state): State<SharedState>, headers: HeaderMap, _body: 
         group_id: &group.id,
         labels: &runner.labels,
         all_repos: group.repo_access == "all",
-        allow_public: group.allow_public,
     };
 
     let deadline = std::time::Instant::now()

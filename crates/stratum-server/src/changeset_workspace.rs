@@ -163,8 +163,7 @@ pub fn wire_for_identity(
     Ok(built)
 }
 
-/// The HTTP door's version: credentials first, then the members, then
-/// the public fallback.
+/// The HTTP door's version: credentials first, then the members.
 ///
 /// The order is the one `app::wire_auth` uses for repositories and it is
 /// deliberate — an invalid token 401s even for a changeset that does not
@@ -176,33 +175,20 @@ pub fn wire_auth(
     org_name: &str,
     key: &str,
 ) -> Result<Built, Response> {
-    let principal = authx::principal_opt(&state.db, headers, authx::Challenge::Basic)?;
-    if principal.is_some() {
-        return wire_for_identity(state, principal.as_ref(), org_name, key).map_err(|d| match d {
-            WireDeny::NotFound => authx::not_found(),
-            // The workspace's own read-only refusal is rendered by its
-            // push door, not here: this seam only ever decides readability.
-            WireDeny::ReadOnly(msg) => authx::forbidden(&msg),
-            WireDeny::Internal(e) => crate::api::internal(e),
-        });
-    }
-    // Anonymous. A changeset is public when every repository it touches
-    // is: the tree names them all, so one private member makes the whole
-    // combination private. A changeset with **no** members is not public
-    // either — there is no member set to be public over, and answering
-    // it anonymously would confirm the key exists.
-    let unauthorized = || authx::unauthorized(authx::Challenge::Basic);
-    let org = registry::org_by_name(&state.db, org_name)
-        .map_err(crate::api::internal)?
-        .ok_or_else(unauthorized)?;
-    let cs = changesets::get(&state.db, &org.id, strip_git(key))
-        .map_err(|e| crate::api::internal(e.to_string()))?
-        .ok_or_else(unauthorized)?;
-    let built = build(state, org_name, &cs);
-    if built.members.is_empty() || !built.members.iter().all(|m| m.repo.public) {
-        return Err(unauthorized());
-    }
-    Ok(built)
+    // Every repository here is private to its organisation, so there is
+    // no anonymous read to fall back to: no credential is a 401 whether
+    // or not the key exists, which is what keeps the answer from
+    // confirming it.
+    let Some(principal) = authx::principal_opt(&state.db, headers, authx::Challenge::Basic)? else {
+        return Err(authx::unauthorized(authx::Challenge::Basic));
+    };
+    wire_for_identity(state, Some(&principal), org_name, key).map_err(|d| match d {
+        WireDeny::NotFound => authx::not_found(),
+        // The workspace's own read-only refusal is rendered by its
+        // push door, not here: this seam only ever decides readability.
+        WireDeny::ReadOnly(msg) => authx::forbidden(&msg),
+        WireDeny::Internal(e) => crate::api::internal(e),
+    })
 }
 
 /// git appends `.git` to the path it asks for; the key does not have it.

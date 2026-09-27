@@ -18,7 +18,6 @@ mod metering;
 mod mirror;
 mod push;
 mod review;
-mod site;
 mod ssh;
 mod storage;
 mod webassets;

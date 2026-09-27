@@ -550,21 +550,24 @@ mod tests {
         let db = db();
         create(&db, "real@example.com", "R", Some("a long enough password")).unwrap();
 
-        let time = |email: &str| {
-            // Warm first, then take the best of three: the minimum is the
-            // run least disturbed by whatever else the machine is doing.
+        let once = |email: &str| {
+            let t = std::time::Instant::now();
             let _ = authenticate(&db, email, "the wrong password");
-            (0..3)
-                .map(|_| {
-                    let t = std::time::Instant::now();
-                    let _ = authenticate(&db, email, "the wrong password");
-                    t.elapsed()
-                })
-                .min()
-                .unwrap()
+            t.elapsed()
         };
-        let known = time("real@example.com");
-        let unknown = time("ghost@example.com");
+        // Warm both paths, then take the best of five for each, the two
+        // addresses alternating. The minimum is the run least disturbed
+        // by whatever else the machine is doing, and alternating is what
+        // makes that fair: timed as two back-to-back blocks, a burst of
+        // load that covered every sample of the first and none of the
+        // second read as the equalising work being missing.
+        let _ = once("real@example.com");
+        let _ = once("ghost@example.com");
+        let (mut known, mut unknown) = (std::time::Duration::MAX, std::time::Duration::MAX);
+        for _ in 0..5 {
+            known = known.min(once("real@example.com"));
+            unknown = unknown.min(once("ghost@example.com"));
+        }
         assert!(
             unknown.as_secs_f64() > known.as_secs_f64() * 0.5,
             "unknown address answered in {unknown:?} vs {known:?} for a real one \

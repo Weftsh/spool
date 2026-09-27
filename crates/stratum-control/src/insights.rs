@@ -5,8 +5,8 @@
 //! project alive, and who moved it". Everything in it is a count over
 //! rows we already hold: changes, issues, and the authorship rows the
 //! contribution walker writes. Nothing here is a stored aggregate, so a
-//! repository going public or private, a change landing late, or a
-//! backfilled walk all show up the next time somebody looks.
+//! change landing late or a backfilled walk shows up the next time
+//! somebody looks.
 //!
 //! **What is deliberately not here: files changed, additions, deletions.**
 //! We do not store per-commit diffstats, and this module does not derive
@@ -124,9 +124,6 @@ pub struct Pulse {
 pub struct RepoInsights {
     pub repo_id: String,
     pub name: String,
-    /// The repository's *live* `public` flag, so a caller rendering this
-    /// table can mark private rows without a second query.
-    pub public: bool,
     pub commits: i64,
     pub authors: i64,
     pub changes_opened: i64,
@@ -269,10 +266,7 @@ fn repo_measures() -> String {
 /// **Makes no visibility decision, and must not start.** `repo_id` has
 /// already been resolved by the caller through the authorization every
 /// other repo-scoped read uses, so by the time we are here the answer to
-/// "may this reader see this repository" is yes. A `public` filter added
-/// here would silently empty a member's Pulse for their own private
-/// repository — the numbers would be zero and the page would look like a
-/// dead project rather than a refused one.
+/// "may this reader see this repository" is yes.
 ///
 /// The window is half-open, `[from_ms, to_ms)`; see the module header.
 pub fn pulse(db: &ControlDb, repo_id: &str, from_ms: i64, to_ms: i64) -> Result<Pulse, String> {
@@ -339,7 +333,7 @@ pub fn pulse(db: &ControlDb, repo_id: &str, from_ms: i64, to_ms: i64) -> Result<
 fn org_repo_rollup() -> String {
     format!(
         "\
-    SELECT r.id AS repo_id, r.name, r.public, \
+    SELECT r.id AS repo_id, r.name, \
       COALESCE((SELECT SUM(c.count) FROM contributions c WHERE c.repo_id = r.id \
          AND c.day >= $4 AND c.day < $5), 0)::BIGINT AS commits, \
       (SELECT COUNT(DISTINCT c.user_id) FROM contributions c WHERE c.repo_id = r.id \
@@ -363,14 +357,12 @@ const ORG_REPO_ACTIVE: &str = "commits > 0 OR authors > 0 OR changes_opened > 0 
 /// A whole namespace's window.
 ///
 /// **Which repositories this counts: every repository whose `org_id` is
-/// this namespace and whose `state` is `active` — public and private
-/// alike, deleted ones never.** That is the honest answer to "how did
-/// this org do this month", and it is safe because of who the API layer
-/// lets through: the rollup is an org-scoped read, authorised against
-/// membership of *this* namespace before it is called, so the reader can
-/// already see every one of these repositories by name. A public-only
-/// filter here would not make it safer, it would make it wrong — a team
-/// whose work is private would open Insights and see a dead month.
+/// this namespace and whose `state` is `active`, deleted ones never.**
+/// That is the honest answer to "how did this org do this month", and it
+/// is safe because of who the API layer lets through: the rollup is an
+/// org-scoped read, authorised against membership of *this* namespace
+/// before it is called, so the reader can already see every one of these
+/// repositories by name.
 ///
 /// It follows that this must never widen beyond the namespace: nothing
 /// in it reaches a repository in another org, and no measure is computed
@@ -467,7 +459,6 @@ pub fn org_insights(
         .map(|r| RepoInsights {
             repo_id: r.get("repo_id"),
             name: r.get("name"),
-            public: r.get("public"),
             commits: r.get("commits"),
             authors: r.get("authors"),
             changes_opened: r.get("changes_opened"),
@@ -547,7 +538,7 @@ mod tests {
         (u.id, ns.id)
     }
 
-    fn repo(db: &ControlDb, org_id: &str, name: &str, public: bool) -> String {
+    fn repo(db: &ControlDb, org_id: &str, name: &str) -> String {
         registry::create_repo(
             db,
             org_id,
@@ -555,7 +546,6 @@ mod tests {
                 description: None,
                 name,
                 kind: RepoKind::Native,
-                public,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -632,18 +622,12 @@ mod tests {
             .unwrap();
     }
 
-    fn commits(db: &ControlDb, user_id: &str, repo_id: &str, day: i32, count: i32, public: bool) {
+    fn commits(db: &ControlDb, user_id: &str, repo_id: &str, day: i32, count: i32) {
         db.lock()
             .execute(
                 "INSERT INTO contributions (user_id, repo_id, day, count, public) \
-                 VALUES ($1, $2, $3, $4, $5)",
-                &[
-                    &user_id.to_string(),
-                    &repo_id.to_string(),
-                    &day,
-                    &count,
-                    &public,
-                ],
+                 VALUES ($1, $2, $3, $4, FALSE)",
+                &[&user_id.to_string(), &repo_id.to_string(), &day, &count],
             )
             .unwrap();
     }
@@ -654,7 +638,7 @@ mod tests {
     fn every_pulse_count_matches_the_rows_that_produced_it() {
         let db = db("insights_pulse_counts");
         let (uid, ns) = person(&db, "ada");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
         let (from, to) = (10 * DAY, 20 * DAY);
 
         // Two opened in the window, one of which landed in it; one older
@@ -671,8 +655,8 @@ mod tests {
         issue(&db, &r, 3, 2 * DAY, "closed", Some(15 * DAY));
         issue(&db, &r, 4, 2 * DAY, "open", None);
 
-        commits(&db, &uid, &r, 11, 5, true);
-        commits(&db, &uid, &r, 12, 7, true);
+        commits(&db, &uid, &r, 11, 5);
+        commits(&db, &uid, &r, 12, 7);
 
         let p = pulse(&db, &r, from, to).unwrap();
         assert_eq!(p.changes_opened, 2);
@@ -719,15 +703,15 @@ mod tests {
     fn the_window_is_half_open_at_both_ends() {
         let db = db("insights_window_edges");
         let (uid, ns) = person(&db, "bo");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
         let (from, to) = (10 * DAY, 20 * DAY);
 
         change(&db, &ns, &r, "at-from", from, "landed", from);
         change(&db, &ns, &r, "at-to", to, "landed", to);
         issue(&db, &r, 1, from, "closed", Some(from));
         issue(&db, &r, 2, to, "closed", Some(to));
-        commits(&db, &uid, &r, 10, 3, true); // the day `from` falls on
-        commits(&db, &uid, &r, 20, 9, true); // the day `to` falls on
+        commits(&db, &uid, &r, 10, 3); // the day `from` falls on
+        commits(&db, &uid, &r, 20, 9); // the day `to` falls on
 
         let p = pulse(&db, &r, from, to).unwrap();
         assert_eq!(p.changes_opened, 1, "the change at `to` was counted");
@@ -754,16 +738,16 @@ mod tests {
         let (ada, ns) = person(&db, "ada");
         let (zeb, _) = person(&db, "Zeb");
         let (cy, _) = person(&db, "cy");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
         let (from, to) = (10 * DAY, 20 * DAY);
 
-        commits(&db, &cy, &r, 11, 9, true);
+        commits(&db, &cy, &r, 11, 9);
         // Tied on 4, and named so that a raw-byte sort would put `Zeb`
         // ahead of `ada` while the case-folded one does not.
-        commits(&db, &ada, &r, 11, 4, true);
-        commits(&db, &zeb, &r, 11, 4, true);
+        commits(&db, &ada, &r, 11, 4);
+        commits(&db, &zeb, &r, 11, 4);
         // Outside the window, and must not lift anybody's rank.
-        commits(&db, &ada, &r, 21, 100, true);
+        commits(&db, &ada, &r, 21, 100);
 
         let p = pulse(&db, &r, from, to).unwrap();
         let got: Vec<_> = p
@@ -779,7 +763,7 @@ mod tests {
     fn an_empty_window_is_zeros_and_not_an_error() {
         let db = db("insights_empty");
         let (_, ns) = person(&db, "ada");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
         change(&db, &ns, &r, "c1", 2 * DAY, "landed", 3 * DAY);
 
         let p = pulse(&db, &r, 10 * DAY, 20 * DAY).unwrap();
@@ -803,7 +787,7 @@ mod tests {
     fn a_reversed_or_oversized_window_is_refused_rather_than_clamped() {
         let db = db("insights_bad_window");
         let (_, ns) = person(&db, "ada");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
 
         let e = pulse(&db, &r, 20 * DAY, 10 * DAY).unwrap_err();
         assert!(e.contains("ends before it starts"), "{e}");
@@ -832,13 +816,13 @@ mod tests {
         let (bo, theirs) = person(&db, "bo");
         let (from, to) = (10 * DAY, 20 * DAY);
 
-        let open = repo(&db, &mine, "open-source", true);
-        let secret = repo(&db, &mine, "secret", false);
-        let elsewhere = repo(&db, &theirs, "elsewhere", true);
+        let open = repo(&db, &mine, "open-source");
+        let secret = repo(&db, &mine, "secret");
+        let elsewhere = repo(&db, &theirs, "elsewhere");
 
-        commits(&db, &ada, &open, 11, 3, true);
-        commits(&db, &ada, &secret, 11, 4, false);
-        commits(&db, &bo, &elsewhere, 11, 1000, true);
+        commits(&db, &ada, &open, 11, 3);
+        commits(&db, &ada, &secret, 11, 4);
+        commits(&db, &bo, &elsewhere, 11, 1000);
         change(&db, &mine, &secret, "c1", 11 * DAY, "landed", 12 * DAY);
         change(&db, &theirs, &elsewhere, "c1", 11 * DAY, "landed", 12 * DAY);
         issue(&db, &secret, 1, 11 * DAY, "open", None);
@@ -860,10 +844,6 @@ mod tests {
         let names: Vec<_> = o.repos.iter().map(|r| r.name.as_str()).collect();
         assert_eq!(names, vec!["secret", "open-source"], "busiest first");
         assert!(
-            !o.repos[0].public,
-            "the breakdown carries the live public flag"
-        );
-        assert!(
             !names.contains(&"elsewhere"),
             "another namespace's repository reached this rollup"
         );
@@ -881,8 +861,8 @@ mod tests {
     fn a_deleted_repository_leaves_the_rollup() {
         let db = db("insights_deleted_repo");
         let (ada, ns) = person(&db, "ada");
-        let r = repo(&db, &ns, "widget", true);
-        commits(&db, &ada, &r, 11, 5, true);
+        let r = repo(&db, &ns, "widget");
+        commits(&db, &ada, &r, 11, 5);
 
         let before = org_insights(&db, &ns, 10 * DAY, 20 * DAY).unwrap();
         assert_eq!(before.commits, 5);
@@ -913,7 +893,7 @@ mod tests {
     fn the_median_time_to_merge_is_right_for_an_odd_and_an_even_count() {
         let db = db("insights_median_ttm");
         let (_, ns) = person(&db, "ada");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
         let (from, to) = (10 * DAY, 20 * DAY);
         let land = 15 * DAY;
 
@@ -961,7 +941,7 @@ mod tests {
     fn a_landed_change_stays_in_its_own_period_when_updated_at_moves() {
         let db = db("insights_landed_at_is_stable");
         let (_, ns) = person(&db, "ada");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
         let (from, to) = (10 * DAY, 20 * DAY);
         let land = 15 * DAY;
 
@@ -1019,7 +999,7 @@ mod tests {
     fn a_change_landed_without_a_landed_at_still_counts_from_updated_at() {
         let db = db("insights_landed_at_null");
         let (_, ns) = person(&db, "ada");
-        let r = repo(&db, &ns, "widget", true);
+        let r = repo(&db, &ns, "widget");
         let (from, to) = (10 * DAY, 20 * DAY);
         let land = 15 * DAY;
 
@@ -1048,13 +1028,13 @@ mod tests {
     fn the_breakdown_omits_repositories_with_nothing_in_the_window() {
         let db = db("insights_breakdown_quiet");
         let (ada, ns) = person(&db, "ada");
-        let busy = repo(&db, &ns, "busy", true);
-        let _quiet = repo(&db, &ns, "quiet", true);
+        let busy = repo(&db, &ns, "busy");
+        let _quiet = repo(&db, &ns, "quiet");
         // Active only because an issue was closed here — no commits, no
         // changes. It still belongs in the table.
-        let closed_only = repo(&db, &ns, "closer", true);
+        let closed_only = repo(&db, &ns, "closer");
 
-        commits(&db, &ada, &busy, 11, 2, true);
+        commits(&db, &ada, &busy, 11, 2);
         issue(&db, &closed_only, 1, 2 * DAY, "closed", Some(11 * DAY));
 
         let o = org_insights(&db, &ns, 10 * DAY, 20 * DAY).unwrap();

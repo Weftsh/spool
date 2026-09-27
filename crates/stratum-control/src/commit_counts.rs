@@ -84,7 +84,6 @@ mod tests {
                 name: "app",
                 description: None,
                 kind: RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,

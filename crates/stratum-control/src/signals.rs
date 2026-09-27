@@ -3,8 +3,8 @@
 //!
 //! `repo_signals` is a **cache with a recompute rule**, not a ledger.
 //! Every number in it is derived from rows that are still there —
-//! `issues`, `changes`, `contributions`, `repo_stars`, and the fork rows
-//! on `repos` — and [`roll`] recomputes one (repository, day) from those
+//! `issues`, `changes`, `contributions`, and the fork rows on `repos` —
+//! and [`roll`] recomputes one (repository, day) from those
 //! sources by assignment, never by increment. That is the whole reason
 //! it can be safely re-run: a rollup that adds a delta cannot be run
 //! twice, and a rollup that cannot be run twice cannot be run at all
@@ -19,7 +19,7 @@
 //!
 //! ## Totals and deltas are not the same column
 //!
-//! **`stars` and `forks` are running totals as of the end of that day.
+//! **`forks` is a running total as of the end of that day.
 //! Everything else is that day's own activity.** A chart that plots a
 //! total as if it were a delta is a wrong graph that looks right —
 //! smoothly rising instead of spiky — and nobody catches it by looking.
@@ -36,9 +36,7 @@
 //! can check.
 //!
 //! **A running total reconstructed for a past day is only as good as the
-//! rows that survive.** Unstarring deletes the `repo_stars` row, so
-//! re-rolling a day from 2024 today would report the stars that *still
-//! exist* and predate it, not the stars there actually were. The same
+//! rows that survive.** The same
 //! goes for a reopened issue, which clears its `closed_at` and so
 //! vanishes from the day it was closed on. Neither is a defect here,
 //! because [`due_open`] never recomputes a day that has closed and been
@@ -79,10 +77,10 @@ pub const DAY_MS: i64 = 86_400_000;
 /// 5s intervals buys nothing anybody can see.
 pub const OPEN_DAY_REFRESH_MS: i64 = 5 * 60 * 1000;
 
-/// The largest window a single read may ask for, in days. Ten years,
-/// matching [`crate::contribs::MAX_DAYS`] — the bound exists so a caller
-/// cannot ask for the Holocene (I13), not because ten years is special.
-pub const MAX_DAYS: i32 = crate::contribs::MAX_DAYS;
+/// The largest window a single read may ask for, in days. Ten years —
+/// the bound exists so a caller cannot ask for the Holocene (I13), not
+/// because ten years is special.
+pub const MAX_DAYS: i32 = 3653; // ten years, leap days included
 
 /// The day number an instant falls in, UTC.
 ///
@@ -112,8 +110,8 @@ pub fn day_bounds(day: i32) -> (i64, i64) {
 
 /// One day of one repository, as the rollup stored it.
 ///
-/// `stars` and `forks` are **running totals** as of the end of `day`;
-/// every other counter is that day's own activity. See the module
+/// `forks` is a **running total** as of the end of `day`; every other
+/// counter is that day's own activity. See the module
 /// header — this is the field-level restatement of the one thing worth
 /// restating.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
@@ -124,8 +122,6 @@ pub struct DaySignals {
     /// `YYYY-MM-DD`, so a client never has to agree with us about what
     /// `day` means.
     pub date: String,
-    /// Total stars at the end of this day, not stars gained on it.
-    pub stars: i32,
     /// Total forks at the end of this day, not forks made on it.
     pub forks: i32,
     /// Changes opened on this day.
@@ -173,11 +169,11 @@ pub struct OrgDay {
 /// A namespace's totals over a window.
 ///
 /// The activity counters sum over the window, because a sum of daily
-/// activity is that window's activity. `stars` and `forks` do not: they
-/// are running totals, so their value for the window is the value on the
-/// **last day at or before `to_day`** for each repository, summed across
-/// repositories. Summing a running total over 30 days would report a
-/// repository with 10 stars as having 300, which is the delta/total
+/// activity is that window's activity. `forks` does not: it is a running
+/// total, so its value for the window is the value on the **last day at
+/// or before `to_day`** for each repository, summed across repositories.
+/// Summing a running total over 30 days would report a repository with
+/// 10 forks as having 300, which is the delta/total
 /// confusion the module header warns about, in its most expensive form.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize)]
 pub struct OrgTotals {
@@ -186,8 +182,6 @@ pub struct OrgTotals {
     pub issues_opened: i64,
     pub issues_closed: i64,
     pub commits: i64,
-    /// Stars across the namespace as of `to_day`, not stars gained.
-    pub stars: i64,
     /// Forks across the namespace as of `to_day`, not forks made.
     pub forks: i64,
 }
@@ -220,13 +214,12 @@ pub fn roll(db: &ControlDb, repo_id: &str, day: i32) -> Result<(), String> {
                (repo_id, day, stars, forks, changes, changes_merged, \
                 issues_opened, issues_closed, commits, contributors, rolled_at) \
              SELECT $1, $2, \
-               -- Running totals, as of the end of the day. Stars have no
-               -- un-star timestamp — the row is deleted — so this is
-               -- necessarily \"stars that still exist and predate the
-               -- day\". Forks do have `deleted_at`, so a fork that
-               -- existed then and is gone now is still counted then.
-               (SELECT count(*) FROM repo_stars s
-                 WHERE s.repo_id = $1 AND s.created_at < $4),
+               -- `stars` is a column the hosted edition fills; nothing
+               -- here stars anything.
+               0,
+               -- A running total, as of the end of the day. Forks have
+               -- `deleted_at`, so a fork that existed then and is gone
+               -- now is still counted then.
                (SELECT count(*) FROM repos f
                  WHERE f.fork_parent_id = $1 AND f.created_at < $4
                    AND (f.deleted_at IS NULL OR f.deleted_at >= $4)),
@@ -456,8 +449,6 @@ pub fn due_backfill(db: &ControlDb, now_ms: i64, limit: i32) -> Result<Vec<(Stri
                UNION \
                  SELECT repo_id, day FROM contributions \
                UNION \
-                 SELECT repo_id, (created_at / 86400000)::INT FROM repo_stars \
-               UNION \
                  SELECT fork_parent_id, (created_at / 86400000)::INT FROM repos \
                    WHERE fork_parent_id IS NOT NULL \
              ) \
@@ -517,7 +508,7 @@ pub fn range(
     let repo = repo_id.to_string();
     db.lock()
         .query(
-            "SELECT day, stars, forks, changes, changes_merged, issues_opened, \
+            "SELECT day, forks, changes, changes_merged, issues_opened, \
                     issues_closed, commits, contributors, rolled_at \
                FROM repo_signals \
               WHERE repo_id = $1 AND day >= $2 AND day <= $3 \
@@ -532,15 +523,14 @@ pub fn range(
                     DaySignals {
                         day,
                         date: crate::contribs::iso_of_day(day),
-                        stars: r.get(1),
-                        forks: r.get(2),
-                        changes: r.get(3),
-                        changes_merged: r.get(4),
-                        issues_opened: r.get(5),
-                        issues_closed: r.get(6),
-                        commits: r.get(7),
-                        contributors: r.get(8),
-                        rolled_at: r.get(9),
+                        forks: r.get(1),
+                        changes: r.get(2),
+                        changes_merged: r.get(3),
+                        issues_opened: r.get(4),
+                        issues_closed: r.get(5),
+                        commits: r.get(6),
+                        contributors: r.get(7),
+                        rolled_at: r.get(8),
                     }
                 })
                 .collect()
@@ -634,13 +624,12 @@ pub fn org_totals(
                    FROM mine WHERE day >= $2 AND day <= $3 \
              ), \
              latest AS ( \
-                 SELECT DISTINCT ON (repo_id) stars, forks \
+                 SELECT DISTINCT ON (repo_id) forks \
                    FROM mine WHERE day <= $3 \
                   ORDER BY repo_id, day DESC \
              ) \
              SELECT a.changes, a.changes_merged, a.issues_opened, a.issues_closed, \
                     a.commits, \
-                    coalesce((SELECT sum(stars) FROM latest), 0), \
                     coalesce((SELECT sum(forks) FROM latest), 0) \
                FROM activity a",
             &[&org, &from_day, &to_day],
@@ -652,8 +641,7 @@ pub fn org_totals(
         issues_opened: row.get(2),
         issues_closed: row.get(3),
         commits: row.get(4),
-        stars: row.get(5),
-        forks: row.get(6),
+        forks: row.get(5),
     })
 }
 
@@ -691,7 +679,6 @@ mod tests {
                 description: None,
                 name,
                 kind: RepoKind::Native,
-                public: true,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
@@ -824,17 +811,6 @@ mod tests {
         seed_commits(&db, &rid, &eve, D, 0);
         seed_commits(&db, &rid, &uid, D + 1, 9);
 
-        // A star from before the day and one from after it: the running
-        // total is as of the end of the day, so only the first counts.
-        crate::stars::star(&db, &rid, &uid).unwrap();
-        db.lock()
-            .execute(
-                "UPDATE repo_stars SET created_at = $2 WHERE repo_id = $1",
-                &[&rid.clone(), &(start - 1)],
-            )
-            .unwrap();
-        crate::stars::star(&db, &rid, &bob).unwrap(); // stamped now, far future
-
         // A fork made before the day, and one made after it.
         let old_fork = repo(&db, &ns, "fork-old");
         let new_fork = repo(&db, &ns, "fork-new");
@@ -856,7 +832,6 @@ mod tests {
         assert_eq!(s.changes_merged, 2, "{s:?}");
         assert_eq!(s.commits, 7, "{s:?}");
         assert_eq!(s.contributors, 2, "a row with no work counted as a person");
-        assert_eq!(s.stars, 1, "the star total is as of the end of the day");
         assert_eq!(s.forks, 1, "the fork total is as of the end of the day");
         assert!(s.rolled_at > 0, "{s:?}");
     }
@@ -1106,8 +1081,6 @@ mod tests {
                    UNION \
                      SELECT repo_id, day FROM contributions \
                    UNION \
-                     SELECT repo_id, (created_at / 86400000)::INT FROM repo_stars \
-                   UNION \
                      SELECT fork_parent_id, (created_at / 86400000)::INT FROM repos \
                        WHERE fork_parent_id IS NOT NULL \
                    UNION \
@@ -1168,7 +1141,6 @@ mod tests {
             Some(day_bounds(D + 4).0 + 1),
         );
         seed_commits(&db, &rid, &uid, D + 5, 3);
-        crate::stars::star(&db, &rid, &uid).unwrap();
         seed_change(&db, &ns, &rid, "c3", day_bounds(today).0 + 1, None);
 
         // A second repository, so the answer is not one repo's by luck.
@@ -1245,7 +1217,7 @@ mod tests {
             .collect::<Vec<_>>()
             .join("\n");
 
-        for table in ["issues", "changes", "contributions", "repo_stars"] {
+        for table in ["issues", "changes", "contributions"] {
             assert!(
                 !plan.contains(table),
                 "the five-minute sweep reads {table}:\n{plan}"
@@ -1351,11 +1323,12 @@ mod tests {
             Some(day_bounds(D + 1).0 + 2),
         );
         seed_issue(&db, &a, 1, day_bounds(D).0 + 1, None);
-        crate::stars::star(&db, &a, &bob).unwrap();
+        // A fork of `a` from before the window: a running total.
+        let fork = repo(&db, &ns, "widget-fork");
         db.lock()
             .execute(
-                "UPDATE repo_stars SET created_at = $1",
-                &[&(day_bounds(D).0 - 1)],
+                "UPDATE repos SET fork_parent_id = $2, created_at = $3 WHERE id = $1",
+                &[&fork, &a.clone(), &(day_bounds(D).0 - 1)],
             )
             .unwrap();
 
@@ -1392,7 +1365,7 @@ mod tests {
         assert_eq!(t.changes_merged, 1, "{t:?}");
         assert_eq!(t.issues_opened, 1, "{t:?}");
         assert_eq!(
-            t.stars, 1,
+            t.forks, 1,
             "a running total summed over two days would say 2: {t:?}"
         );
 
@@ -1429,7 +1402,6 @@ mod tests {
                 description: None,
                 name: "secret",
                 kind: RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,

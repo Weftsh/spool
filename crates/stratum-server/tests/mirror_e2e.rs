@@ -2103,7 +2103,6 @@ fn a_github_mirror_without_an_installation_cannot_forward() {
             name: "public",
             description: None,
             kind: stratum_control::registry::RepoKind::Mirror,
-            public: true,
             default_branch: "main",
             origin_url: Some("acme/public"),
             origin_provider: Some("github"),

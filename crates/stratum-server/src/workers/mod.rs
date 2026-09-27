@@ -1,6 +1,6 @@
 //! Background workers, all tokio tasks in the one binary: the compactor
-//! (WAL fold), epoch GC + deleted-repo sweeps, the billing rollup, and the
-//! audit shipper. Intervals are config; 0 disables a worker.
+//! (WAL fold), epoch GC + deleted-repo sweeps, the usage rollup, the
+//! audit shipper and the rest. Intervals are config; 0 disables a worker.
 
 pub mod cdnpack;
 pub mod changeset_lander;
@@ -19,8 +19,8 @@ pub mod promoter;
 pub mod runner;
 pub mod shipper;
 pub mod signals;
-pub mod sitepublish;
 pub mod storage;
+pub mod usage;
 
 use std::time::Duration;
 
@@ -42,8 +42,8 @@ pub fn spawn_all(state: &SharedState) {
     changeset_notifier::spawn(state.clone());
     signals::spawn(state.clone());
     runner::spawn(state.clone());
-    sitepublish::spawn(state.clone());
     storage::spawn(state.clone());
+    usage::spawn(state.clone());
 }
 
 /// A job lease, in milliseconds, from a seconds-valued env knob.

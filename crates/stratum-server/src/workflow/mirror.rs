@@ -266,7 +266,6 @@ mod tests {
             &NewRepo {
                 name: "app",
                 kind: RepoKind::Native,
-                public: false,
                 description: None,
                 default_branch: "main",
                 origin_url: None,
@@ -356,7 +355,6 @@ mod tests {
             group_id: "",
             labels: &labels,
             all_repos: true,
-            allow_public: false,
         };
         let claimed = workflows::claim_self_hosted(&db, &route, 60_000)
             .unwrap()

@@ -428,7 +428,6 @@ mod tests {
                 description: None,
                 name: "live",
                 kind: registry::RepoKind::Native,
-                public: false,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,

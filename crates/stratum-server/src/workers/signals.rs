@@ -222,7 +222,6 @@ mod tests {
                 description: None,
                 name,
                 kind: RepoKind::Native,
-                public: true,
                 default_branch: "main",
                 origin_url: None,
                 origin_provider: None,
