@@ -14,7 +14,6 @@ import {
   TableHeadRow,
   TableRow,
 } from "@/components/ui/table";
-import { formatPoolBytes } from "@/lib/meter";
 import { formatBytes, formatCount, formatMs } from "@/format";
 
 /// What the repository is actually doing: traffic, latency and how
@@ -28,18 +27,12 @@ import { formatBytes, formatCount, formatMs } from "@/format";
 ///
 /// **Members only, and the route agrees.** A repository's traffic — how
 /// often it is cloned, how many bytes it serves, how far behind its
-/// origin a mirror runs — belongs to the people who own it: publishing
-/// the code does not publish how the code is used. So this is not a
-/// public surface even on a public repository.
+/// origin a mirror runs — belongs to the people who own it.
 ///
 /// The gate here is `viewer_member`, and `GET …/repos/{repo}/metrics`
 /// makes the *same* `authx::require` call to decide the same thing
-/// (`crates/stratum-server/src/api/metrics_api.rs`). That matters more
-/// than it looks: the route used to take `Scope::RepoRead` through
-/// `rest_repo_auth`, which falls back to public read, so on a public
-/// repository it answered an anonymous caller in full while nothing in
-/// the UI linked to it. A gate only this file enforced would have been
-/// a curtain over an open window.
+/// (`crates/stratum-server/src/api/metrics_api.rs`). A gate only this
+/// file enforced would have been a curtain over an open window.
 ///
 /// Members, not admins: somebody holding the `viewer` role is on the
 /// inside and may read the numbers without being able to change
@@ -56,8 +49,7 @@ export function RepoInsightsView(props: {
   /// ask for it a second time. `null` until it arrives.
   row: Repo | null;
   /// `viewer_member` off that row, `null` until it arrives: whether the
-  /// caller holds a role here at all, rather than reading a public
-  /// repository as a stranger. The server's own answer, handed down, so
+  /// caller holds a role here at all. The server's own answer, handed down, so
   /// this page and the route behind it cannot come to different
   /// conclusions about who is looking.
   member: boolean | null;
@@ -177,15 +169,10 @@ export function RepoInsightsView(props: {
         )}
         {/* What this repository is holding, which is the other half of
             what an owner comes to this page to find out: the tiles above
-            are what it *moved*, and only a private repository's bytes
-            are ever charged for. Rendered only when the row carries it —
+            are what it *moved*. Rendered only when the row carries it —
             the field is optional on the wire. */}
         {info.stored_bytes != null && (
-          <StatTile
-            label="Stored"
-            value={formatPoolBytes(info.stored_bytes)}
-            sub={info.public ? "public storage is never counted" : undefined}
-          />
+          <StatTile label="Stored" value={formatBytes(info.stored_bytes)} />
         )}
       </div>
 

@@ -17,7 +17,7 @@ colors come from `web/shared/tokens.css`, and the two meet only in
 | `src/components/ui/` | vendored shadcn primitives, re-skinned | bridge names (`bg-background`, `bg-card`, `text-muted-foreground`, `border-border`, `ring-ring`) plus Stratum names where the bridge has no equivalent (`brand-strong`, `text-ink-2`, `text-serious`, `--glow-brand`) |
 | `src/components/` | app widgets (StatTile, Bars, SyncBadge, CloneBlock, …) | Stratum names only (`bg-surface-1`, `text-ink`, `border-borderline`) |
 | `src/views/` | screens and panels | Stratum names only; compose primitives |
-| `src/shells/` | the two chromes: `admin-shell` (sidebar, `max-w-5xl`) and `forge-shell` (global header, `max-w-[1280px]`, no rail, renders signed-out) | Stratum names only |
+| `src/shells/` | the two chromes: `admin-shell` (sidebar, `max-w-5xl`) and `forge-shell` (global header, `max-w-[1280px]`, no rail; signed-in only — `App.tsx` sends anybody else to `/login`) | Stratum names only |
 | `src/lib/` | `cn()`, hooks, and `links.ts` — the link and container classes the design system settled | — |
 
 Vendored primitives currently in use: `alert`, `alert-dialog`, `avatar`,

@@ -9,7 +9,6 @@ import {
   Scale,
   Settings,
   ShieldAlert,
-  Star,
   Tag,
   Users,
   X,
@@ -20,22 +19,18 @@ import {
   type Contributor,
   type ForkEntry,
   type License,
-  type OriginStars,
   type RefName,
   type Repo,
   type RepoMeta,
-  type StarState,
 } from "@/api";
 import { LanguageBar } from "@/components/language-bar";
 import { OwnerAvatar } from "@/components/owner-avatar";
-import { RelativeTime } from "@/components/relative-time";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Err } from "@/components/feedback";
 import { formatCount } from "@/format";
 import { STRUCTURAL_LINK_2, PROSE_LINK, FOCUS_RING } from "@/lib/links";
-import { originHref, originLabel } from "@/lib/origin";
 import { cn } from "@/lib/utils";
 import { href } from "@/router";
 
@@ -70,9 +65,8 @@ import { href } from "@/router";
 /// because its sidebar is, and an error box in a rail is furniture
 /// nobody can act on.
 ///
-/// The session is `viewerSession(owner, token)` and never `anon(owner)`:
-/// the server filters this panel by who is asking, so a token-holding
-/// member reading their own private repository must send their
+/// The session is `viewerSession(owner, token)`: the server filters this
+/// panel by who is asking, so a token-holding member must send their
 /// credential or be shown nothing and told nothing about why.
 
 // ---------------------------------------------------------------------------
@@ -302,23 +296,17 @@ export const CONTRIBUTOR_LIMIT = 12;
 
 export const FORK_LIMIT = 5;
 
-/// The counts block: `N stars`, `N watching`, `N forks`.
+/// The counts block: `N watching`, `N forks`.
 ///
-/// Singular where English has one — "1 star", not "1 stars" — and
+/// Singular where English has one — "1 fork", not "1 forks" — and
 /// "watching" either way, because it is a participle and not a noun.
-/// Zero is rendered, not hidden: a project with no stars is a fact about
-/// the project, and a missing row would read as a missing feature.
+/// Zero is rendered, not hidden: a project nobody has forked is a fact
+/// about the project, and a missing row would read as a missing feature.
 export function countRows(input: {
-  stars: number;
   watchers: number;
   forks: number;
-}): { kind: "stars" | "watching" | "forks"; value: number; label: string }[] {
+}): { kind: "watching" | "forks"; value: number; label: string }[] {
   return [
-    {
-      kind: "stars",
-      value: input.stars,
-      label: input.stars === 1 ? "star" : "stars",
-    },
     { kind: "watching", value: input.watchers, label: "watching" },
     {
       kind: "forks",
@@ -326,24 +314,6 @@ export function countRows(input: {
       label: input.forks === 1 ? "fork" : "forks",
     },
   ];
-}
-
-/// "60.3k on GitHub", or nothing at all.
-///
-/// The single most useful thing this page can tell somebody deciding
-/// whether a migrated project is alive, and the single most damaging
-/// thing it could say if it guessed. `origin` is `null` when we never
-/// imported a count, which is *not* an origin that reported zero — so
-/// this returns `null` rather than a `0 on GitHub` under a project with
-/// sixty thousand stars.
-///
-/// The two counts are never added. A mirrored project's honest `☆ 4`
-/// above a labelled "60.3k on GitHub" tells the truth twice, where our
-/// count alone says a migrated project is dead and a sum says something
-/// nobody can check (FORGE-UX §6).
-export function originStarsLine(origin: OriginStars | null): string | null {
-  if (!origin) return null;
-  return `${formatCount(origin.stars)} on ${originLabel(origin.url)}`;
 }
 
 /// A homepage as a reader wants to see it: no scheme, no trailing slash.
@@ -376,7 +346,6 @@ const HEALTH_ICON: Record<HealthKind, typeof BookOpen> = {
 };
 
 const COUNT_ICON = {
-  stars: Star,
   watching: Eye,
   forks: GitFork,
 } as const;
@@ -387,8 +356,8 @@ export function About(props: {
   /// the viewer may not see the repository — in the second case this
   /// component is never mounted.
   repo: Repo | null;
-  /// The caller's API token, when they signed in with one. Empty for a
-  /// stranger; see the note above about `anon()`.
+  /// The caller's API token, when they signed in with one; see the note
+  /// above about `viewerSession()`.
   token: string | null;
   /// Whether to offer the topic editor. Computed by the page from the
   /// viewer's role in the namespace, and only ever *additive*: getting
@@ -400,15 +369,14 @@ export function About(props: {
   // A fork has a row before it has objects. The licence, README and
   // tag rows are read out of the objects, so they wait for the row to
   // say `ready` — and are asked for then, on this page, rather than on
-  // the reload somebody used to need. Stars, forks and contributors are
-  // the row's own facts and answer at any time.
+  // the reload somebody used to need. Forks and contributors are the
+  // row's own facts and answer at any time.
   const hasObjects =
     repo !== null &&
     repo.fork_state !== "pending" &&
     repo.fork_state !== "failed";
   const { owner, token } = props;
   const [meta, setMeta] = useState<RepoMeta | null>(null);
-  const [stars, setStars] = useState<StarState | null>(null);
   const [tags, setTags] = useState<RefName[] | null>(null);
   const [forks, setForks] = useState<ForkEntry[] | null>(null);
   const [people, setPeople] = useState<Contributor[] | null>(null);
@@ -417,13 +385,12 @@ export function About(props: {
   useEffect(() => {
     let alive = true;
     setMeta(null);
-    setStars(null);
     setTags(null);
     setForks(null);
     setPeople(null);
     if (!name) return;
     const session = viewerSession(owner, token);
-    // Five independent reads, five independent failures. Each `catch`
+    // Four independent reads, four independent failures. Each `catch`
     // is deliberately empty and deliberately per-request: a repository
     // with no tags endpoint on an older server still gets its licence
     // row, and a rail that blanked itself because one adornment was
@@ -443,10 +410,6 @@ export function About(props: {
         .then(keep(setTags))
         .catch(() => undefined);
     }
-    api
-      .getStars(session, name)
-      .then(keep(setStars))
-      .catch(() => undefined);
     api
       .forks(session, name)
       .then(keep((f: { forks: ForkEntry[] }) => setForks(f.forks)))
@@ -468,7 +431,6 @@ export function About(props: {
   const latest = latestTag(tags ?? []);
   const forkList = overflow(forks ?? [], FORK_LIMIT);
   const contributors = overflow(people ?? [], CONTRIBUTOR_LIMIT);
-  const originLine = originStarsLine(stars?.origin ?? null);
 
   return (
     <aside className="w-full min-w-0 shrink-0 space-y-4 md:w-72">
@@ -542,10 +504,9 @@ export function About(props: {
                 // it was deliberately left out of the tab strip on the
                 // rule stated above `TABS` in `forge/index.tsx`, "add a
                 // tab here when its body exists, not when its name is
-                // decided", because a 404 here invites a visitor to
-                // sign in for a feature that does not exist. This rail
-                // went on linking to it anyway, so every repository
-                // page in the product carried one dead link.
+                // decided". This rail went on linking to it anyway, so
+                // every repository page in the product carried one dead
+                // link.
                 //
                 // Commits is the honest target: this row is documented
                 // as "the repository's own history, which exists the
@@ -562,7 +523,6 @@ export function About(props: {
       <div>
         <ul className="space-y-1.5 text-sm">
           {countRows({
-            stars: stars?.stars ?? 0,
             watchers: repo.watcher_count ?? 0,
             forks: repo.fork_count ?? 0,
           }).map((c) => {
@@ -579,30 +539,6 @@ export function About(props: {
             );
           })}
         </ul>
-        {originLine && stars?.origin && (
-          <p className="mt-1.5 pl-6 text-xs text-ink-3">
-            {originHref(stars.origin.url) ? (
-              <a
-                className={STRUCTURAL_LINK_2}
-                href={originHref(stars.origin.url) ?? undefined}
-                rel="nofollow noopener noreferrer"
-              >
-                {originLine}
-              </a>
-            ) : (
-              <span>{originLine}</span>
-            )}
-            {stars.origin.at !== null && (
-              <>
-                {" "}
-                <span>
-                  read{" "}
-                  <RelativeTime at={stars.origin.at} className="text-ink-3" />
-                </span>
-              </>
-            )}
-          </p>
-        )}
       </div>
 
       {tags && tags.length > 0 && (
@@ -794,7 +730,7 @@ function HealthListRow(props: {
 
 /// The topic pills, and the form for changing them.
 ///
-/// Each pill links to `/explore?topic=…`, which is what a topic is
+/// Each pill links to `/search?topic=…`, which is what a topic is
 /// *for*: a word that finds the other projects like this one. A pill
 /// that only sat there would be a label, not a topic.
 ///
@@ -874,7 +810,7 @@ function Topics(props: {
               className="inline-flex min-w-0 items-center gap-1 rounded-full border border-borderline bg-surface-2 px-3 py-0.5 text-xs font-medium text-ink-2 transition hover:border-brand/40 hover:text-ink"
             >
               <a
-                href={href(["explore"], { topic: t })}
+                href={href(["search"], { topic: t })}
                 className={cn("min-w-0 truncate rounded-sm", FOCUS_RING)}
               >
                 {t}

@@ -83,7 +83,7 @@ import {
   blockReason,
   panelRowRefusal,
   refusalsByFile,
-} from "@/lib/hosted-runs";
+} from "@/lib/workflow-runs";
 import {
   ChangeChecksPanel,
   LandBlockers,
@@ -92,19 +92,6 @@ import {
   hasFailingCheck,
   type PanelCheck,
 } from "@/views/forge/change-checks";
-
-/// "Sign in", as a link when the page knows where that is and as plain
-/// words when it does not — the dashboard mount has no login route of
-/// its own to point at, and a dead link is worse than none.
-function SignInWord(props: { href?: string }) {
-  return props.href ? (
-    <a className={STRUCTURAL_LINK} href={props.href}>
-      Sign in
-    </a>
-  ) : (
-    <>Sign in</>
-  );
-}
 
 function StateBadge(props: { state: Change["state"] }) {
   const tone: Record<Change["state"], string> = {
@@ -341,7 +328,6 @@ interface ThreadActors {
   me: Me | null;
   canWrite: boolean;
   standing: ReviewerStanding | null;
-  signedIn: boolean;
   busy: boolean;
   /// Suggested changes: what a suggestion replaces, and what may be
   /// done about it. **Null** when this server cannot apply one at all —
@@ -481,7 +467,7 @@ function ThreadCard(props: {
             <span aria-hidden>✓</span> {resolvedWord}
           </span>
         )}
-        {actors.threaded && actors.signedIn && !pending && !replying && (
+        {actors.threaded && !pending && !replying && (
           <Button
             type="button"
             size="xs"
@@ -565,22 +551,16 @@ function ThreadCard(props: {
 /// interface at all, and the server's refusal told people to "open the
 /// change with `source` naming your fork": a REST field, in backticks,
 /// with nothing on screen corresponding to it.
-///
-/// Worse, the form was drawn for signed-out visitors, who cannot open a
-/// change under any circumstances, and refused them only after they had
-/// filled it in.
 function StartReview(props: {
   session: Session;
   repo: string;
   canWrite: boolean;
-  signedIn: boolean;
   defaultBranch?: string;
-  loginHref?: string;
   busy: boolean;
   error: string | null;
   onStart: (from: string, opts: { source?: string; target?: string }) => void;
 }) {
-  const { canWrite, signedIn } = props;
+  const { canWrite } = props;
   const [fromBranch, setFromBranch] = useState("");
   const [sourceRepo, setSourceRepo] = useState("");
   const [target, setTarget] = useState("");
@@ -603,8 +583,9 @@ function StartReview(props: {
 
   // The forks of this repository, to suggest in the picker. GitHub uses
   // a dropdown; this is a text field with suggestions, because the
-  // listing is public forks only and a contributor's fork may be
-  // private — so the field must still accept one that is not offered.
+  // listing is only the forks this viewer may see and a contributor's
+  // fork may not be one of them — so the field must still accept one
+  // that is not offered.
   useEffect(() => {
     if (!fromFork || forks !== null) return;
     let alive = true;
@@ -618,27 +599,6 @@ function StartReview(props: {
       alive = false;
     };
   }, [fromFork, forks, props.session, props.repo]);
-
-  if (!signedIn) {
-    return (
-      <div className="rounded-lg border border-borderline bg-surface-1 p-4">
-        <div className="mb-1 text-sm font-medium text-ink">
-          Propose a change
-        </div>
-        <p className="text-xs text-ink-3">
-          Opening a change needs an account.{" "}
-          {props.loginHref && (
-            <a className={STRUCTURAL_LINK} href={props.loginHref}>
-              Sign in
-            </a>
-          )}
-          {props.loginHref && " to propose one. "}
-          You do not need write access: fork this repository, push a branch to
-          your fork, and open the change from there.
-        </p>
-      </div>
-    );
-  }
 
   const canSubmit =
     !!fromBranch.trim() && (!fromFork || !!sourceRepo.trim()) && !props.busy;
@@ -777,21 +737,16 @@ export function ChangesPanel(props: {
   /// Defaults to `true` for the dashboard, which only ever lists
   /// repositories in a namespace the viewer belongs to and had no way to
   /// ask before `viewer_write` existed. The forge passes the real answer,
-  /// because that is where a stranger arrives.
+  /// because a reader with the `viewer` role arrives there too.
   canWrite?: boolean;
-  /// Defaults to `true` for the same reason: nothing reaches the
-  /// dashboard without a session.
-  signedIn?: boolean;
   /// The repository's default branch, offered as the landing target.
   defaultBranch?: string;
-  /// Where "Sign in" goes, with a `next` back to this page.
-  loginHref?: string;
   /// Who is looking, when a browser session says. A change's author is
   /// allowed one thing a reader is not — to withdraw it — and the page
   /// can only offer that when it knows who the author is talking to.
   me?: Me | null;
   /// How an in-app link inside a change navigates — the checks panel's
-  /// links to our own hosted-run pages. Absent on the dashboard mount,
+  /// links to our own workflow-run pages. Absent on the dashboard mount,
   /// where that page is not a route and a full load is the honest
   /// answer.
   navigate?: (to: string, replace?: boolean) => void;
@@ -845,8 +800,6 @@ export function ChangesPanel(props: {
         repo={repo}
         changeKey={selected}
         canWrite={props.canWrite ?? true}
-        signedIn={props.signedIn ?? true}
-        loginHref={props.loginHref}
         me={props.me ?? null}
         navigate={props.navigate}
         onBack={() => {
@@ -865,9 +818,7 @@ export function ChangesPanel(props: {
         session={session}
         repo={repo}
         canWrite={props.canWrite ?? true}
-        signedIn={props.signedIn ?? true}
         defaultBranch={props.defaultBranch}
-        loginHref={props.loginHref}
         busy={busy}
         error={error}
         onStart={startReview}
@@ -955,8 +906,8 @@ function ErrLine(props: { message: string | null }) {
 /// it is not an action on the *change* — it does not approve the code,
 /// it does not land it, and a reviewer who confuses it with the patchset
 /// approval two rows below has agreed to something they did not mean to.
-/// A fork's workflow runs a stranger's code on our runners, and the
-/// panel says so in as many words before the button.
+/// A fork's workflow runs a stranger's code on the organization's
+/// runners, and the panel says so in as many words before the button.
 ///
 /// **What it shows a reader who may not press it.** The reasons are
 /// rendered for everybody — an author watching their own fork change sit
@@ -980,9 +931,8 @@ function ApproveWorkflows(props: {
         {props.runs.map((r) => (
           <li key={r.id} className="text-xs">
             <span className="font-mono text-ink-2">{r.file}</span>
-            {/* Verbatim. Three different refusals reach this page as one
-                state, and the sentence is the only thing that says which
-                — over budget, suspended, or waiting on a person. */}
+            {/* Verbatim. Every refusal reaches this page as one state,
+                and the sentence is the only thing that says which. */}
             <p className="mt-0.5 whitespace-pre-wrap break-words text-ink-3">
               {blockReason(r)}
             </p>
@@ -997,7 +947,8 @@ function ApproveWorkflows(props: {
                 dashboard, and it would be the wrong shape anyway: the
                 sentence a reviewer needs is longer than a dialog title. */}
             <span className="text-xs text-ink-2">
-              This runs code from a fork on our runners.
+              This runs code from a fork on this organization&rsquo;s
+              runners.
             </span>
             <Button
               type="button"
@@ -1178,13 +1129,6 @@ function ChangeView(props: {
   /// approve running a fork's workflows here". Subtractive: false until
   /// the repository row says otherwise.
   canWrite: boolean;
-  /// Whether anyone is signed in at all. A stranger on a public
-  /// repository can read every word of a review; the things they cannot
-  /// do — comment, approve — are shown as a way in, not as buttons that
-  /// answer 401 when pressed.
-  signedIn: boolean;
-  /// Where "Sign in" goes, with a `next` back to this page.
-  loginHref?: string;
   /// The browser session's person, if there is one. Compared with the
   /// change's author to offer Abandon to somebody who cannot write here
   /// but opened the change — the server admits exactly that person.
@@ -1192,7 +1136,7 @@ function ChangeView(props: {
   /// How an in-app link navigates. See `DetailLink`.
   navigate?: (to: string, replace?: boolean) => void;
 }) {
-  const { session, repo, changeKey, signedIn, canWrite } = props;
+  const { session, repo, changeKey, canWrite } = props;
   const [detail, setDetail] = useState<ChangeDetail | null>(null);
   const [verdict, setVerdict] = useState<ChangeVerdict | null>(null);
   const [files, setFiles] = useState<DiffEntry[] | null>(null);
@@ -1202,14 +1146,14 @@ function ChangeView(props: {
   const [baseline, setBaseline] = useState<number | null>(null);
   const [comments, setComments] = useState<ChangeComment[] | null>(null);
   const [checks, setChecks] = useState<ChangeCheck[] | null>(null);
-  /// The repository's hosted runs, read only to answer "why is this
+  /// The repository's workflow runs, read only to answer "why is this
   /// check never going to start".
   ///
   /// A refused run mirrors into the checks list as `queued`, so the
   /// reason it will never run exists nowhere on this page unless the
   /// runs are fetched as well. Never allowed to fail the load: a
-  /// deployment with no hosted runner answers nothing useful here and
-  /// the review page must still render.
+  /// repository with no workflows answers nothing useful here and the
+  /// review page must still render.
   const [runs, setRuns] = useState<WorkflowRun[]>([]);
   /// The names the target branch requires, which is **not** derivable
   /// from `checks`: a required check that has never reported has no row
@@ -1334,12 +1278,12 @@ function ChangeView(props: {
     }
   }, [comments, detail, session, repo]);
 
-  /// The hosted runs for the tip, fetched **beside** the review rather
+  /// The workflow runs for the tip, fetched **beside** the review rather
   /// than as part of it.
   ///
   /// It was in the load's `Promise.all` first, which made the entire
   /// change page — diff, verdict, comments, the land button — wait on a
-  /// request that only annotates it. A deployment whose hosted-runner
+  /// request that only annotates it. A deployment whose workflow-runs
   /// route is slow, or hung, showed "Loading…" over a review that had
   /// everything it needed; the page was held hostage by its own
   /// garnish. Separately fetched, a slow answer costs the reasons a
@@ -1360,7 +1304,7 @@ function ChangeView(props: {
       // like the page working.
       .workflowRuns(session, repo, { limit: 100, changeKey, commitSha: tip })
       .then((rs) => alive && setRuns(rs))
-      // A deployment with no hosted runner, an older server, or a
+      // A repository with no workflows, an older server, or a
       // refusal: the review renders exactly as it did before any of this
       // existed, with nothing annotated.
       .catch(() => undefined);
@@ -1636,15 +1580,15 @@ function ChangeView(props: {
           posted_by: k.posted_by,
           refusal: panelRowRefusal(k, refusals),
         }));
-  // The blocked hosted runs at the tip that approving would actually
+  // The blocked workflow runs at the tip that approving would actually
   // start — a fork's, and nothing else. Gated on the run's reason
-  // *code*, never on reading the refusal's prose: three refusals arrive
+  // *code*, never on reading the refusal's prose: every refusal arrives
   // as one state with only a sentence to tell them apart, and a button
   // that appears or vanishes on a wording change is a button nobody can
   // rely on.
   //
-  // A fork change in a suspended or out-of-minutes organisation is
-  // blocked with *that* reason, so it gets the sentence and no control:
+  // A fork change blocked for any other reason is blocked with *that*
+  // reason, so it gets the sentence and no control:
   // approving it would trigger another run, which blocks again
   // identically, and the server answers 409 to somebody the page had
   // just invited to press a button. The reason still renders — see the
@@ -1688,7 +1632,7 @@ function ChangeView(props: {
   // signal only — see `batchedReviewSupported`. Against a deployment
   // older than migration 0051 everything below stays exactly as it was:
   // comments post immediately and Approve is its own button.
-  const batched = batchedReviewSupported(detail) && signedIn;
+  const batched = batchedReviewSupported(detail);
   const drafts = batched ? draftComments(comments) : [];
   // The standing "no"s, and the server's own judgement of which of them
   // actually stop the change. Never re-derived here: `blocking` is an
@@ -1715,7 +1659,7 @@ function ChangeView(props: {
   // the server says so with a 409.
   const suggest: SuggestionActors | null = suggestionsSupported(comments)
     ? {
-        canApply: canWrite && signedIn && c.state === "open",
+        canApply: canWrite && c.state === "open",
         selected: batch,
         onSelect: (id, on) =>
           setBatch((prev) => {
@@ -1746,7 +1690,6 @@ function ChangeView(props: {
     me: props.me,
     canWrite,
     standing,
-    signedIn,
     busy,
     suggest,
     onReply: (parentId, body) =>
@@ -1770,10 +1713,7 @@ function ChangeView(props: {
   // and it is only printed when the reader can settle *nothing*, because
   // "you may not" beside a page that is offering the button elsewhere is
   // worse than silence.
-  // Not for a signed-out reader: the panel already ends with "Sign in to
-  // join the conversation", and a second sentence saying the same thing
-  // about a control they cannot see is one invitation too many.
-  const standings = (threaded && signedIn ? threads : [])
+  const standings = (threaded ? threads : [])
     .filter((t) => !t.resolved)
     .map((t) => resolveStanding(t.root, props.me, canWrite, standing));
   const noResolve =
@@ -1968,53 +1908,47 @@ function ChangeView(props: {
             {noResolve && (
               <p className="mb-3 text-xs text-ink-3">{noResolve}</p>
             )}
-            {!signedIn ? (
-              <p className="text-xs text-ink-3">
-                <SignInWord href={props.loginHref} /> to join the conversation.
-              </p>
-            ) : (
-              <form
-                onSubmit={(e) => {
-                  e.preventDefault();
-                  // Cleared on success only — see `act`. This used to
-                  // clear inside the action, before the request had been
-                  // awaited to a verdict.
-                  postChangeComment(false);
-                }}
+            <form
+              onSubmit={(e) => {
+                e.preventDefault();
+                // Cleared on success only — see `act`. This used to
+                // clear inside the action, before the request had been
+                // awaited to a verdict.
+                postChangeComment(false);
+              }}
+            >
+              <CommentComposer
+                value={commentBody}
+                onChange={setCommentBody}
+                label="Comment on this change"
+                placeholder="What should the author know?"
               >
-                <CommentComposer
-                  value={commentBody}
-                  onChange={setCommentBody}
-                  label="Comment on this change"
-                  placeholder="What should the author know?"
-                >
-                  <div className="flex flex-wrap gap-2">
+                <div className="flex flex-wrap gap-2">
+                  <Button
+                    type="submit"
+                    variant="outline"
+                    disabled={busy || !commentBody.trim()}
+                  >
+                    Comment
+                  </Button>
+                  {/* Both doors stay open. Saying one thing straight
+                      out is not the same act as opening a pass over
+                      the whole change, and a forge that only had the
+                      batched one would make a one-line question cost
+                      a verdict. */}
+                  {batched && (
                     <Button
-                      type="submit"
+                      type="button"
                       variant="outline"
                       disabled={busy || !commentBody.trim()}
+                      onClick={() => postChangeComment(true)}
                     >
-                      Comment
+                      Add to review
                     </Button>
-                    {/* Both doors stay open. Saying one thing straight
-                        out is not the same act as opening a pass over
-                        the whole change, and a forge that only had the
-                        batched one would make a one-line question cost
-                        a verdict. */}
-                    {batched && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        disabled={busy || !commentBody.trim()}
-                        onClick={() => postChangeComment(true)}
-                      >
-                        Add to review
-                      </Button>
-                    )}
-                  </div>
-                </CommentComposer>
-              </form>
-            )}
+                  )}
+                </div>
+              </CommentComposer>
+            </form>
           </div>
         </div>
 
@@ -2086,168 +2020,159 @@ function ChangeView(props: {
 
           <div className="rounded-lg border border-borderline bg-surface-1 p-4">
             <div className="mb-2 text-sm font-medium text-ink">Actions</div>
-            {!signedIn ? (
-              // A stranger is shown the way in, not a row of buttons that
-              // each answer "sign in" when pressed.
-              <p className="text-xs text-ink-3">
-                <SignInWord href={props.loginHref} /> to approve this change or
-                join the conversation.
-              </p>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {canWrite ? (
-                  <Button
-                    type="button"
-                    disabled={
-                      busy ||
-                      c.state !== "open" ||
-                      !landable ||
-                      failingCheck ||
-                      !!c.changeset
+            <div className="flex flex-col gap-2">
+              {canWrite ? (
+                <Button
+                  type="button"
+                  disabled={
+                    busy ||
+                    c.state !== "open" ||
+                    !landable ||
+                    failingCheck ||
+                    !!c.changeset
+                  }
+                  onClick={() =>
+                    act(async () => {
+                      await api.landChange(session, repo, changeKey);
+                      pollWhileLanding();
+                    }, "land")
+                  }
+                >
+                  {c.state === "landing"
+                    ? "Landing…"
+                    : `Land on ${c.target_branch}`}
+                </Button>
+              ) : (
+                // Not a refusal to come: landing is a writer's action, and
+                // a reader who has approved is done. The blockers below
+                // still say what the writer is waiting on.
+                <p className="text-xs text-ink-3">
+                  Landing on{" "}
+                  <span className="font-mono">{c.target_branch}</span> takes
+                  write access to this repository.
+                </p>
+              )}
+              {c.changeset && (
+                // Held, not blocked: nothing here is wrong, the change
+                // simply lands with the set it belongs to. The server
+                // refuses a solo land with a 409 that says the same; the
+                // page says it first, beside the button it turns off.
+                <p className="text-xs text-ink-2">
+                  Lands with changeset{" "}
+                  {/* The changeset's own page, which is now a route on
+                    both mounts: `/dashboard/changesets/{key}` for a
+                    member, and `/{owner}/changesets/{key}` for
+                    anybody. `navigate` is passed on the forge mount
+                    only, so there this is a client-side move; on the
+                    dashboard the panel has no navigator and the full
+                    dashboard address is the honest link. */}
+                  <a
+                    href={
+                      props.navigate
+                        ? href([session.org, "changesets", c.changeset])
+                        : dash(["changesets", c.changeset])
                     }
-                    onClick={() =>
-                      act(async () => {
-                        await api.landChange(session, repo, changeKey);
-                        pollWhileLanding();
-                      }, "land")
-                    }
-                  >
-                    {c.state === "landing"
-                      ? "Landing…"
-                      : `Land on ${c.target_branch}`}
-                  </Button>
-                ) : (
-                  // Not a refusal to come: landing is a writer's action, and
-                  // a reader who has approved is done. The blockers below
-                  // still say what the writer is waiting on.
-                  <p className="text-xs text-ink-3">
-                    Landing on{" "}
-                    <span className="font-mono">{c.target_branch}</span> takes
-                    write access to this repository.
-                  </p>
-                )}
-                {c.changeset && (
-                  // Held, not blocked: nothing here is wrong, the change
-                  // simply lands with the set it belongs to. The server
-                  // refuses a solo land with a 409 that says the same; the
-                  // page says it first, beside the button it turns off.
-                  <p className="text-xs text-ink-2">
-                    Lands with changeset{" "}
-                    {/* The changeset's own page, which is now a route on
-                      both mounts: `/dashboard/changesets/{key}` for a
-                      member, and `/{owner}/changesets/{key}` for
-                      anybody. `navigate` is passed on the forge mount
-                      only, so there this is a client-side move; on the
-                      dashboard the panel has no navigator and the full
-                      dashboard address is the honest link. */}
-                    <a
-                      href={
-                        props.navigate
-                          ? href([session.org, "changesets", c.changeset])
-                          : dash(["changesets", c.changeset])
-                      }
-                      className={cn("font-mono", STRUCTURAL_LINK)}
-                      onClick={
-                        props.navigate
-                          ? (e) => {
-                              e.preventDefault();
-                              props.navigate?.(
-                                href([
-                                  session.org,
-                                  "changesets",
-                                  c.changeset as string,
-                                ]),
-                              );
-                            }
-                          : undefined
-                      }
-                    >
-                      {c.changeset}
-                    </a>{" "}
-                    — remove it there to land or abandon it alone.
-                  </p>
-                )}
-                {c.state === "open" ? (
-                  <LandBlockers blockers={landBlockers} />
-                ) : (
-                  c.state !== "landing" && (
-                    <span className="text-xs text-ink-3">
-                      Only an open change can land; this one is{" "}
-                      <span className="font-mono">{c.state}</span>.
-                    </span>
-                  )
-                )}
-                {batched ? (
-                  // Approving *is* a review — the same act through the
-                  // same door, so it records a verdict, publishes what
-                  // you drafted and sends one notification like any
-                  // other. A standalone Approve beside a sheet with an
-                  // Approve radio in it is two ways to do one thing,
-                  // and they would eventually disagree about what the
-                  // second one does to your drafts.
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy || c.state !== "open" || sheetOpen}
-                    onClick={() => setSheetOpen(true)}
-                  >
-                    Review patchset {latest?.number ?? ""}
-                  </Button>
-                ) : (
-                  // A server older than migration 0051 has no review
-                  // routes at all, so the button that predates them
-                  // stays exactly where it was.
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy || c.state !== "open"}
-                    onClick={() =>
-                      act(
-                        () => api.approve(session, repo, changeKey),
-                        "approve",
-                      )
+                    className={cn("font-mono", STRUCTURAL_LINK)}
+                    onClick={
+                      props.navigate
+                        ? (e) => {
+                            e.preventDefault();
+                            props.navigate?.(
+                              href([
+                                session.org,
+                                "changesets",
+                                c.changeset as string,
+                              ]),
+                            );
+                          }
+                        : undefined
                     }
                   >
-                    Approve patchset {latest?.number ?? ""}
-                  </Button>
-                )}
-                {/* Revoking stays where it is, and stays its own
-                    control: taking an approval back is not a review —
-                    there is nothing to say, nothing to publish and
-                    nobody new to tell. */}
+                    {c.changeset}
+                  </a>{" "}
+                  — remove it there to land or abandon it alone.
+                </p>
+              )}
+              {c.state === "open" ? (
+                <LandBlockers blockers={landBlockers} />
+              ) : (
+                c.state !== "landing" && (
+                  <span className="text-xs text-ink-3">
+                    Only an open change can land; this one is{" "}
+                    <span className="font-mono">{c.state}</span>.
+                  </span>
+                )
+              )}
+              {batched ? (
+                // Approving *is* a review — the same act through the
+                // same door, so it records a verdict, publishes what
+                // you drafted and sends one notification like any
+                // other. A standalone Approve beside a sheet with an
+                // Approve radio in it is two ways to do one thing,
+                // and they would eventually disagree about what the
+                // second one does to your drafts.
                 <Button
                   type="button"
                   variant="outline"
-                  disabled={busy || !hasApproved}
+                  disabled={busy || c.state !== "open" || sheetOpen}
+                  onClick={() => setSheetOpen(true)}
+                >
+                  Review patchset {latest?.number ?? ""}
+                </Button>
+              ) : (
+                // A server older than migration 0051 has no review
+                // routes at all, so the button that predates them
+                // stays exactly where it was.
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy || c.state !== "open"}
                   onClick={() =>
                     act(
-                      () => api.unapprove(session, repo, changeKey),
-                      "revoke approval",
+                      () => api.approve(session, repo, changeKey),
+                      "approve",
                     )
                   }
                 >
-                  Revoke my approval
+                  Approve patchset {latest?.number ?? ""}
                 </Button>
-                {(canWrite || isAuthor) && (
-                  // The server lets a writer abandon any change and lets
-                  // the author abandon their own; the button follows the
-                  // same two doors so nobody is offered one that is shut.
-                  <Button
-                    type="button"
-                    variant="outline"
-                    disabled={busy || c.state !== "open" || !!c.changeset}
-                    onClick={() =>
-                      act(
-                        () => api.abandonChange(session, repo, changeKey),
-                        "abandon",
-                      )
-                    }
-                  >
-                    Abandon
-                  </Button>
-                )}
-              </div>
-            )}
+              )}
+              {/* Revoking stays where it is, and stays its own
+                  control: taking an approval back is not a review —
+                  there is nothing to say, nothing to publish and
+                  nobody new to tell. */}
+              <Button
+                type="button"
+                variant="outline"
+                disabled={busy || !hasApproved}
+                onClick={() =>
+                  act(
+                    () => api.unapprove(session, repo, changeKey),
+                    "revoke approval",
+                  )
+                }
+              >
+                Revoke my approval
+              </Button>
+              {(canWrite || isAuthor) && (
+                // The server lets a writer abandon any change and lets
+                // the author abandon their own; the button follows the
+                // same two doors so nobody is offered one that is shut.
+                <Button
+                  type="button"
+                  variant="outline"
+                  disabled={busy || c.state !== "open" || !!c.changeset}
+                  onClick={() =>
+                    act(
+                      () => api.abandonChange(session, repo, changeKey),
+                      "abandon",
+                    )
+                  }
+                >
+                  Abandon
+                </Button>
+              )}
+            </div>
             {c.state === "landed" && c.landed_commit && (
               <p className="mt-3 text-sm text-good">
                 <span aria-hidden>●</span> Landed as{" "}

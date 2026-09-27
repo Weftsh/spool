@@ -5,15 +5,14 @@ import { join } from "node:path";
 /// No shared control may hang an effect off the whole session object.
 ///
 /// `Session` is `{ org, token }` and callers build it inline. The forge
-/// repository page calls `anon(owner)`, which is a fresh object on every
-/// render — so an effect whose dependency array names `session` re-runs
-/// forever, refetching on every pass. `WatchButton` was changed to
-/// destructure `{ org, token }` for exactly that reason, with a comment
-/// naming the loop; `StarButton` beside it was not, and was safe only
-/// because its one caller memoises the session. That caller's own
-/// comment says "not every component does, so the caller holds it still
-/// as well" — which is a note about the next caller, not a defence. The
-/// hazard belongs to the control, so the rule does.
+/// builds its sessions with `viewerSession(owner, token)`, which is a
+/// fresh object on every call — so an effect whose dependency array
+/// names `session` re-runs forever, refetching on every pass whenever a
+/// caller forgets to memoise. `WatchButton` destructures `{ org, token }`
+/// for exactly that reason, with a comment naming the loop; a sibling
+/// control that did not was once safe only because its one caller
+/// memoised the session — which is a note about the next caller, not a
+/// defence. The hazard belongs to the control, so the rule does.
 ///
 /// **Structural, because no rendering test can fail on it.** The loop
 /// only appears for a caller that does *not* memoise, and every caller
@@ -62,11 +61,11 @@ describe("shared controls depend on session primitives, not the object", () => {
           expect(
             ["session", "props.session"].includes(entry),
             `${file} has an effect depending on \`${entry}\`. A caller ` +
-              "that builds its session inline — `anon(owner)`, which is " +
-              "how the forge repo page calls its data — hands a fresh " +
+              "that builds its session inline — `viewerSession(owner, " +
+              "token)`, which is how the forge calls its data — hands a fresh " +
               "object every render, so this refetches forever. " +
               "Destructure `const { org, token } = props.session` and " +
-              "depend on those, as WatchButton and StarButton do.",
+              "depend on those, as WatchButton does.",
           ).toBe(false);
     });
   }

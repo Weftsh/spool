@@ -73,28 +73,12 @@ export function watchLabel(level: WatchLevel): string {
   }
 }
 
-/// The Watch control: how many people hear about this repository, and —
-/// for somebody with an account — the menu that changes their own
-/// answer.
+/// The Watch control: how many people hear about this repository, and
+/// the menu that changes the viewer's own answer.
 ///
-/// **This used to render nothing at all for a stranger**, and the
-/// argument for that was sound while it held: a subscription belongs to
-/// a person, `GET …/watch` refuses anybody else, so there was no number
-/// to draw and a control that could only ever 401 is worse than none.
-///
-/// The premise is gone. The count now rides on the repository row
-/// beside the fork count, because it is public information — see
-/// `watches::watching_count`. So Watch can do exactly what Fork and Star
-/// beside it already did: show the count to everybody, and send somebody
-/// without an account to sign in rather than failing under them. That
-/// also fixes what the old rule cost: the control appearing only after
-/// the auth probe answered made the identity row change width after
-/// paint, on every repository page, for every signed-in reader.
-///
-/// The rule the forge actually follows is the one the two siblings
-/// state — a control is either usable or it explains itself, never a
-/// surface that only errors. Absence was a third thing, and Watch was
-/// the only control obeying it.
+/// The count rides on the repository row beside the fork count — see
+/// `watches::watching_count` — so it is known before the subscription
+/// read answers and the identity row never changes width after paint.
 export function WatchButton(props: {
   session: Session;
   repo: string;
@@ -102,16 +86,11 @@ export function WatchButton(props: {
   /// repository row, so it is known before the subscription read
   /// answers and the control never changes width.
   count: number;
-  /// Whether there is a person to have a subscription. False sends the
-  /// press to sign-in instead of opening a menu with nothing behind it.
-  signedIn: boolean;
-  onSignIn?: () => void;
 }) {
   const { repo } = props;
   // The primitives, not the object: a parent that builds its session
-  // inline — `anon(owner)`, which is exactly how the forge repo page
-  // calls its data — hands a fresh object every render, and an effect
-  // depending on that object refetches forever.
+  // inline hands a fresh object every render, and an effect depending
+  // on that object refetches forever.
   const { org, token } = props.session;
   const [level, setLevel] = useState<WatchLevel | null>(null);
 
@@ -123,12 +102,6 @@ export function WatchButton(props: {
   useEffect(() => {
     let alive = true;
     setLevel(null);
-    // Not asked at all when there is nobody to ask about. A stranger's
-    // request would 401 by design, and spending a round trip to learn
-    // something we already know puts a red line in their console on
-    // every repository page — which the walkthrough's watcher reports
-    // as a problem, correctly.
-    if (!props.signedIn) return;
     api
       .watch({ org, token }, repo)
       .then((r) => alive && setLevel(r.level))
@@ -140,7 +113,7 @@ export function WatchButton(props: {
     return () => {
       alive = false;
     };
-  }, [org, token, repo, props.signedIn]);
+  }, [org, token, repo]);
 
   const choose = useCallback(
     async (next: WatchLevel) => {
@@ -164,8 +137,8 @@ export function WatchButton(props: {
   );
 
   // `null` is "not read yet, or not readable" — either way the control
-  // shows its invitation. It is never absent: the count is public and
-  // the row's width must not depend on how far the auth probe has got.
+  // shows its invitation. It is never absent: the row's width must not
+  // depend on how far the read has got.
   const shown: WatchLevel = level ?? "participating";
   const Glyph = shown === "ignore" ? EyeOff : Eye;
 
@@ -175,18 +148,10 @@ export function WatchButton(props: {
       label={watchLabel(shown)}
       count={props.count}
       active={shown === "all"}
-      menu={props.signedIn}
-      aria-haspopup={props.signedIn ? "menu" : undefined}
-      ariaLabel={props.signedIn ? undefined : "Sign in to watch"}
-      onClick={props.signedIn ? undefined : props.onSignIn}
+      menu
+      aria-haspopup="menu"
     />
   );
-
-  // A stranger gets the count and a way to get an account, and no menu:
-  // the three levels are a person's setting and there is nobody yet to
-  // set one for. Wrapping this in a DropdownMenu that opened on a
-  // sign-in press would be a menu that cannot save anything.
-  if (!props.signedIn) return trigger;
 
   return (
     <DropdownMenu>

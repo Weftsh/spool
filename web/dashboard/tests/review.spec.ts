@@ -222,7 +222,7 @@ async function mockReview(
     /// The key of the changeset holding this change, when one does.
     changeset?: string;
     /// The repository the change is on. `session-1` for the dashboard
-    /// tests; the forge tests below put it on the public `widget`.
+    /// tests; the forge tests below put it on `widget`.
     repo?: string;
     /// Who opened it, as the associations name them.
     author?: string;
@@ -637,7 +637,7 @@ async function mockReview(
 /// password session survives that only if `/v1/auth/me` answers, and
 /// `signInAsPerson` mocks it to 401 for the *pre*-login probe and never
 /// updates it. So a `goto` here silently signs the viewer out, and the
-/// page renders "Sign in to watch" beside a change it is supposed to be
+/// page is sent to sign in instead of the change it is supposed to be
 /// reviewing — which reads as the review surface being broken.
 ///
 /// Clicking also exercises the two links this navigation now depends on:
@@ -1028,7 +1028,7 @@ test("from the forge, a held change reaches its changeset without leaving the fo
   // link used to be a deliberate full load to `/dashboard/changesets/…`,
   // and the comment beside it said why: the forge mount had no
   // changesets route, so `navigate` there would have gone to a blank
-  // page. A changeset now has a public forge address of its own, so that
+  // page. A changeset now has a forge address of its own, so that
   // reason has expired — and the reader is one client-side move from it
   // rather than a whole SPA reload out of the shell they are standing in.
   //
@@ -1075,20 +1075,20 @@ test("from the forge, a held change reaches its changeset without leaving the fo
 // Who is offered which action.
 //
 // The Actions card drew the same four buttons for everyone who could
-// read the change. On a public repository that is everyone: a stranger
-// with no account was offered Land, Approve and Abandon, and each of
-// them answered "sign in" or "not found" only after being pressed. The
-// server's doors are: anyone signed in may approve; landing takes write
-// access; abandoning takes write access **or** being the author. The
-// card now follows the same three, so nobody is offered a door that is
-// shut — and the author of a change proposed from a fork, who can never
-// write here, is the person Abandon is most for.
+// read the change, and a reader without write access was offered Land
+// and Abandon that each answered "not found" only after being pressed.
+// The server's doors are: anyone who can read the change may approve;
+// landing takes write access; abandoning takes write access **or**
+// being the author. The card now follows the same three, so nobody is
+// offered a door that is shut — and the author of a change proposed
+// from a fork, who can never write here, is the person Abandon is most
+// for.
 
-/// A change on the public `widget`, read from the forge by `who`.
+/// A change on `widget`, read from the forge by `who`.
 async function onForgeChange(
   page: Page,
   who: {
-    me: typeof ME | null;
+    me: typeof ME;
     write: boolean;
     author?: string;
     approvals?: ApprovalFixture[];
@@ -1107,9 +1107,7 @@ async function onForgeChange(
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
   await page.route("**/v1/auth/me", (r) =>
-    who.me
-      ? r.fulfill({ status: 200, json: who.me })
-      : r.fulfill({ status: 401, json: { error: "not signed in" } }),
+    r.fulfill({ status: 200, json: who.me }),
   );
   await page.route("**/v1/orgs/acme/repos/widget", (r) =>
     r.fulfill({
@@ -1117,7 +1115,6 @@ async function onForgeChange(
       json: {
         ...REPOS.repos[0],
         org: "acme",
-        public: true,
         // `native`, and not incidentally: `REPOS.repos[0]` is a mirror,
         // and a mirror can never have a change. `changes_api::create`
         // refuses one at the door — "a mirror's trunk belongs to its
@@ -1152,41 +1149,11 @@ const actionButtons = (page: Page) => ({
   land: page.getByRole("button", { name: /^Land on main/ }),
   approve: page.getByRole("button", { name: /^Approve patchset/ }),
   // The door Approve moved behind on a 0051 server: one sheet, three
-  // verdicts. Both are listed so the signed-out sweep below can assert
-  // that neither is offered.
+  // verdicts. Both are listed so a sweep can assert which is offered.
   review: page.getByRole("button", { name: /^Review patchset/ }),
   revoke: page.getByRole("button", { name: "Revoke my approval" }),
   abandon: page.getByRole("button", { name: "Abandon" }),
   comment: page.getByRole("button", { name: "Comment" }),
-});
-
-test("a stranger reads the whole review and is offered the way in, not buttons", async ({
-  page,
-}) => {
-  await onForgeChange(page, { me: null, write: false });
-  const b = actionButtons(page);
-  for (const [name, button] of Object.entries(b)) {
-    await expect(
-      button,
-      `${name} is offered to somebody signed out`,
-    ).toHaveCount(0);
-  }
-  await expect(page.getByLabel("Comment on this change")).toHaveCount(0);
-  // The review itself is not withheld: the verdict and the conversation
-  // are public reading on a public repository.
-  await expect(page.getByText("Landable")).toBeVisible();
-  await expect(page.getByText("my first review here")).toBeVisible();
-  // Two invitations, one per thing they cannot do — and each is a link
-  // that comes back here, not a bare word. Scoped to `main`: the
-  // masthead carries a "Sign in" of its own.
-  const signIn = page.getByRole("main").getByRole("link", { name: "Sign in" });
-  await expect(signIn).toHaveCount(2);
-  for (const link of await signIn.all()) {
-    await expect(link).toHaveAttribute(
-      "href",
-      /\/login\?next=%2Facme%2Fwidget%2Fchanges%2FIcafe1234$/,
-    );
-  }
 });
 
 test("a signed-in reader may approve and comment, and is told what landing takes", async ({
@@ -2809,8 +2776,8 @@ test("a reader without write access reads the suggestion and is offered no contr
   });
 
   const card = suggestionCard(page, "round the fee");
-  // What is proposed is public reading on a public repository: knowing
-  // what a reviewer suggested is not a permission.
+  // What is proposed is reading, not writing: knowing what a reviewer
+  // suggested is not a permission.
   await expect(
     card.getByText("Suggested change to payments/gateway.rs line 1", {
       exact: true,

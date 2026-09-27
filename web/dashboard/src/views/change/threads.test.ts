@@ -227,8 +227,8 @@ describe("resolveStanding", () => {
   });
 
   it("refuses a reader with no person behind them", () => {
-    // Signed out and signed in with a service token are the same shape
-    // to this page — neither has a `me` — and the server refuses both.
+    // Signed in with a service token has no `me`, and the server refuses
+    // it.
     const r = resolveStanding(comment("a"), null, true, ungoverned);
     expect(r.may).toBe(false);
     expect(r.why).toMatch(/person's judgement/);

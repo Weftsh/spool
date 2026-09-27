@@ -94,7 +94,7 @@ describe("the sentences", () => {
     expect(forwardingLine(null)).toContain("forwarded to its origin");
   });
 
-  it("read like the runners panel's approve line", () => {
+  it("name the permission to approve, and where", () => {
     expect(approvePushLine([CONTENTS_WRITE])).toBe(
       "Approve Contents: write on GitHub",
     );
@@ -111,9 +111,6 @@ describe("installationPush", () => {
   const detail = {
     account: "acme-inc",
     target_type: "Organization" as const,
-    administration_write: true,
-    actions_write: true,
-    runners_ready: true,
     approve_url: "https://github.com/organizations/acme-inc/settings/installations/4001",
     suspended: false,
   };
@@ -125,9 +122,9 @@ describe("installationPush", () => {
     );
   });
 
-  /// An installation approved for runners is not thereby approved for
-  /// pushes: the runner flags say nothing here.
-  it("does not infer pushes from the runner permissions", () => {
+  /// A detail that says nothing about pushes is a server older than the
+  /// field, not a refusal: `unknown`, never `approve`.
+  it("does not infer pushes from a detail that is silent about them", () => {
     expect(installationPush(inst(detail))).toBe("unknown");
     expect(installationPush(inst({ ...detail, contents_write: false }))).toBe(
       "approve",

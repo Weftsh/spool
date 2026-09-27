@@ -1,13 +1,11 @@
 import {
   Activity,
-  CreditCard,
   FolderGit2,
   KeyRound,
   Layers,
   Lock,
   LogOut,
   Mail,
-  Package,
   Server,
   Terminal,
   Users,
@@ -49,11 +47,9 @@ export const NEW_ORG = "+new";
 /// hover. `tests/design-audit.spec.ts` holds the rail to distinct icons.
 const SECTION_ICONS: Record<string, typeof Users> = {
   members: Users,
-  billing: CreditCard,
   runners: Server,
   emails: Mail,
   teams: UsersRound,
-  packages: Package,
   activity: Activity,
   tokens: KeyRound,
   "ssh-keys": Terminal,

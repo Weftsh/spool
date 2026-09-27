@@ -5,8 +5,8 @@ import { Toaster } from "@/components/ui/sonner";
 import { cn } from "@/lib/utils";
 import { FORGE_CONTAINER } from "@/lib/links";
 
-/// The public half of the product wears this: a global header over a
-/// wide centered column, and **no left rail at all**.
+/// The forge wears this: a global header over a wide centered column,
+/// and **no left rail at all**.
 ///
 /// The split from `AdminShell` is by address space, not by feel, and
 /// that is what keeps the existing contracts alive: `AppSidebar` mounts
@@ -16,11 +16,6 @@ import { FORGE_CONTAINER } from "@/lib/links";
 /// there. This shell has two names it must get right for the same
 /// reason, and both are noted where they are spelled — the search
 /// input's "Search Weft" and the account menu's "Your settings".
-///
-/// It renders for a signed-out visitor. That is the normal case here,
-/// not a degraded one: a repository page is the address every README
-/// badge points at, and a stranger following one must get the page
-/// rather than a sign-in wall.
 
 export function ForgeContainer(props: {
   className?: string;
@@ -33,9 +28,6 @@ export function ForgeContainer(props: {
 
 export function ForgeShell(props: {
   me: Me | null;
-  /// The address bar's own path, verbatim — the header needs it to send
-  /// a signed-out visitor back where they were after signing in.
-  currentPath: string;
   /// The router's own `navigate`, passed straight through — absolute,
   /// in the browser's address space, not dashboard-relative. It is
   /// named for what it is rather than as an `onX` callback for the
@@ -59,7 +51,6 @@ export function ForgeShell(props: {
       <Toaster />
       <GlobalHeader
         me={props.me}
-        currentPath={props.currentPath}
         onNavigate={props.navigate}
         onSignOut={props.onSignOut}
       />

@@ -1,28 +1,26 @@
-// The profile page, reading the identity substrate.
+// The owner page, reading the identity substrate.
 //
 // Migration 0020 and `profiles_api.rs` published a display name, a bio,
-// pronouns, a company, a location, links and pinned items, and for a
-// while the page rendered none of it: an avatar, a handle and a repo
-// grid, exactly as it had looked before any of that existed. These
-// tests are the contract that the page reads what the server serves.
+// pronouns, a company, a location and links, and for a while the page
+// rendered none of it: an avatar, a handle and a repo grid, exactly as
+// it had looked before any of that existed. These tests are the
+// contract that the page reads what the server serves — and nothing
+// more: the page is who a namespace is and the repositories in it.
 //
 // Two of them are about what is *not* rendered, and those are the ones
 // worth keeping honest. A profile with nothing filled in must not grow
-// a row of empty metadata or a "Pinned" heading over nothing — an
-// empty section is a promise the product does not keep (FORGE-UX §5) —
-// and a link whose scheme executes rather than navigates must not
-// become an `href` at all.
+// a row of empty metadata — an empty section is a promise the product
+// does not keep (FORGE-UX §5) — and a link whose scheme executes rather
+// than navigates must not become an `href` at all.
 //
 // Why the filled-in profile is proved here and not by the manual pass:
 // `scripts/manual-stack.sh` seeds the `acme` org and no personal
-// handle, sets no profile fields and pins nothing, so the walkthrough's
-// namespace stage can only ever see the empty rendering. It holds that
-// one — a heading, no metadata list, no "Pinned" over nothing — and
-// this file holds the other. Seeding a personal namespace with a bio
-// and a pin would let the manual pass cover both, and is written up as
-// a finding rather than done here, because the seed script is shared.
+// handle and sets no profile fields, so the walkthrough's namespace
+// stage can only ever see the empty rendering. It holds that one — a
+// heading, no metadata list — and this file holds the other.
 
 import { expect, test } from "@playwright/test";
+import { ME } from "./fixtures";
 
 type Json = Record<string, unknown>;
 
@@ -37,11 +35,9 @@ const ADA: Json = {
   company: "Analytical Engines Ltd",
   pronouns: "she/her",
   kind: "human",
-  contrib_private_optin: false,
   profile_repo: null,
   created_at: 1_700_000_000,
   links: [{ label: null, url: "https://ada.example/" }],
-  public_repos: 2,
 };
 
 const WIDGET = {
@@ -49,7 +45,6 @@ const WIDGET = {
   org: "ada",
   name: "widget",
   description: "A small widget.",
-  public: true,
 };
 
 const ENGINE = {
@@ -57,33 +52,26 @@ const ENGINE = {
   org: "ada",
   name: "engine",
   description: "The engine.",
-  public: true,
 };
 
-/// A signed-out browser looking at `/ada`.
+/// A signed-in browser looking at `/ada`.
 ///
 /// Every route the page reads is mocked, including the boot probe: a
-/// mock that answered only the profile would prove the login form
-/// appears, which is not what any of this is about.
+/// mock that answered only the profile would prove the login redirect
+/// happens, which is not what any of this is about.
 async function visit(
   page: import("@playwright/test").Page,
   opts: {
     profile?: Json | number;
-    pins?: Json[];
     repos?: Json[];
   } = {},
 ) {
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   await page.route("**/v1/search/repos*", (r) =>
     r.fulfill({
       status: 200,
       json: { repos: opts.repos ?? [WIDGET, ENGINE], next: null },
     }),
-  );
-  await page.route("**/v1/users/ada/pins", (r) =>
-    r.fulfill({ status: 200, json: { pins: opts.pins ?? [] } }),
   );
   const profile = opts.profile ?? ADA;
   await page.route("**/v1/users/ada", (r) =>
@@ -158,8 +146,8 @@ test("a link whose scheme executes is not rendered as a link", async ({
   // The control plane refuses this at the write, so a row like this
   // should not exist. The test is here because the client is the last
   // place the string is a string before it becomes an `href`, and the
-  // cost of the two disagreeing is script execution on a page any
-  // stranger can open. Note the leading space: a browser strips it and
+  // cost of the two disagreeing is script execution on a page anybody
+  // signed in can open. Note the leading space: a browser strips it and
   // runs the URL, so a guard reading the raw first character would have
   // waved this one through.
   await visit(page, {
@@ -182,61 +170,23 @@ test("a link whose scheme executes is not rendered as a link", async ({
   await expect(page.getByText("My site")).toHaveCount(0);
 });
 
-test("pins render above the repositories, and name a foreign owner", async ({
+test("the page asks for who this is and what is here, and nothing social", async ({
   page,
 }) => {
-  await page.route("**/v1/**", (r) =>
-    r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
-  );
-  await visit(page, {
-    pins: [
-      {
-        kind: "repo",
-        org: "ada",
-        name: "engine",
-        description: "The engine.",
-        public: true,
-      },
-      {
-        kind: "repo",
-        org: "acme",
-        name: "widget",
-        description: "Somebody else's.",
-        public: true,
-      },
-    ],
+  const asked: string[] = [];
+  await page.route("**/v1/**", (r) => {
+    asked.push(new URL(r.request().url()).pathname);
+    return r.fulfill({ status: 404, json: { error: "not mocked by this test" } });
   });
-  await expect(page.getByRole("heading", { name: "Pinned" })).toBeVisible();
-  // Once there is a section above it, the grid below is labelled — with
-  // nothing above it, a heading over the whole column says nothing.
-  await expect(
-    page.getByRole("heading", { name: "Repositories" }),
-  ).toBeVisible();
-  // One from elsewhere names its owner and links there rather than here.
-  const foreign = page.getByRole("link", { name: "acme / widget" });
-  await expect(foreign).toHaveAttribute("href", "/acme/widget");
-  // ...and a pin of this profile's OWN repository does not repeat the
-  // owner. This half was missing, and its absence made the test
-  // decoration: rendering the owner on every card — the exact bug the
-  // rule forbids — left the assertion above satisfied and the suite
-  // green. Verified by mutation: `owner={p.org}` in place of the
-  // conditional now fails here.
-  //
-  // `exact: true` is what does the work. A loose match for "engine"
-  // also matches "ada / engine", so the sloppy version of this
-  // assertion would pass against the bug too.
-  //
-  // Scoped to the Pinned section, because a pinned repository also
-  // appears in the grid below it — as it does on GitHub — so a
-  // page-wide match for "engine" resolves to two links and fails strict
-  // mode instead of testing anything.
-  const pinned = page.getByRole("heading", { name: "Pinned" }).locator("..");
-  await expect(
-    pinned.getByRole("link", { name: "engine", exact: true }),
-  ).toBeVisible();
-  await expect(pinned.getByRole("link", { name: "ada / engine" })).toHaveCount(
-    0,
-  );
+  await visit(page);
+  await expect(page.getByRole("link", { name: "engine" })).toBeVisible();
+  // No pins, no contribution graph, no follower counts: none of them is
+  // a page any more, and a read that still fired would be a request for
+  // a route that is gone.
+  expect(
+    asked.filter((p) => /\/(pins|contributions|follow|followers|following|star)$/.test(p)),
+  ).toEqual([]);
+  await expect(page.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
 });
 
 test("a profile with nothing filled in grows no empty rows", async ({
@@ -274,8 +224,6 @@ test("a profile with nothing filled in grows no empty rows", async ({
   await expect(page.getByRole("complementary").getByRole("list")).toHaveCount(
     0,
   );
-  // And no "Pinned" heading over an empty grid.
-  await expect(page.getByRole("heading", { name: "Pinned" })).toHaveCount(0);
 });
 
 test("a namespace whose profile is missing is still a working page", async ({
@@ -287,7 +235,7 @@ test("a namespace whose profile is missing is still a working page", async ({
   // The repository listing is the page; the profile is what the page
   // says about whoever this is. A 404 from the identity route — a
   // namespace with no profile row — must degrade to the page as it was,
-  // not replace a namespace full of public repositories with a red box.
+  // not replace a namespace full of repositories with a red box.
   await visit(page, { profile: 404 });
   await expect(
     page.getByRole("heading", { name: "ada", level: 1 }),

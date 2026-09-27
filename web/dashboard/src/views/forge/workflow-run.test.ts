@@ -2,7 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   canCancel,
   defaultJobIndex,
-  hostedStatePresentation,
+  workflowStatePresentation,
   isLive,
   jobLabel,
   runSubtitle,
@@ -12,21 +12,21 @@ import { runStatePresentation } from "./checks";
 /// The run page's decisions, with no DOM in them. What is asserted here
 /// is the part a rendered test could not tell apart from a coincidence:
 /// which job opens, which states are live, and — the one that matters
-/// most — that a hosted state is never drawn as though it were a
+/// most — that a workflow state is never drawn as though it were a
 /// different one.
 
-describe("hostedStatePresentation", () => {
+describe("workflowStatePresentation", () => {
   it("translates the runner's words into the Checks tab's, and keeps the meaning", () => {
     // Two vocabularies exist on purpose — `passed` is what our runner
     // writes, `passing` is what every provider's verdict is translated
     // into — and this is the only place they meet. Getting the direction
     // wrong here would draw a failed run green, which is the single most
     // consequential bit on the page.
-    expect(hostedStatePresentation("passed").label).toBe("Passing");
-    expect(hostedStatePresentation("failed").label).toBe("Failing");
-    expect(hostedStatePresentation("running").label).toBe("Running");
-    expect(hostedStatePresentation("queued").label).toBe("Queued");
-    expect(hostedStatePresentation("cancelled").label).toBe("Cancelled");
+    expect(workflowStatePresentation("passed").label).toBe("Passing");
+    expect(workflowStatePresentation("failed").label).toBe("Failing");
+    expect(workflowStatePresentation("running").label).toBe("Running");
+    expect(workflowStatePresentation("queued").label).toBe("Queued");
+    expect(workflowStatePresentation("cancelled").label).toBe("Cancelled");
   });
 
   it("draws blocked as its own state, and not as a failure", () => {
@@ -34,10 +34,10 @@ describe("hostedStatePresentation", () => {
     // approve running it. Nothing is wrong with it, so `serious` would
     // read as the change being bad; and folding it into "Queued" would
     // hide that a person has to act before anything moves.
-    const b = hostedStatePresentation("blocked");
+    const b = workflowStatePresentation("blocked");
     expect(b.label).toBe("Blocked");
     expect(b.className).not.toContain("serious");
-    expect(b.label).not.toBe(hostedStatePresentation("queued").label);
+    expect(b.label).not.toBe(workflowStatePresentation("queued").label);
   });
 
   it("says an unknown state's own word rather than guessing", () => {
@@ -45,7 +45,7 @@ describe("hostedStatePresentation", () => {
     // green it is a lie that ships broken code; shown red it is a lie
     // that blocks good code. The literal word is the only answer that
     // leaves a trace of not knowing.
-    const p = hostedStatePresentation("evaporated");
+    const p = workflowStatePresentation("evaporated");
     expect(p.label).toBe("evaporated");
     expect(p.className).toBe("text-ink-3");
   });
@@ -59,7 +59,7 @@ describe("hostedStatePresentation", () => {
       "cancelled",
       "blocked",
     ];
-    const icons = states.map((s) => hostedStatePresentation(s).icon);
+    const icons = states.map((s) => workflowStatePresentation(s).icon);
     expect(new Set(icons).size).toBe(states.length);
   });
 });
@@ -198,7 +198,7 @@ describe("canCancel", () => {
 describe("a state named after an Object.prototype member", () => {
   for (const word of ["constructor", "toString", "hasOwnProperty"]) {
     it(`prints ${word} as an unknown state rather than a blank`, () => {
-      const p = hostedStatePresentation(word);
+      const p = workflowStatePresentation(word);
       expect(p.label).toBe(word);
       expect(typeof p.icon).not.toBe("undefined");
       const q = runStatePresentation(word);

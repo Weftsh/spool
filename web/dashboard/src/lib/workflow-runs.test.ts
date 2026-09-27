@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { WorkflowRun } from "@/api";
 import {
-  SPEND_LIMIT_BLOCK,
   UNEXPLAINED_BLOCK,
   approvableRuns,
   blockReason,
@@ -10,18 +9,20 @@ import {
   refusalsByFile,
   refusalsByRunId,
   rowRefusal,
-} from "./hosted-runs";
+} from "./workflow-runs";
 
 /// The join that puts a refusal's reason back on the row it belongs to.
-/// Every case here is one a reader hits: a fork waiting on approval, an
-/// organisation over its minutes, and — the ones that make the join
+/// Every case here is one a reader hits: a fork waiting on approval, a
+/// run refused for some other reason, and — the ones that make the join
 /// worth writing rather than assuming — a stale run from the previous
 /// patchset, and a third party's row wearing one of our names.
 
 const FORK =
   "this change comes from a fork; a maintainer has to approve its workflows before they run";
-const BUDGET =
-  "this organisation has used its 2000 hosted-runner minutes for the month";
+/// A refusal that is not a fork's, under a code this bundle has never
+/// heard of — the shape any reason other than `fork` arrives in.
+const OTHER =
+  "workflows are paused for this repository by an organization administrator";
 
 function run(over: Partial<WorkflowRun> = {}): WorkflowRun {
   return {
@@ -48,7 +49,7 @@ describe("blockReason", () => {
     // "why has nothing run", they are asserted character for character
     // by the walkthrough, and a paraphrase here would be the page
     // inventing a reason the server never gave.
-    expect(blockReason({ error: BUDGET })).toBe(BUDGET);
+    expect(blockReason({ error: OTHER })).toBe(OTHER);
   });
 
   it("never renders a blocked row with nothing beside it", () => {
@@ -58,31 +59,6 @@ describe("blockReason", () => {
     expect(blockReason({ error: "   " })).toBe(UNEXPLAINED_BLOCK);
   });
 
-  it("explains a spend-limit block from its code when the server sent no words", () => {
-    // The code is the contract; the sentence is ours only where the
-    // server's is missing. With the server's words present they win,
-    // verbatim, whatever the code says.
-    expect(blockReason({ error: null, blocked_reason: "spend_limit" })).toBe(
-      SPEND_LIMIT_BLOCK,
-    );
-    expect(blockReason({ error: BUDGET, blocked_reason: "spend_limit" })).toBe(
-      BUDGET,
-    );
-    expect(SPEND_LIMIT_BLOCK).toContain("your own runners are running as normal");
-    expect(SPEND_LIMIT_BLOCK).toContain("Settings → Billing");
-  });
-
-  it("offers no approval button for a run held at the spend limit", () => {
-    // Approving would trigger another run, which blocks again with the
-    // same sentence. Only a fork's run waits on the person reading.
-    const sha = "a".repeat(40);
-    expect(
-      approvableRuns([run({ blocked_reason: "spend_limit" })], sha),
-    ).toEqual([]);
-    expect(approvableRuns([run({ blocked_reason: "fork" })], sha)).toHaveLength(
-      1,
-    );
-  });
 });
 
 describe("blockedRuns", () => {
@@ -105,19 +81,18 @@ describe("blockedRuns", () => {
 });
 
 describe("rowRefusal", () => {
-  const byId = refusalsByRunId([run(), run({ id: "wr2", error: BUDGET })]);
+  const byId = refusalsByRunId([run(), run({ id: "wr2", error: OTHER })]);
 
-  it("annotates a hosted row with its run's reason", () => {
+  it("annotates a workflow run's row with its run's reason", () => {
     expect(rowRefusal({ provider: "weft", external_id: "wr2" }, byId)).toBe(
-      BUDGET,
+      OTHER,
     );
   });
 
   it("refuses to lend a reason to another provider's row", () => {
     // `external_id` is the provider's own id for its own run, so two
     // providers can collide on one string. Without the provider gate a
-    // third party's row would display our refusal as its own — and the
-    // reason names an organisation and its budget.
+    // third party's row would display our refusal as its own.
     expect(rowRefusal({ provider: "intake", external_id: "wr2" }, byId)).toBe(
       null,
     );
@@ -138,7 +113,7 @@ describe("panelRowRefusal", () => {
   const byFile = refusalsByFile(
     [
       run({ commit_sha: tip }),
-      run({ id: "wr2", file: ".weft/old.yml", error: BUDGET }),
+      run({ id: "wr2", file: ".weft/old.yml", error: OTHER }),
     ],
     tip,
   );
@@ -187,48 +162,33 @@ describe("panelRowRefusal", () => {
 
 /// Which refusals a person can actually do something about.
 ///
-/// The three blocked states are one word on the wire and three
-/// different situations. A fork's run is waiting on a maintainer, and a
-/// button is the whole answer. A suspended or out-of-minutes
-/// organisation's run is waiting on an operator or on the calendar, and
+/// Every blocked run is one word on the wire. A fork's run is waiting on
+/// a maintainer, and a button is the whole answer. A run blocked for any
+/// other reason is waiting on something the reader cannot press, and
 /// approving it only triggers another run that blocks with the same
 /// sentence — a button there is a control that cannot work.
 describe("approvableRuns", () => {
   const TIP = "a".repeat(40);
-  const OTHER = "b".repeat(40);
+  const ELSEWHERE = "b".repeat(40);
   const forked = run({ blocked_reason: "fork" });
-  const broke = run({
+  const paused = run({
     id: "wr2",
-    blocked_reason: "budget",
-    error: BUDGET,
-  });
-  const off = run({
-    id: "wr3",
-    blocked_reason: "suspended",
-    error: "hosted workflows are suspended for this organisation: mining",
-  });
-  // A paying organisation whose last invoice did not settle: the run is
-  // waiting on whoever holds the card, and approving it would only
-  // block again with the same sentence.
-  const unpaid = run({
-    id: "wr4",
-    blocked_reason: "billing",
-    error:
-      "hosted workflows for private repositories are paused while this organisation's last payment is unsettled — public repositories and self-hosted runners are unaffected",
+    blocked_reason: "paused",
+    error: OTHER,
   });
 
   it("offers a fork's runs and nothing else", () => {
-    expect(
-      approvableRuns([forked, broke, off, unpaid], TIP).map((r) => r.id),
-    ).toEqual(["wr1"]);
+    expect(approvableRuns([forked, paused], TIP).map((r) => r.id)).toEqual([
+      "wr1",
+    ]);
   });
 
-  it("offers nothing when the organisation is stopped", () => {
-    // Not "offers the fork run anyway": a fork change in a suspended
-    // org is blocked with the *suspension's* reason, so there is no
-    // fork-reasoned run to find, and the panel must be silent about
-    // approving while still showing why.
-    expect(approvableRuns([broke, off, unpaid], TIP)).toEqual([]);
+  it("offers nothing for a run blocked for another reason", () => {
+    // Not "offers the fork run anyway": a fork change blocked for some
+    // other reason carries *that* reason, so there is no fork-reasoned
+    // run to find, and the panel must be silent about approving while
+    // still showing why.
+    expect(approvableRuns([paused], TIP)).toEqual([]);
   });
 
   it("treats a run with no reason code as a fork's, for an older server", () => {
@@ -241,7 +201,9 @@ describe("approvableRuns", () => {
   });
 
   it("still scopes to the tip", () => {
-    expect(approvableRuns([{ ...forked, commit_sha: OTHER }], TIP)).toEqual([]);
+    expect(
+      approvableRuns([{ ...forked, commit_sha: ELSEWHERE }], TIP),
+    ).toEqual([]);
   });
 
   it("ignores a reason code on a run that is not blocked", () => {
@@ -265,11 +227,11 @@ describe("approvableRuns", () => {
 /// at once, so it would silence every row that is not the newest.
 describe("refusalsByRunId across commits", () => {
   it("annotates each commit's own row and no other", () => {
-    const older = run({ id: "wr0", commit_sha: "b".repeat(40), error: BUDGET });
+    const older = run({ id: "wr0", commit_sha: "b".repeat(40), error: OTHER });
     const newer = run({ id: "wr1", commit_sha: "a".repeat(40), error: FORK });
     const by = refusalsByRunId([older, newer]);
     expect(rowRefusal({ provider: "weft", external_id: "wr0" }, by)).toBe(
-      BUDGET,
+      OTHER,
     );
     expect(rowRefusal({ provider: "weft", external_id: "wr1" }, by)).toBe(
       FORK,

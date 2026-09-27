@@ -28,16 +28,16 @@ export interface MountLink {
 /// is drawn on.
 ///
 /// A prop rather than `href(...)` inline because this page now has two
-/// addresses — `/dashboard/changesets/{key}` for a member and
-/// `/{owner}/changesets/{key}` for anybody at all — and every link on it
+/// addresses — `/dashboard/changesets/{key}` inside the dashboard and
+/// `/{owner}/changesets/{key}` on the forge — and every link on it
 /// resolves differently between them. Building them inline is what kept
 /// the forge mount out of reach: `dash([...])` is a dashboard address,
 /// and handing one to a reader who is already on the forge is a full
 /// page load out of the shell they are standing in.
 export interface ChangesetLinks {
   /// The org-wide list, or `null` on a mount that deliberately has none.
-  /// The forge has none: the list's rows are filtered per caller, so a
-  /// public one would silently hide half of itself.
+  /// The forge has none: the list lives on the dashboard, and one list
+  /// has one address.
   list: MountLink | null;
   /// Another changeset in the same organization — the one this reverts,
   /// or one that reverts it.
@@ -72,9 +72,8 @@ export function dashboardChangesetLinks(
     list: here(["changesets"]),
     changeset: (key) => here(["changesets", key]),
     // A repository has one address, and it is not under `/dashboard`.
-    // This used to be `here(["repos", repo])`, which is the address
-    // nobody could send: a stranger following it met the sign-in wall,
-    // and a member's copy of it said "dashboard" about a public repo.
+    // This used to be `here(["repos", repo])`, a second address for a
+    // page that already had one.
     repo: (repo) => there([org, repo]),
     // A change is reviewed under its own repository's OWNERS, on that
     // repository's page. It had no `open` at all until `navigateTo`
@@ -83,7 +82,7 @@ export function dashboardChangesetLinks(
   };
 }
 
-/// The links as the public forge addresses them, where every one of them
+/// The links as the forge addresses them, where every one of them
 /// is a route on this same mount and a client-side move.
 export function forgeChangesetLinks(
   owner: string,
@@ -94,10 +93,9 @@ export function forgeChangesetLinks(
     open: () => navigate(href(parts)),
   });
   return {
-    // Deliberately absent, per FORGE-UX §6a: there is no public org-wide
-    // changeset list, because its rows are filtered per caller and a
-    // list that lies about its own completeness is worse than none. So
-    // the page shows no way back to one rather than a link to a 404.
+    // Deliberately absent: the forge has no org-wide changeset list —
+    // it lives on the dashboard — so the page shows no way back to one
+    // rather than a link to a 404.
     list: null,
     changeset: (key) => here([owner, "changesets", key]),
     repo: (repo) => here([owner, repo]),

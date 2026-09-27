@@ -214,9 +214,9 @@ export interface ResolveStanding {
 ///
 /// Everything it *can* be certain about it refuses up front, which is
 /// the whole reason this is a function and not an `&&` at the call
-/// site: signed out, signed in as a token rather than a person, and a
-/// reader with no standing at all are the three cases somebody actually
-/// meets, and each gets its own sentence.
+/// site: signed in as a token rather than a person, and a reader with
+/// no standing at all, are the cases somebody actually meets, and each
+/// gets its own sentence.
 export function resolveStanding(
   comment: ThreadComment,
   me: Me | null,
@@ -232,10 +232,9 @@ export function resolveStanding(
   if (!me) {
     return {
       may: false,
-      // Both doors at once, because the page cannot tell a signed-out
-      // reader from a service token: neither has a `me`, and the server
-      // refuses both with the same shape.
-      why: "Resolving a thread is a person's judgement — sign in to settle this one.",
+      // A service token has no `me`, and the server refuses it: settling
+      // a thread is something a person does.
+      why: "Resolving a thread is a person's judgement — sign in as yourself, not with a token, to settle this one.",
     };
   }
   if (comment.author_principal === `user:${me.id}`)

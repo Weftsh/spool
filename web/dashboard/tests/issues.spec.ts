@@ -4,8 +4,8 @@
 // pinned here is information architecture rather than markup: that the
 // Open/Closed pair comes from the server's counts and not from the rows
 // on screen, that the query bar is the URL, that a conversation reads in
-// insertion order, and that a signed-out visitor gets the page and an
-// invitation rather than controls that only error.
+// insertion order, and that a reader without write access gets the
+// controls the server will accept and none that only error.
 //
 // Two hazards get their own tests because the manual browser gate is
 // "0 problems" and both are invisible until it runs: the filter row
@@ -13,7 +13,7 @@
 // every control must have an accessible name.
 
 import { expect, test, type Page, type Request } from "@playwright/test";
-import { REPOS, signIn } from "./fixtures";
+import { ME, REPOS, signIn } from "./fixtures";
 
 // `native`, and not incidentally: `REPOS.repos[0]` is a mirror, and a
 // mirror can never carry a change — `changes_api::create` refuses one at
@@ -23,7 +23,6 @@ import { REPOS, signIn } from "./fixtures";
 const widget = {
   ...REPOS.repos[0],
   org: "acme",
-  public: true,
   kind: "native",
   // A **reader**, said rather than implied. This file's default caller
   // has no write access — the maintainer tests override it where they
@@ -132,10 +131,13 @@ interface Seen {
 
 /// A repository page with nothing mocked but what this file names.
 ///
-/// The catch-all is registered FIRST, for the reason `public.spec.ts`
-/// sets out at length: an unmocked `/v1` call otherwise proxies to
-/// whatever is listening on :8080, so the suite would be hermetic only
-/// when nobody had the manual stack up.
+/// The catch-all is registered FIRST: an unmocked `/v1` call otherwise
+/// proxies to whatever is listening on :8080, so the suite would be
+/// hermetic only when nobody had the manual stack up.
+///
+/// The caller is a person signed in with a browser session who wrote
+/// none of these issues, unless `ownSession` says the test registered
+/// its own — `signIn` with a token, or `asAuthor`.
 async function onIssues(
   page: Page,
   opts: {
@@ -143,17 +145,15 @@ async function onIssues(
     counts?: { open: number; closed: number };
     detail?: Record<string, unknown>;
     comments?: Record<string, unknown>[];
-    signedOut?: boolean;
+    ownSession?: boolean;
   } = {},
 ): Promise<Seen> {
   const seen: Seen = { lists: [], auth: "", posted: [] };
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
-  if (opts.signedOut !== false) {
-    await page.route("**/v1/auth/me", (r) =>
-      r.fulfill({ status: 401, json: { error: "not signed in" } }),
-    );
+  if (!opts.ownSession) {
+    await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   }
   await page.route("**/v1/orgs/acme/repos/widget", (r) =>
     r.fulfill({ status: 200, json: widget }),
@@ -344,33 +344,31 @@ test("the clear button stops filtering rather than restoring the default", async
 });
 
 test("a token holder's credential goes with the read", async ({ page }) => {
-  // The a3fece7 bug, pinned. The forge built every session with
-  // `anon(owner)`, which sends no credential at all. On a cookie
+  // The a3fece7 bug, pinned. The forge built every session with an
+  // empty token, which sends no credential at all. On a cookie
   // session that is invisible — the browser attaches the cookie itself
   // — so it only ever showed for somebody signed in with an API token,
   // and it showed *silently*: the server filters by who is asking, so a
   // person was shown less of their own work and told nothing.
   await signIn(page);
-  const seen = await onIssues(page, { signedOut: false });
+  const seen = await onIssues(page, { ownSession: true });
   await page.goto("/acme/widget/issues");
   await expect(page.getByRole("listitem")).toHaveCount(2);
   expect(seen.auth).toBe("Bearer weft_test_token");
 });
 
-test("a signed-out visitor reads the issues and is invited to file one", async ({
+test("a reader without write access reads the issues and may file one", async ({
   page,
 }) => {
   await onIssues(page);
   await page.goto("/acme/widget/issues");
-  // Reads them. Open source that needs an account to read is not open.
   await expect(page.getByRole("listitem")).toHaveCount(2);
-  // Filing needs a credential and nothing else, so a stranger is one
-  // sign-in away and is told exactly that — never a New issue button
-  // that only errors.
-  await expect(page.getByRole("button", { name: "New issue" })).toHaveCount(0);
+  // Filing needs `RepoRead` and nothing more, so the control is offered
+  // — and there is no invitation to sign in, because the reader is.
   await expect(
-    page.getByRole("link", { name: "Sign in to open an issue" }),
-  ).toHaveAttribute("href", "/login?next=%2Facme%2Fwidget%2Fissues");
+    page.getByRole("link", { name: "New issue" }),
+  ).toHaveAttribute("href", "/acme/widget/issues/new");
+  await expect(page.getByRole("link", { name: /sign in/i })).toHaveCount(0);
 });
 
 // ---------------------------------------------------------------------
@@ -508,7 +506,7 @@ test("one issue: title, number, state, body and a thread in seq order", async ({
 
 test("commenting posts the body once and clears the box", async ({ page }) => {
   await signIn(page);
-  const seen = await onIssues(page, { signedOut: false, comments: THREAD });
+  const seen = await onIssues(page, { ownSession: true, comments: THREAD });
   await page.goto("/acme/widget/issues/7");
   const box = page.getByLabel("Comment on this issue");
   await box.fill("I can reproduce this.");
@@ -529,7 +527,7 @@ test("closing an issue says closed, and says so on the page", async ({
   page,
 }) => {
   await signIn(page);
-  const seen = await onIssues(page, { signedOut: false });
+  const seen = await onIssues(page, { ownSession: true });
   // With write access: the server allows closing to a writer or to the
   // issue's own author, and this fixture is neither until it says so.
   // Before the control was gated, a signed-in stranger was offered it
@@ -545,22 +543,6 @@ test("closing an issue says closed, and says so on the page", async ({
   await expect(
     page.getByRole("button", { name: "Reopen issue" }),
   ).toBeVisible();
-});
-
-test("a signed-out visitor is prompted to sign in, not given a dead box", async ({
-  page,
-}) => {
-  await onIssues(page, { comments: THREAD });
-  await page.goto("/acme/widget/issues/7");
-  // Reads the whole conversation.
-  await expect(page.getByText("First thing said.")).toBeVisible();
-  await expect(page.getByLabel("Comment on this issue")).toHaveCount(0);
-  await expect(page.getByRole("button", { name: "Close issue" })).toHaveCount(
-    0,
-  );
-  await expect(
-    page.getByRole("link", { name: "Sign in" }).last(),
-  ).toHaveAttribute("href", "/login?next=%2Facme%2Fwidget%2Fissues%2F7");
 });
 
 test("an address that is not an issue number is not an issue", async ({
@@ -587,7 +569,7 @@ test("filing an issue lands you on the issue, not back on the list", async ({
   page,
 }) => {
   await signIn(page);
-  const seen = await onIssues(page, { signedOut: false });
+  const seen = await onIssues(page, { ownSession: true });
   await page.goto("/acme/widget/issues/new");
   await page.getByLabel("Title").fill("Clone over SSH is refused");
   await page.getByLabel("Description").fill("With a fresh key.");
@@ -605,7 +587,7 @@ test("the new-issue form refuses an empty title rather than the server", async (
   page,
 }) => {
   await signIn(page);
-  const seen = await onIssues(page, { signedOut: false });
+  const seen = await onIssues(page, { ownSession: true });
   await page.goto("/acme/widget/issues/new");
   const submit = page.getByRole("button", { name: "Submit new issue" });
   await expect(submit).toBeDisabled();
@@ -615,17 +597,6 @@ test("the new-issue form refuses an empty title rather than the server", async (
   await page.getByLabel("Title").fill("   ");
   await expect(submit).toBeDisabled();
   expect(seen.posted).toEqual([]);
-});
-
-test("a stranger who reaches /issues/new is asked to sign in", async ({
-  page,
-}) => {
-  await onIssues(page);
-  await page.goto("/acme/widget/issues/new");
-  await expect(page.getByLabel("Title")).toHaveCount(0);
-  await expect(
-    page.getByRole("link", { name: "Sign in" }).last(),
-  ).toBeVisible();
 });
 
 test("the Issues tab is a link somebody can send", async ({ page }) => {
@@ -784,7 +755,7 @@ test("a maintainer applies a label, and the whole set is sent", async ({
 }) => {
   await signIn(page);
   await onIssues(page, {
-    signedOut: false,
+    ownSession: true,
     detail: { ...issue({ number: 7 }), labels: [LABELS[0]] },
   });
   await asWriter(page);
@@ -816,7 +787,7 @@ test("a maintainer removes a label, and the remainder is sent", async ({
 }) => {
   await signIn(page);
   await onIssues(page, {
-    signedOut: false,
+    ownSession: true,
     detail: { ...issue({ number: 7 }), labels: [LABELS[0], LABELS[1]] },
   });
   await asWriter(page);
@@ -839,7 +810,7 @@ test("the label manager creates one, with a token colour and not a hex", async (
   page,
 }) => {
   await signIn(page);
-  await onIssues(page, { signedOut: false });
+  await onIssues(page, { ownSession: true });
   await asWriter(page);
   let sent: unknown = null;
   await page.route("**/v1/orgs/acme/repos/widget/labels", (r) => {
@@ -869,7 +840,7 @@ test("the label manager creates one, with a token colour and not a hex", async (
 
 test("the label manager deletes one by name", async ({ page }) => {
   await signIn(page);
-  await onIssues(page, { signedOut: false });
+  await onIssues(page, { ownSession: true });
   await asWriter(page);
   let deleted: string | null = null;
   await page.route("**/v1/orgs/acme/repos/widget/labels/*", (r) => {
@@ -898,8 +869,8 @@ test("the label manager deletes one by name", async ({ page }) => {
 //
 // The server allows both editing and closing to a writer **or** the
 // issue's author. The close button was gated on merely being signed in,
-// so a signed-in stranger was offered a control that could only come
-// back 403.
+// so a reader who wrote none of it was offered a control that could
+// only come back 403.
 
 /// `signIn` authenticates with a token, so `/v1/auth/me` stays 401 and
 /// `me` is null. Authorship is decided by comparing ids, so a test about
@@ -923,7 +894,7 @@ async function asAuthor(page: Page, id = "01ADAADAADAADAADAADAADAADA") {
 
 test("an issue's author can edit its title and body", async ({ page }) => {
   await onIssues(page, {
-    signedOut: false,
+    ownSession: true,
     detail: { ...issue({ number: 7 }), title: "typo in teh title" },
   });
   await asAuthor(page);
@@ -953,7 +924,7 @@ test("an issue's author can edit its title and body", async ({ page }) => {
     .toEqual({ title: "typo in the title", body: "now with repro steps" });
 });
 
-test("a signed-in stranger is offered neither edit nor close", async ({
+test("a reader who did not write the issue is offered neither edit nor close", async ({
   page,
 }) => {
   // Not the author (different id) and no write access. The server would
@@ -961,15 +932,15 @@ test("a signed-in stranger is offered neither edit nor close", async ({
   // access may change it"; a button whose only outcome is that sentence
   // is the pattern this codebase keeps removing.
   await onIssues(page, {
-    signedOut: false,
+    ownSession: true,
     detail: { ...issue({ number: 7 }) },
   });
   await asAuthor(page, "01SOMEBODYELSESOMEBODYELSE");
   await page.goto("/acme/widget/issues/7");
 
   // The page is there and readable, and commenting still is: filing and
-  // commenting need only a credential, which is what makes the tracker
-  // usable on open source.
+  // commenting need only read access, which is what makes the tracker
+  // usable by everybody who can see the repository.
   await expect(page.getByRole("button", { name: "Comment" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Edit issue #7" })).toHaveCount(
     0,
@@ -982,7 +953,7 @@ test("a signed-in stranger is offered neither edit nor close", async ({
 test("a maintainer can edit somebody else's issue", async ({ page }) => {
   await signIn(page);
   await onIssues(page, {
-    signedOut: false,
+    ownSession: true,
     detail: { ...issue({ number: 7 }) },
   });
   await page.route("**/v1/orgs/acme/repos/widget", (r) =>

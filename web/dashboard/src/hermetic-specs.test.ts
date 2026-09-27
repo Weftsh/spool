@@ -16,9 +16,9 @@ import { join } from "node:path";
 /// breaks when a *page* gains one new fetch: every test that renders
 /// that page becomes non-hermetic at once, and not one of them fails to
 /// say so. It happened twice in a single afternoon — `/meta` on the
-/// repository page and `/users/:handle/contributions` on the profile —
-/// and both were found by noticing proxy errors scroll past a passing
-/// run, which is not a method.
+/// repository page and a second read on the profile page — and both
+/// were found by noticing proxy errors scroll past a passing run, which
+/// is not a method.
 ///
 /// A spec that never navigates is exempt: with no page there is nothing
 /// to intercept.

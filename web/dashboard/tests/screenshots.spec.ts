@@ -46,7 +46,6 @@ function repo(
     org_id: "01org",
     name,
     kind,
-    public: false,
     default_branch: "main",
     origin_url: origin,
     last_sync_at: syncAgeMs == null ? null : NOW - syncAgeMs,
@@ -68,7 +67,6 @@ function repo(
 }
 
 const USAGE = {
-  plan: "pro",
   days: [
     day("2026-08-20", 6, 6, 48_211, 512),
     day("2026-08-19", 6, 6, 51_804, 587),
@@ -93,13 +91,6 @@ function day(
     total_repos: total,
     requests,
     bytes_out: mb * 1_048_576,
-    // What reached the bill: a third of the day's bytes were private,
-    // an hour or so of hosted minutes, and a few gigabytes stored.
-    // Marketing shots show the tiles filled, not the "—" a server
-    // that sends no meters gets.
-    hosted_minutes: Math.round(requests / 600),
-    private_bytes_out: Math.round((mb / 3) * 1_048_576),
-    private_bytes_stored: 2_300_000_000 + active * 90_000_000,
     reported_at: 1,
   };
 }

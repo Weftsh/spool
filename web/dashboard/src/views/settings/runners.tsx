@@ -1,9 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   api,
-  type GithubInstallation,
-  type GithubJob,
-  type GithubRunnerSize,
   type Repo,
   type Runner,
   type RunnerGroup,
@@ -33,15 +30,6 @@ import {
   TableHeadRow,
   TableRow,
 } from "@/components/ui/table";
-import {
-  STILL_QUEUED_NOTE,
-  approveLine,
-  installationStatus,
-  jobLine,
-  readyLine,
-  sizeLine,
-  snippet,
-} from "@/lib/github-runners";
 import { STRUCTURAL_LINK } from "@/lib/links";
 import {
   TOKEN_EXPIRY_NOTE,
@@ -56,10 +44,9 @@ import { cn } from "@/lib/utils";
 /// Settings → Runners: where this organisation's jobs are allowed to
 /// run, and on whose machines.
 ///
-/// Five panels, in the order somebody actually meets them: the policy
-/// that decides whether self-hosted runners are possible at all, the
-/// GitHub Actions door onto the hosted fleet, the groups that decide
-/// which repositories reach the organisation's own machines, the
+/// Four panels, in the order somebody actually meets them: the policy
+/// that decides whether runners are possible at all, the groups that
+/// decide which repositories reach the organisation's machines, the
 /// runners themselves, and the two commands that add one.
 ///
 /// Every refusal is rendered as the server's own sentence. The trigger
@@ -100,7 +87,6 @@ export function RunnersPanel(props: { session: Session }) {
   return (
     <div className="space-y-4">
       <PolicyPanel session={session} repos={names} />
-      <GithubRunnersPanel session={session} />
       <GroupsPanel
         session={session}
         repos={names}
@@ -113,13 +99,7 @@ export function RunnersPanel(props: { session: Session }) {
   );
 }
 
-/// Hosted and self-hosted, as two independent decisions.
-///
-/// Independent on purpose: an organisation that disables hosted runners
-/// has not thereby said anything about its own machines, and the two
-/// controls sitting in one panel with one Save is what stops somebody
-/// turning hosted off and leaving self-hosted `disabled` — a state in
-/// which nothing runs at all and neither control looks wrong.
+/// Which repositories may run jobs on the organisation's runners at all.
 function PolicyPanel(props: { session: Session; repos: string[] }) {
   const { session } = props;
   const [policy, setPolicy] = useState<RunnerPolicy | null>(null);
@@ -148,7 +128,6 @@ function PolicyPanel(props: { session: Session; repos: string[] }) {
     try {
       setPolicy(
         await api.updateRunnerPolicy(session, {
-          hosted: policy.hosted,
           self_hosted: policy.self_hosted,
           self_hosted_repos: policy.self_hosted_repos,
         }),
@@ -179,25 +158,10 @@ function PolicyPanel(props: { session: Session; repos: string[] }) {
   return (
     <Panel
       title="Runner policy"
-      hint="Where this organisation's jobs may run. A workflow that asks for a pool this policy refuses fails with the reason, and nothing lifts it by itself."
+      hint="Which of this organisation's repositories may run jobs on its runners. A workflow this policy refuses fails with the reason, and nothing lifts it by itself."
     >
       <Err message={error} />
       <div className="space-y-4">
-        <label className="flex flex-col gap-1 text-xs text-ink-3">
-          Weft-hosted runners
-          <Select
-            value={policy.hosted}
-            onValueChange={(v) => edit({ hosted: v as RunnerPolicy["hosted"] })}
-          >
-            <SelectTrigger aria-label="Weft-hosted runners">
-              <SelectValue />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value="allowed">Allowed</SelectItem>
-              <SelectItem value="disabled">Disabled</SelectItem>
-            </SelectContent>
-          </Select>
-        </label>
         <label className="flex flex-col gap-1 text-xs text-ink-3">
           Self-hosted runners
           <Select
@@ -285,311 +249,6 @@ function RepoPicker(props: {
         </div>
       )}
     </fieldset>
-  );
-}
-
-/// GitHub Actions jobs on the hosted fleet: whether the installation
-/// may send them, the `runs-on:` line that does, and what became of
-/// the ones that did.
-///
-/// The jobs are GitHub's and nothing here writes. What the panel is
-/// *for* is the refusal: a job we would not take sits on GitHub
-/// looking like a job nobody has picked up, and this table is the only
-/// place its reason is written down. Two fetches, independent: the
-/// installations are an admin's to see and a member's page still gets
-/// the jobs when that one is refused.
-function GithubRunnersPanel(props: { session: Session }) {
-  const { session } = props;
-  const [installs, setInstalls] = useState<
-    GithubInstallation[] | "hidden" | null
-  >(null);
-  const [jobs, setJobs] = useState<{
-    jobs: GithubJob[];
-    sizes: GithubRunnerSize[];
-  } | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let alive = true;
-    api
-      .githubInstallations(session, "runners")
-      .then((i) => alive && setInstalls(i))
-      // The installations are an admin route, refused with the masked
-      // 404 every admin route gives. A member still gets the rest of
-      // the panel, and a sentence about who can see this half.
-      .catch(() => alive && setInstalls("hidden"));
-    api
-      .githubJobs(session)
-      .then((j) => alive && setJobs(j))
-      .catch(
-        (e) =>
-          alive &&
-          setError(`Could not read the GitHub Actions jobs: ${say(e)}`),
-      );
-    return () => {
-      alive = false;
-    };
-  }, [session]);
-
-  // The same leave the new-repository picker makes: a full navigation
-  // to GitHub, which comes back through our callback.
-  async function connect() {
-    setError(null);
-    try {
-      const out = await api.startGithubInstall(session, "runners");
-      window.location.href = out.url;
-    } catch (e) {
-      setError(`Could not start the GitHub install: ${say(e)}`);
-    }
-  }
-
-  // The approve page of the first installation missing something, for
-  // the rows that need one. One installation is the ordinary case.
-  const approveUrl = (() => {
-    if (!Array.isArray(installs)) return null;
-    for (const i of installs) {
-      const st = installationStatus(i);
-      if (st.kind === "approve") return st.url;
-    }
-    return null;
-  })();
-
-  return (
-    <Panel
-      title="GitHub Actions on Weft runners"
-      hint="A GitHub Actions job that asks for runs-on: weft runs on our hosted runners and spends this organisation's hosted minutes, at the size's multiplier."
-    >
-      <Err message={error} />
-      <div className="space-y-4">
-        <InstallationCards installs={installs} onConnect={connect} />
-        <SnippetBlock sizes={jobs?.sizes ?? null} />
-        <p className="text-xs text-ink-3">
-          <span className="font-mono">docker build</span> and{" "}
-          <span className="font-mono">docker run</span> work here without a daemon; jobs with{" "}
-          <span className="font-mono">container:</span>,{" "}
-          <span className="font-mono">services:</span> or a Docker-based action will fail.
-        </p>
-        <GithubJobsTable jobs={jobs?.jobs ?? null} approveUrl={approveUrl} />
-      </div>
-    </Panel>
-  );
-}
-
-/// One line per installation: what it can do, or what to go and
-/// approve. Nothing connected is the one case with a button.
-function InstallationCards(props: {
-  installs: GithubInstallation[] | "hidden" | null;
-  onConnect: () => void;
-}) {
-  const { installs } = props;
-  if (installs === null) return <Loading />;
-  if (installs === "hidden")
-    return (
-      <p className="text-sm text-ink-3">
-        Only an owner or admin can see which GitHub installations are connected.
-      </p>
-    );
-  if (installs.length === 0)
-    return (
-      <div className="flex flex-wrap items-center gap-3">
-        <p className="text-sm text-ink-3">
-          No GitHub installation is connected to this organisation.
-        </p>
-        <Button variant="outline" size="xs" onClick={props.onConnect}>
-          Connect GitHub
-        </Button>
-      </div>
-    );
-  return (
-    <ul className="space-y-1.5">
-      {installs.map((i) => (
-        <li key={i.installation_id} className="text-sm text-ink-2">
-          <InstallationLine inst={i} />
-        </li>
-      ))}
-    </ul>
-  );
-}
-
-function InstallationLine(props: { inst: GithubInstallation }) {
-  const { inst } = props;
-  const st = installationStatus(inst);
-  const account =
-    (inst.detail && "account" in inst.detail && inst.detail.account) ||
-    inst.account ||
-    "GitHub";
-  switch (st.kind) {
-    case "ready":
-      return (
-        <span className="flex flex-wrap items-center gap-2">
-          <Badge variant="good">Ready</Badge>
-          <span>{readyLine(account)}</span>
-        </span>
-      );
-    case "approve":
-      return (
-        <span className="flex flex-wrap items-center gap-2">
-          <Badge variant="warning">Needs approval</Badge>
-          <a
-            className={STRUCTURAL_LINK}
-            href={st.url}
-            target="_blank"
-            rel="noreferrer"
-          >
-            {approveLine(st.missing)}
-          </a>
-          <span className="text-xs text-ink-3">
-            {account} cannot run jobs on Weft runners until then.
-          </span>
-        </span>
-      );
-    case "gone":
-      return (
-        <span className="flex flex-wrap items-center gap-2">
-          <Badge variant="neutral">Uninstalled</Badge>
-          <span>
-            The GitHub App is no longer installed on {account}; reinstall it
-            there to use Weft runners.
-          </span>
-        </span>
-      );
-    default:
-      // `none` cannot reach here — an empty list never renders a line —
-      // so this is `unknown`: GitHub could not be asked.
-      return (
-        <span className="flex flex-wrap items-center gap-2">
-          <Badge variant="neutral">Not checked</Badge>
-          <span>
-            GitHub could not be asked what the installation on {account} may do
-            right now; jobs are refused if it lacks Administration: write.
-          </span>
-        </span>
-      );
-  }
-}
-
-/// The three `runs-on:` lines, each with what it buys.
-function SnippetBlock(props: { sizes: GithubRunnerSize[] | null }) {
-  if (!props.sizes) return null;
-  return (
-    <div>
-      <p className="mb-1 text-xs text-ink-3">
-        In a workflow, one of these on the job:
-      </p>
-      <ul
-        aria-label="Runner sizes"
-        className="divide-y divide-borderline rounded-md border border-borderline"
-      >
-        {props.sizes.map((s) => (
-          <li
-            key={s.label}
-            className="flex flex-wrap items-center gap-x-4 gap-y-1 px-3 py-1.5 text-sm"
-          >
-            <code className="font-mono text-ink">{snippet(s)}</code>
-            <span className="min-w-0 truncate text-xs text-ink-3">
-              {sizeLine(s)}
-            </span>
-          </li>
-        ))}
-      </ul>
-    </div>
-  );
-}
-
-/// The jobs, newest first. A refused row carries its reason and — when
-/// the reason is a permission — the link to approve it, because the
-/// reader arriving here from a job that sat queued on GitHub for an
-/// hour wants the fix, not the diagnosis.
-function GithubJobsTable(props: {
-  jobs: GithubJob[] | null;
-  approveUrl: string | null;
-}) {
-  const { jobs } = props;
-  if (!jobs) return <Loading />;
-  if (jobs.length === 0)
-    return (
-      <p className="text-sm text-ink-3">
-        No GitHub Actions job has asked for a Weft runner yet.
-      </p>
-    );
-  return (
-    <div className="overflow-x-auto">
-      <Table>
-        <TableHeader>
-          <TableHeadRow>
-            <TableHead>Repository</TableHead>
-            <TableHead>Job</TableHead>
-            <TableHead>Size</TableHead>
-            <TableHead>State</TableHead>
-            <TableHead className="text-right">Minutes</TableHead>
-          </TableHeadRow>
-        </TableHeader>
-        <TableBody>
-          {jobs.map((j) => (
-            <TableRow key={j.id}>
-              <TableCell className="max-w-[14rem]">
-                <span className="block min-w-0 truncate text-ink-2">
-                  {j.repo}
-                </span>
-              </TableCell>
-              <TableCell className="max-w-[14rem]">
-                <a
-                  className={cn(STRUCTURAL_LINK, "block min-w-0 truncate")}
-                  href={j.html_url}
-                  target="_blank"
-                  rel="noreferrer"
-                >
-                  {j.name}
-                </a>
-              </TableCell>
-              <TableCell className="font-mono text-ink-2">{j.size}</TableCell>
-              <TableCell className="max-w-[28rem]">
-                {/* The sentence is the fact; the ink is the glance. A
-                    refusal is the server's own words, in full, because
-                    they name the fix. */}
-                <span
-                  className={cn(
-                    "block min-w-0 truncate",
-                    j.state === "refused" || j.state === "failed"
-                      ? "text-serious"
-                      : "text-ink-2",
-                  )}
-                  title={jobLine(j)}
-                >
-                  {jobLine(j)}
-                </span>
-                {j.needs_permission && props.approveUrl && (
-                  <a
-                    className={cn(STRUCTURAL_LINK, "block text-xs")}
-                    href={props.approveUrl}
-                    target="_blank"
-                    rel="noreferrer"
-                  >
-                    Approve the permission on GitHub
-                  </a>
-                )}
-                {j.state === "refused" && !j.cancelled_on_github && (
-                  <span className="block text-xs text-ink-3">
-                    {STILL_QUEUED_NOTE}
-                  </span>
-                )}
-                {j.state !== "refused" && j.state !== "failed" && j.error && (
-                  <span
-                    className="block min-w-0 truncate text-xs text-ink-3"
-                    title={j.error}
-                  >
-                    {j.error}
-                  </span>
-                )}
-              </TableCell>
-              <TableCell className="text-right font-mono text-ink-2">
-                {j.minutes.toLocaleString("en-US")}
-              </TableCell>
-            </TableRow>
-          ))}
-        </TableBody>
-      </Table>
-    </div>
   );
 }
 
@@ -802,7 +461,6 @@ function GroupEditor(props: {
   onSave: (body: {
     name?: string;
     repo_access?: RunnerGroup["repo_access"];
-    allow_public?: boolean;
     repos?: string[];
   }) => void;
   onCancel: () => void;
@@ -810,7 +468,6 @@ function GroupEditor(props: {
   const { group } = props;
   const [name, setName] = useState(group.name);
   const [access, setAccess] = useState(group.repo_access);
-  const [allowPublic, setAllowPublic] = useState(group.allow_public);
   const [repos, setRepos] = useState(group.repos);
 
   return (
@@ -855,26 +512,6 @@ function GroupEditor(props: {
           onChange={setRepos}
         />
       )}
-      {/* Public repositories are the sharp edge of the whole feature: a
-          fork's pull request runs somebody else's code on your machine.
-          Off by default and said in full here rather than as a
-          three-word toggle. */}
-      <label className="flex items-start gap-2 text-sm text-ink-2">
-        <input
-          type="checkbox"
-          className="mt-1"
-          checked={allowPublic}
-          aria-label="Allow public repositories"
-          onChange={(e) => setAllowPublic(e.target.checked)}
-        />
-        <span>
-          Allow public repositories
-          <span className="block text-xs text-ink-3">
-            A public repository's workflow runs code that anybody can propose.
-            Leave this off unless these machines are disposable.
-          </span>
-        </span>
-      </label>
       <div className="flex flex-wrap gap-2">
         <Button
           disabled={props.busy}
@@ -882,7 +519,6 @@ function GroupEditor(props: {
             props.onSave({
               ...(group.is_default ? {} : { name: name.trim() }),
               repo_access: access,
-              allow_public: allowPublic,
               repos,
             })
           }

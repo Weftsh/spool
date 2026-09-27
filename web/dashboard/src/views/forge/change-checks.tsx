@@ -74,16 +74,15 @@ export interface PanelCheck {
   posted_by?: string | null;
   started_at?: number | null;
   completed_at?: number | null;
-  /// Why this check will never start, when it is a hosted run somebody
-  /// has to unblock — a fork awaiting approval, an organisation over its
-  /// minutes, hosted workflows suspended.
+  /// Why this check will never start, when it is a workflow run somebody
+  /// has to unblock — a fork awaiting approval, most often.
   ///
   /// The reason lives on the run and not on the check row: a blocked run
   /// mirrors as `queued`, deliberately, because nothing is wrong with
   /// the change. The row is therefore indistinguishable from CI that is
   /// about to start, and the reader waits for something that will never
   /// arrive. The caller joins the run back on — see
-  /// `@/lib/hosted-runs` — and this is where it lands.
+  /// `@/lib/workflow-runs` — and this is where it lands.
   ///
   /// Rendered **verbatim**. These sentences are the product's answer to
   /// "why has nothing run"; a paraphrase here is the page inventing a
@@ -558,7 +557,7 @@ function CheckRow(props: {
             // The third place a `detail_url` is rendered, and it had the
             // same defect as the other two: `_blank` with `nofollow ugc`
             // on every row, including the ones pointing at our own
-            // hosted-run page. `posted_by` is the server's word for who
+            // workflow-run page. `posted_by` is the server's word for who
             // wrote the row — a reporter cannot choose it — so it is the
             // provider gate one field over. See `DetailLink`.
             <DetailLink
@@ -603,7 +602,7 @@ export interface ChangeChecksPanelProps {
   scope?: string;
   /// How a row whose `detail_url` is one of our own pages navigates.
   /// Defaults to a full page load, which is the honest answer on the
-  /// dashboard mount: the hosted-run page is a forge route and is not
+  /// dashboard mount: the workflow-run page is a forge route and is not
   /// reachable from there client-side.
   navigate?: (to: string, replace?: boolean) => void;
 }

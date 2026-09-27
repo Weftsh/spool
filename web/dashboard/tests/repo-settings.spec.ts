@@ -8,7 +8,7 @@
 //
 //   * The tab exists for an admin and does **not** exist for anybody
 //     else — not disabled, absent — and the address behind it answers
-//     the same 404 a private repository gives a stranger.
+//     the same 404 a repository gives somebody who may not read it.
 //   * Every destructive control is gated on typing the repository's
 //     name. Asserting the confirmed path alone would pass against a
 //     button that deletes on the first click, so each of those tests
@@ -23,10 +23,9 @@
 // tests below still hold both ends of that: the flag decides the tab,
 // and `orgAdmin: false` is how a per-repo admin is expressed.
 //
-// The catch-all `**/v1/**` 404 is registered FIRST, for the reason
-// `public.spec.ts` sets out at length: an unmocked call otherwise
-// proxies to whatever is listening on :8080, so the suite would be
-// hermetic only when nobody had the manual stack up.
+// The catch-all `**/v1/**` 404 is registered FIRST: an unmocked call
+// otherwise proxies to whatever is listening on :8080, so the suite
+// would be hermetic only when nobody had the manual stack up.
 
 import { expect, test, type Page } from "@playwright/test";
 import { ME, signIn } from "./fixtures";
@@ -37,7 +36,6 @@ const WIDGET = {
   name: "widget",
   description: "the fast one",
   kind: "native",
-  public: false,
   default_branch: "main",
   origin_url: null,
   last_sync_at: null,
@@ -55,20 +53,6 @@ const WIDGET = {
 };
 
 const ACCESS_OK = { people: [], teams: [] };
-
-/// What `GET …/site` answers for a repository that publishes nothing:
-/// no `.weft/site.yml`, no site row, no deploys.
-const SITE_OFF = {
-  enabled: false,
-  host: null,
-  url: null,
-  branch: null,
-  config_state: "absent",
-  config_error: null,
-  config: null,
-  current: null,
-  deploys: [],
-};
 
 /// A repository page with nothing mocked but what the test names.
 ///
@@ -102,28 +86,12 @@ async function mockRepo(
     patchStatus?: number;
     patchError?: string;
     onDelete?: () => void;
-    /// What `GET …/site` answers. Defaults to the shape the route gives
-    /// the overwhelming majority of repositories: no config, no site.
-    /// Overridden field by field, so a test names only the state it is
-    /// about.
-    site?: Record<string, unknown>;
   },
 ) {
   const repo = { ...WIDGET, viewer_admin: opts.admin, ...(opts.repo ?? {}) };
   const orgAdmin = opts.orgAdmin ?? opts.admin;
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
-  );
-  // The Site panel reads this on every settings page. Answered here
-  // rather than left to the catch-all: a 404 would put an error line on
-  // a page every other test in this file is reading for something else,
-  // and "the panel could not be read" is not the state any of them mean
-  // to be asserting against.
-  await page.route("**/v1/orgs/acme/repos/widget/site", (r) =>
-    r.fulfill({
-      status: 200,
-      json: { ...SITE_OFF, ...(opts.site ?? {}) },
-    }),
   );
   await page.route("**/v1/orgs/acme/repos/widget/access", (r) =>
     orgAdmin
@@ -192,7 +160,7 @@ const insightsTab = (page: Page) =>
 /// absence can be read once, without retries, and mean something.
 async function rowHasLanded(page: Page) {
   await expect(
-    page.getByRole("button", { name: /fork this repository|sign in to fork/i }),
+    page.getByRole("button", { name: /fork this repository/i }),
   ).toContainText("7");
 }
 
@@ -215,10 +183,10 @@ test("an admin sees the Settings tab", async ({ page }) => {
 test("a viewer sees Insights but no Settings tab at all", async ({ page }) => {
   await signIn(page);
   // The `viewer` role: on the inside, allowed to change nothing. The two
-  // gates exist to tell this person apart from a stranger on one side
-  // and an admin on the other, so one page load asserts both — a
-  // repository's traffic is the members' to read, its visibility the
-  // admins' to change.
+  // gates exist to tell this person apart from somebody with no role
+  // here on one side and an admin on the other, so one page load asserts
+  // both — a repository's traffic is the members' to read, its settings
+  // the admins' to change.
   await mockRepo(page, { admin: false });
   await page.goto("/acme/widget");
 
@@ -274,18 +242,16 @@ test("an admin gets both, Insights first", async ({ page }) => {
   ]);
 });
 
-test("a stranger on a public repository gets no Insights, tab or page", async ({
+test("a reader the server does not count as a member gets no Insights, tab or page", async ({
   page,
 }) => {
-  // The case that matters most, and the one the old gate could not
-  // express: a **public** repository, which a stranger may read in full.
-  // They may read the code. They may not read how often it is cloned or
-  // how many bytes it serves — publishing the code does not publish how
-  // the code is used.
+  // `viewer_member` is the server's answer, and the gate is only as good
+  // as its "no" half: a reader it says holds no role here may read the
+  // code and not how often it is cloned or how many bytes it serves.
   await signIn(page);
   await mockRepo(page, {
     admin: false,
-    repo: { public: true, viewer_member: false },
+    repo: { viewer_member: false },
   });
   await page.goto("/acme/widget");
 
@@ -299,8 +265,8 @@ test("a stranger on a public repository gets no Insights, tab or page", async ({
   ]);
 
   // The half that matters: the address is typable whether or not a tab
-  // points at it. Not "forbidden" — the same answer a private
-  // repository gives a stranger, because telling somebody they may not
+  // points at it. Not "forbidden" — the same answer a repository gives
+  // somebody who may not read it, because telling somebody they may not
   // see a page tells them there is a page to come back for.
   await page.goto("/acme/widget/insights");
   await expect(page.getByText(/We couldn’t find/)).toBeVisible();
@@ -331,34 +297,16 @@ test("an admin on this repository alone sees the tab and a working page", async 
   await expect(page.getByRole("heading", { name: "Access" })).toHaveCount(0);
 });
 
-test("a signed-out stranger sees no tab, and nothing is asked on their behalf", async ({
+test("a reader without admin sees no tab, and nothing is asked on their behalf", async ({
   page,
 }) => {
   let probes = 0;
-  await page.route("**/v1/**", (r) =>
-    r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
-  );
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await signIn(page);
+  await mockRepo(page, { admin: false });
   await page.route("**/v1/orgs/acme/repos/widget/access", (r) => {
     probes += 1;
-    return r.fulfill({ status: 401, json: { error: "not signed in" } });
+    return r.fulfill({ status: 403, json: { error: "not an org admin" } });
   });
-  await page.route("**/v1/orgs/acme/repos/widget", (r) =>
-    r.fulfill({
-      status: 200,
-      json: {
-        ...WIDGET,
-        public: true,
-        viewer_admin: false,
-        // A stranger holds no role here, which is a different answer
-        // from "may not administer" and the one Insights turns on.
-        viewer_member: false,
-        fork_count: 7,
-      },
-    }),
-  );
   await page.goto("/acme/widget");
 
   await rowHasLanded(page);
@@ -367,6 +315,7 @@ test("a signed-out stranger sees no tab, and nothing is asked on their behalf", 
     "Issues",
     "Changes",
     "Checks",
+    "Insights",
   ]);
   expect(await settingsTab(page).count()).toBe(0);
   // The row already said. Asking an admin-only endpoint on the most
@@ -382,9 +331,8 @@ test("a signed-out stranger sees no tab, and nothing is asked on their behalf", 
 // question one step back rather than removing it: the row is only
 // answered for *this viewer* if the request carries this viewer's
 // credential. `useRepoRow` builds `viewerSession(owner, token)` for
-// exactly that reason, and `anon(owner)` — its predecessor, which sent
-// nothing — is what silently showed a token holder less of their own
-// work. One test per credential, because a single test can only ever
+// exactly that reason; its predecessor sent an empty token, which is
+// what silently showed a token holder less of their own work. One test per credential, because a single test can only ever
 // hold up one half of that.
 
 test("a token session sends its token with the row, and gets the tab", async ({
@@ -496,9 +444,9 @@ test("saving a description PATCHes the text that was typed", async ({
   await page.getByRole("button", { name: "Save", exact: true }).click();
 
   await expect(page.getByText("Saved.", { exact: true })).toBeVisible();
-  // Exactly one, and the two General fields alone: a PATCH that also
-  // carried `public` would publish a private repository while somebody
-  // was editing a sentence. The homepage rides along because the two
+  // Exactly one, and the two General fields alone: a PATCH that carried
+  // anything else would change something nobody asked to change while
+  // they were editing a sentence. The homepage rides along because the two
   // fields are one form and one save — a fixture with no homepage sends
   // `null`, which is what "still has none" looks like on the wire.
   expect(patches).toEqual([{ description: "the careful one", homepage: null }]);
@@ -578,146 +526,6 @@ test("a cancelled confirmation does not carry the typed name back", async ({
     dialog.getByRole("button", { name: "Delete this repository", exact: true }),
   ).toBeDisabled();
   expect(deletes).toBe(0);
-});
-
-test("publishing takes the repository's name too", async ({ page }) => {
-  const patches: unknown[] = [];
-  await signIn(page);
-  await mockRepo(page, { admin: true, onPatch: (b) => patches.push(b) });
-  await page.goto("/acme/widget/settings");
-
-  await expect(
-    page.getByText("This repository is currently private."),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Make public" }).click();
-  const dialog = page.getByRole("alertdialog");
-  const confirm = dialog.getByRole("button", {
-    name: "Make this repository public",
-    exact: true,
-  });
-
-  await expect(confirm).toBeDisabled();
-  expect(patches).toEqual([]);
-
-  await dialog.getByRole("textbox").fill("widget");
-  await confirm.click();
-
-  expect(patches).toEqual([{ public: true }]);
-  // The page tells the truth about what just happened, without a reload.
-  await expect(page.getByText(/Anyone can read it/)).toBeVisible();
-});
-
-test("a public repository is offered the way back, not the way out again", async ({
-  page,
-}) => {
-  await signIn(page);
-  await mockRepo(page, { admin: true, repo: { public: true } });
-  await page.goto("/acme/widget/settings");
-
-  await expect(
-    page.getByRole("button", { name: "Make private" }),
-  ).toBeVisible();
-  await expect(page.getByRole("button", { name: "Make public" })).toHaveCount(
-    0,
-  );
-});
-
-test("making a repository private on a free organization is answered with the price", async ({
-  page,
-}) => {
-  const patches: unknown[] = [];
-  let subscribed = 0;
-  await signIn(page);
-  await mockRepo(page, { admin: true, repo: { public: true } });
-  // Over the fixture's own row route (Playwright matches newest-first):
-  // the PATCH is refused until the subscription exists, then lands, the
-  // way the server behaves.
-  await page.route("**/v1/orgs/acme/repos/widget", async (r, req) => {
-    if (req.method() !== "PATCH") return r.fallback();
-    const body = req.postDataJSON();
-    patches.push(body);
-    if (subscribed === 0) {
-      return r.fulfill({
-        status: 402,
-        json: {
-          error:
-            "this organization needs a paid plan to hold a private repository",
-        },
-      });
-    }
-    return r.fulfill({
-      status: 200,
-      json: {
-        ...WIDGET,
-        viewer_admin: true,
-        public: true,
-        ...(body as Record<string, unknown>),
-      },
-    });
-  });
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({
-      json: {
-        org: "acme",
-        plan: "free",
-        billable_seats: 2,
-        paid_seats: 0,
-        status: null,
-        current_period_end: null,
-              may_create_public: true,
-        may_create_private: false,
-        may_add_people: true,
-        price_per_seat_cents: 400,
-        paid_minutes_per_seat: 2000,
-        free_minutes: 500,
-      },
-    }),
-  );
-  await page.route("**/v1/orgs/acme/billing/subscribe", (r) => {
-    subscribed += 1;
-    return r.fulfill({
-      json: { url: "https://checkout.example.test/pay/cs_sub_1", kind: "checkout" },
-    });
-  });
-  await page.route("https://checkout.example.test/**", (r) =>
-    r.fulfill({ contentType: "text/html", body: "<h1>Provider checkout</h1>" }),
-  );
-  await page.goto("/acme/widget/settings");
-
-  await page.getByRole("button", { name: "Make private" }).click();
-  const dialog = page.getByRole("alertdialog");
-  await dialog.getByRole("textbox").fill("widget");
-  await dialog
-    .getByRole("button", { name: "Make this repository private", exact: true })
-    .click();
-
-  // The 402 is not "Could not change the visibility: …" in red. It is
-  // the price, and a button that subscribes and replays the change.
-  const wall = page.getByRole("region", { name: "Subscription needed" });
-  await expect(wall).toContainText(
-    "Making this repository private needs a subscription",
-  );
-  await expect(wall).toContainText("$8/month");
-  await expect(page.getByText(/Could not change the visibility/)).toHaveCount(
-    0,
-  );
-  expect(patches).toEqual([{ public: false }]);
-
-  await wall.getByRole("button", { name: "Continue to checkout" }).click();
-  // Off to the provider, with the change written down so the billing
-  // screen can finish it on the way back — the PATCH is not replayed
-  // here, because there is no subscription yet to replay it under.
-  await expect(page).toHaveURL("https://checkout.example.test/pay/cs_sub_1");
-  expect(subscribed).toBe(1);
-  expect(patches).toEqual([{ public: false }]);
-  // Session storage is the dashboard origin's, not the provider's:
-  // read it from where it was written.
-  await page.goBack();
-  expect(
-    JSON.parse(
-      (await page.evaluate(() => sessionStorage.getItem("weft.billing.intent"))) ?? "null",
-    ),
-  ).toEqual({ org: "acme", kind: "private", name: "widget" });
 });
 
 // ---------------------------------------------------------------------
@@ -1078,234 +886,6 @@ async function mockWebhooks(
     return r.fulfill({ status: 204, body: "" });
   });
 }
-
-// ---------------------------------------------------------------------
-// The Site panel.
-//
-// Four states, and the pair of them that has to be drawn *together*.
-// `config_state` is how `.weft/site.yml` parses right now; the deploys
-// are what is being served. They disagree exactly when somebody has just
-// broken the file, and a panel that switched on one field would answer
-// "why has my site not updated" with either the address or the error and
-// never both.
-//
-// Every text assertion below is `exact` or a full-string `toHaveText`.
-// `getByText` and `getByRole`'s `name` both match by **substring**, so
-// `getByText("A published site is public")` passes against a warning
-// that has since drifted into something vaguer with those words still
-// inside it — and this particular sentence is the one thing on the page
-// somebody could lose money or privacy over.
-
-/// The refusal a real parser produces, file and line included. Spelled
-/// here rather than imported, so the panel is asserted to carry the
-/// *server's* sentence through rather than to agree with itself.
-const SITE_REFUSAL =
-  '.weft/site.yml:3: unknown key "publsh" — did you mean "publish"?';
-
-/// The published-site warning, whole. Duplicated from `lib/site.ts` on
-/// purpose: `src/lib/site.test.ts` pins the constant, and this pins that
-/// the constant reaches the document. Editing the sentence should cost
-/// two deliberate edits, not one silent one.
-const SITE_PUBLIC_WARNING =
-  "A published site is public. Anyone with the address can read every " +
-  "file in the published directory, signed in or not, even while this " +
-  "repository stays private.";
-
-const SITE_LIVE = {
-  enabled: true,
-  host: "widget--acme",
-  url: "https://widget--acme.weft.dev",
-  branch: null,
-  config_state: "ok",
-  config_error: null,
-  config: { publish: "dist", branch: null, spa: false, not_found: null },
-  current: "01dep2",
-  deploys: [
-    {
-      id: "01dep2",
-      commit: "a1b2c3d4e5f60718293a4b5c6d7e8f9012345678",
-      tree: "1111111111111111111111111111111111111111",
-      publish: "dist",
-      spa: false,
-      not_found: null,
-      created_at: Date.now() - 3_600_000,
-    },
-    {
-      id: "01dep1",
-      commit: "0f0e0d0c0b0a09080706050403020100fedcba98",
-      tree: "2222222222222222222222222222222222222222",
-      publish: "dist",
-      spa: false,
-      not_found: null,
-      created_at: Date.now() - 86_400_000,
-    },
-  ],
-};
-
-const siteHeading = (page: Page) =>
-  page.getByRole("heading", { name: "Site", exact: true });
-
-test("a repository that publishes nothing is told how to publish something", async ({
-  page,
-}) => {
-  await signIn(page);
-  await mockRepo(page, { admin: true });
-  await page.goto("/acme/widget/settings");
-
-  await expect(siteHeading(page)).toBeVisible();
-  // The file, the key and the branch — the three things somebody needs
-  // in order to leave this page and make a site exist.
-  const absent = page.getByTestId("site-absent");
-  await expect(absent).toContainText(".weft/site.yml");
-  await expect(absent).toContainText("every push to");
-  await expect(absent).toContainText("main");
-  // A config somebody can paste, not a key with no value.
-  await expect(page.getByTestId("site-example")).toHaveText("publish: dist");
-
-  // Read once, after the panel has certainly rendered: nothing is
-  // published, so nothing may claim an address or warn about one.
-  expect(await page.getByTestId("site-public-warning").count()).toBe(0);
-  expect(await page.getByTestId("site-url").count()).toBe(0);
-});
-
-test("a refused site config is shown verbatim, line number and all", async ({
-  page,
-}) => {
-  // The state this panel exists for. A paraphrase would be a second copy
-  // of the parser's rules, and the line number is most of the value.
-  await signIn(page);
-  await mockRepo(page, {
-    admin: true,
-    site: { config_state: "refused", config_error: SITE_REFUSAL },
-  });
-  await page.goto("/acme/widget/settings");
-
-  await expect(page.getByTestId("site-config-refusal")).toHaveText(
-    SITE_REFUSAL,
-  );
-  // And it is an alert, not a note: this is the page telling somebody
-  // their pushes have stopped taking effect.
-  await expect(page.getByTestId("site-config-error")).toHaveAttribute(
-    "role",
-    "alert",
-  );
-  await expect(page.getByTestId("site-config-error")).toContainText(
-    "Nothing is being served.",
-  );
-});
-
-test("a broken config does not hide a site that is still serving", async ({
-  page,
-}) => {
-  // Both halves at once. The last good deploy keeps serving while the
-  // file is broken, and the reader needs "the site is up" *and* "here is
-  // why your change is not on it" in the same glance.
-  await signIn(page);
-  await mockRepo(page, {
-    admin: true,
-    site: {
-      ...SITE_LIVE,
-      config_state: "refused",
-      config_error: SITE_REFUSAL,
-      config: null,
-    },
-  });
-  await page.goto("/acme/widget/settings");
-
-  await expect(page.getByTestId("site-config-refusal")).toHaveText(
-    SITE_REFUSAL,
-  );
-  await expect(page.getByTestId("site-config-error")).toContainText(
-    "still being served",
-  );
-  await expect(page.getByTestId("site-url")).toHaveText(
-    "widget--acme.weft.dev",
-  );
-});
-
-test("a live site shows its address, its branch, its directory and its deploys", async ({
-  page,
-}) => {
-  await signIn(page);
-  await mockRepo(page, { admin: true, site: SITE_LIVE });
-  await page.goto("/acme/widget/settings");
-
-  // A real link, not a line of text somebody has to retype.
-  const link = page.getByTestId("site-url");
-  await expect(link).toHaveAttribute("href", "https://widget--acme.weft.dev");
-  await expect(link).toHaveAttribute("target", "_blank");
-  await expect(link).toHaveAttribute("rel", "noopener noreferrer");
-  // The accessible name is a sentence, not a bare URL read out letter by
-  // letter — and it still contains the visible text, so voice control
-  // can address the link by what is on screen. `exact` because the raw
-  // URL is a substring of any sloppier name.
-  await expect(
-    page.getByRole("link", {
-      name: "Open the published site at widget--acme.weft.dev",
-      exact: true,
-    }),
-  ).toBeVisible();
-
-  // `branch: null` means "the repository's default branch". Printing
-  // "null", or nothing, would send somebody off to look it up.
-  await expect(page.getByText("Publishes from", { exact: true })).toBeVisible();
-  await expect(
-    page.getByText("Published directory", { exact: true }),
-  ).toBeVisible();
-
-  const deploys = page.getByTestId("site-deploys");
-  // Newest first, short shas, and the one being served marked as such.
-  await expect(deploys.getByText("a1b2c3d", { exact: true })).toBeVisible();
-  await expect(deploys.getByText("0f0e0d0", { exact: true })).toBeVisible();
-  const serving = deploys.getByRole("row").filter({ hasText: "a1b2c3d" });
-  await expect(serving).toContainText("Serving");
-  const superseded = deploys.getByRole("row").filter({ hasText: "0f0e0d0" });
-  await expect(superseded).not.toContainText("Serving");
-  // Every relative time carries its exact instant, the forge's rule.
-  await expect(deploys.locator("time")).toHaveCount(2);
-});
-
-test("a live site says plainly that anyone with the address can read it", async ({
-  page,
-}) => {
-  // The footgun. A private repository serves its published directory to
-  // the whole internet, and nothing about the repository's own
-  // visibility changes to say so. Asserted whole: a warning that had
-  // drifted into something vaguer would still contain "public".
-  await signIn(page);
-  await mockRepo(page, {
-    admin: true,
-    repo: { public: false },
-    site: SITE_LIVE,
-  });
-  await page.goto("/acme/widget/settings");
-
-  const warning = page.getByTestId("site-public-warning");
-  await expect(warning).toBeVisible();
-  await expect(warning).toContainText(SITE_PUBLIC_WARNING);
-  // And it is not in the Danger Zone, where nobody publishing a site
-  // would look. It is beside the address it is about.
-  await expect(page.getByTestId("site-url")).toBeVisible();
-});
-
-test("a site with nothing published yet says which push will publish it", async ({
-  page,
-}) => {
-  await signIn(page);
-  await mockRepo(page, {
-    admin: true,
-    site: { ...SITE_LIVE, current: null, deploys: [] },
-  });
-  await page.goto("/acme/widget/settings");
-
-  await expect(page.getByTestId("site-waiting")).toHaveText(
-    "Nothing has published yet. The next push to main publishes dist/.",
-  );
-  // No address, and no warning about an address: there is nothing at
-  // one yet, and a URL that resolves nowhere gets sent to a colleague.
-  expect(await page.getByTestId("site-url").count()).toBe(0);
-  expect(await page.getByTestId("site-public-warning").count()).toBe(0);
-});
 
 test("a repository with no webhook says nothing is being told about its pushes", async ({
   page,

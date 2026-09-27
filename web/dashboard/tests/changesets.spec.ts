@@ -208,14 +208,9 @@ async function mockChangesets(page: Page, over: Partial<State> = {}) {
   return routeChangesets(page, over);
 }
 
-/// The same control plane, to a browser with no account at all.
-///
-/// A changeset over public repositories is readable signed-out on the
-/// wire — `changesets_api`'s reads go through `Scope::RepoRead`, whose
-/// `public_read` branch admits a `None` principal — so the only thing
-/// standing between a stranger and the review was the address. These
-/// tests drive the address.
-async function anonymousChangesets(page: Page, over: Partial<State> = {}) {
+/// The same control plane, to a person signed in with a browser session
+/// who opens the changeset's forge address rather than the dashboard's.
+async function forgeChangesets(page: Page, over: Partial<State> = {}) {
   // Refuse anything this file has not deliberately mocked, registered
   // first so the routes below win. Without it an unmocked `/v1` call
   // goes through vite's proxy to whatever is on :8080, and the suite is
@@ -223,9 +218,7 @@ async function anonymousChangesets(page: Page, over: Partial<State> = {}) {
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   return routeChangesets(page, over);
 }
 
@@ -1557,23 +1550,20 @@ test("a refused edge write is the gate speaking, not an error toast", async ({
 });
 
 test.describe("on the forge", () => {
-  // A changeset lived only at `/dashboard/changesets/{key}` — behind
-  // sign-in, and unreadable by a non-member — while a single change had
-  // `/{owner}/{repo}/changes/{key}`, a real public forge address. That
-  // was an inconsistency rather than a gap: the reads behind the page
-  // already admit an anonymous caller over public repositories, and the
-  // git front door had been serving `/{org}/changesets/{key}` over HTTP
-  // and SSH the whole time. Only the human address was missing.
+  // A changeset lived only at `/dashboard/changesets/{key}` while a
+  // single change had `/{owner}/{repo}/changes/{key}`, a forge address.
+  // The git front door had been serving `/{org}/changesets/{key}` over
+  // HTTP and SSH the whole time; only the human address was missing.
   //
-  // FORGE-UX §6a and §0 say what the public page must be: the same page.
-  // Signing in adds actions and never changes what it says. So these
-  // tests assert *parity* — the same sentences a member reads, in the
-  // same order — and then the absence of every control a member gets.
+  // One page on two mounts, so these tests assert *parity* — the same
+  // sentences the dashboard's page reads, in the same order — and then,
+  // for a reader without write access, the absence of every writer's
+  // control.
 
-  test("a stranger reads the verdict, the members and the order, unchanged", async ({
+  test("a reader without write access reads the verdict, the members and the order, unchanged", async ({
     page,
   }) => {
-    await anonymousChangesets(page, {
+    await forgeChangesets(page, {
       changesets: [changeset({ viewer_write: false })],
     });
     await page.goto("/acme/changesets/rename-payments");
@@ -1591,7 +1581,7 @@ test.describe("on the forge", () => {
     await expect(page.getByText("every member is ready to land")).toBeVisible();
 
     // Members in landing order: `members` lists web first, `order` puts
-    // api first, and a stranger sees the plan the lander will walk.
+    // api first, and the reader sees the plan the lander will walk.
     const rows = page.getByRole("row").filter({ hasText: /c-(api|web)/ });
     await expect(rows).toHaveCount(2);
     await expect(rows.nth(0)).toContainText("c-api");
@@ -1608,9 +1598,9 @@ test.describe("on the forge", () => {
     // The composed CI rows, named by repository as well as job.
     await expect(page.getByText("web: ci / build")).toBeVisible();
 
-    // The workspace clone block, still drawn: per §6a the clone URL of a
-    // public set is a public fact, and hiding it would make the page say
-    // something different to a stranger.
+    // The workspace clone block, still drawn: reading the set is enough
+    // to clone it, and hiding it would make this mount say something
+    // different from the dashboard's.
     await expect(page.getByLabel("HTTPS clone URL")).toHaveValue(
       "http://127.0.0.1:8080/acme/changesets/rename-payments.git",
     );
@@ -1619,21 +1609,20 @@ test.describe("on the forge", () => {
     // The forge shell, not the dashboard's. The rail's trigger is the
     // cheapest proof: it exists on every dashboard page and on none of
     // these, and a changeset quietly rendered inside the admin shell
-    // would look almost right to a member and be a sign-in wall to
-    // everybody else.
+    // would look almost right and be the wrong page.
     await expect(
       page.getByRole("button", { name: "Toggle sidebar" }),
     ).toHaveCount(0);
     // And no way back to a list that does not exist here: the org-wide
-    // list is per-caller-filtered, so there is deliberately no public
-    // one, and a back link to a 404 is worse than no back link.
+    // list lives on the dashboard, and a back link to a 404 is worse
+    // than no back link.
     await expect(page.getByText("← All changesets")).toHaveCount(0);
   });
 
-  test("a stranger gets no writer control at all, only what one would take", async ({
+  test("a reader without write access gets no writer control, only what one would take", async ({
     page,
   }) => {
-    await anonymousChangesets(page, {
+    await forgeChangesets(page, {
       changesets: [changeset({ viewer_write: false })],
     });
     await page.goto("/acme/changesets/rename-payments");
@@ -1642,8 +1631,8 @@ test.describe("on the forge", () => {
     ).toBeVisible();
 
     // Absent from the DOM, not merely disabled. Every write route masks
-    // a caller who may not write with the same `no changeset "…"` a
-    // stranger gets for one that does not exist, so a drawn-but-disabled
+    // a caller who may not write with the same `no changeset "…"` an
+    // outsider gets for one that does not exist, so a drawn-but-disabled
     // button would be a control that answers a lie when pressed.
     for (const name of [
       "Land all members",
@@ -1655,30 +1644,21 @@ test.describe("on the forge", () => {
       await expect(page.getByRole("button", { name })).toHaveCount(0);
     await expect(page.getByRole("button", { name: /^Remove / })).toHaveCount(0);
 
-    // The wording a signed-in reader without write access already gets —
-    // the same sentence, not a second one for strangers.
+    // What it would take, said once.
     await expect(
       page.getByText(
         "Landing, reverting or abandoning this changeset takes write access to every member repository.",
       ),
     ).toBeVisible();
-    // Plus the way in, which is an action added rather than a sentence
-    // changed. It carries `next`, so signing in returns here.
-    await expect(
-      page
-        .locator("div", { hasText: "Actions" })
-        .getByRole("link", { name: "Sign in" })
-        .first(),
-    ).toHaveAttribute(
-      "href",
-      "/login?next=%2Facme%2Fchangesets%2Frename-payments",
-    );
+    // And no way in to offer: the reader is already signed in, and
+    // signing in again would change nothing.
+    await expect(page.getByRole("link", { name: "Sign in" })).toHaveCount(0);
   });
 
   test("a member's links stay on the forge rather than the dashboard", async ({
     page,
   }) => {
-    await anonymousChangesets(page, {
+    await forgeChangesets(page, {
       changesets: [changeset({ viewer_write: false })],
     });
     await page.goto("/acme/changesets/rename-payments");

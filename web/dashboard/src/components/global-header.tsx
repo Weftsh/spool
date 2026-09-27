@@ -16,8 +16,10 @@ import { FORGE_CONTAINER } from "@/lib/links";
 import { cn } from "@/lib/utils";
 
 /// The forge's one piece of persistent chrome: mark, global search,
-/// then `+ New` and the account menu — or a single **Sign in** button
-/// when nobody is signed in.
+/// then `+ New` and the account menu.
+///
+/// The menus need a person. A session held by an API token has none —
+/// `me` is null — and gets the mark and the search box alone.
 ///
 /// Two accessible names here are contracts with suites this file cannot
 /// see, and both are collisions rather than preferences:
@@ -36,25 +38,19 @@ import { cn } from "@/lib/utils";
 /// and is matched in strict mode, where a second match is an error.
 export function GlobalHeader(props: {
   me: Me | null;
-  currentPath: string;
   onNavigate: (to: string) => void;
   onSignOut: () => void;
 }) {
   const { me } = props;
 
-  // A visitor who signs in from a repository page wants that page back,
-  // not the dashboard. `routes.ts` only honours a same-origin path, so
-  // handing it one is safe by construction.
-  const signIn = href(["login"], { next: props.currentPath });
-
   return (
     <header className="h-14 border-b border-borderline bg-surface-1">
       <div className={cn(FORGE_CONTAINER, "flex h-full items-center gap-3")}>
         <a
-          href="/"
+          href={dash([])}
           onClick={(e) => {
             e.preventDefault();
-            props.onNavigate("/");
+            props.onNavigate(dash([]));
           }}
           className="flex shrink-0 items-center gap-2 rounded-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
         >
@@ -93,14 +89,10 @@ export function GlobalHeader(props: {
           onSubmit={(e) => {
             e.preventDefault();
             const q = new FormData(e.currentTarget).get("q");
-            // `/search` with the query, not `/explore` carrying one. Explore is
-            // the whole public set; a search is a narrowing of it, and giving
-            // the narrowing its own address is what makes a result set
-            // something somebody can send.
+            // Its own address, so a result set is something somebody can
+            // send. An empty query lists everything the viewer can see.
             const typed = String(q ?? "").trim();
-            props.onNavigate(
-              typed ? href(["search"], { q: typed }) : href(["explore"]),
-            );
+            props.onNavigate(href(["search"], { q: typed || undefined }));
           }}
         >
           <label className="sr-only" htmlFor="forge-search">
@@ -124,7 +116,7 @@ export function GlobalHeader(props: {
         </form>
 
         <div className="ml-auto flex shrink-0 items-center gap-2">
-          {me ? (
+          {me && (
             <>
               <DropdownMenu>
                 <DropdownMenuTrigger asChild>
@@ -185,18 +177,6 @@ export function GlobalHeader(props: {
                 </DropdownMenuContent>
               </DropdownMenu>
             </>
-          ) : (
-            <Button variant="outline" asChild>
-              <a
-                href={signIn}
-                onClick={(e) => {
-                  e.preventDefault();
-                  props.onNavigate(signIn);
-                }}
-              >
-                Sign in
-              </a>
-            </Button>
           )}
         </div>
       </div>

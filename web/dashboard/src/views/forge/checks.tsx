@@ -29,7 +29,7 @@ import {
 } from "@/api";
 import { RelativeTime } from "@/components/relative-time";
 import { DetailLink } from "@/components/detail-link";
-import { refusalsByRunId, rowRefusal } from "@/lib/hosted-runs";
+import { refusalsByRunId, rowRefusal } from "@/lib/workflow-runs";
 import { Badge } from "@/components/ui/badge";
 import {
   Select,
@@ -54,9 +54,9 @@ import { href, useQuery } from "@/router";
 /// to where the log actually lives.
 ///
 /// That link now goes to two kinds of place. A GitHub Actions or
-/// Buildkite row leaves for their site; a row mirroring a **hosted** run
-/// — one of this repository's own `.weft/*.yml` workflows, executed
-/// on Weft's runners — points at our own run page, which does have a
+/// Buildkite row leaves for their site; a row mirroring a **workflow**
+/// run — one of this repository's own `.weft/*.yml` workflows, executed
+/// on the organization's runners — points at our own run page, which does have a
 /// log and a cancel because that run is ours to hold and to stop. The
 /// row itself does not branch on which: `DetailLink` reads the URL, so
 /// the day there is a fourth provider nothing here needs a fourth arm.
@@ -210,7 +210,7 @@ export const RUN_STATES: Record<
   skipped: { label: "Skipped", icon: SkipForward, className: "text-ink-3" },
 };
 
-/// A hosted run that is waiting on a **person**, not on a machine.
+/// A workflow run that is waiting on a **person**, not on a machine.
 ///
 /// Not in `RUN_STATES` because it is not one of the six words a check
 /// row can hold: the mirror writes a blocked run as `queued`, on purpose
@@ -412,9 +412,9 @@ export interface EmptyState {
   /// did not ask.
   intake: boolean;
   /// Whether the panel offers the re-approve control. Gated again at the
-  /// call site on whether the viewer could use it: a stranger reading a
-  /// public repository can see *why* the list is empty and cannot fix
-  /// it, and a control that only 401s is worse than none.
+  /// call site on whether the viewer could use it: a reader without
+  /// admin can see *why* the list is empty and cannot fix it, and a
+  /// control that only 403s is worse than none.
   reapprove: boolean;
 }
 
@@ -482,9 +482,8 @@ export function retryLine(retryInMs: number | null): string | null {
 export interface ChecksProps {
   owner: string;
   repo: string;
-  /// The caller's API token, when they signed in with one. Empty for a
-  /// stranger — checks on a public repository are public, and the tab
-  /// renders for one.
+  /// The caller's API token, when they signed in with one; empty for a
+  /// cookie session.
   token: string | null;
   navigate: (to: string, replace?: boolean) => void;
   /// Whether to offer the two controls that need `repo:write` — asking
@@ -522,7 +521,7 @@ export function ChecksView(props: ChecksProps) {
   /// empty" rather than as any of the four things it could mean.
   const [poll, setPoll] = useState<ChecksPoll | null>(null);
   const [polling, setPolling] = useState(false);
-  /// Refusal sentences for the hosted runs, by run id.
+  /// Refusal sentences for the workflow runs, by run id.
   ///
   /// A blocked run mirrors into this list as `queued` — on purpose, see
   /// `workflow/mirror.rs` — so without this the tab shows a row that
@@ -591,11 +590,11 @@ export function ChecksView(props: ChecksProps) {
 
   useEffect(readPoll, [readPoll]);
 
-  /// The hosted runs, read only for the reasons blocked ones carry.
+  /// The workflow runs, read only for the reasons blocked ones carry.
   ///
-  /// Never allowed to disturb the list: a deployment with no hosted
-  /// runner, an older server, or a refusal here leaves every row exactly
-  /// as it was and simply annotates none of them.
+  /// Never allowed to disturb the list: an older server, or a refusal
+  /// here, leaves every row exactly as it was and simply annotates none
+  /// of them.
   const readRefusals = useCallback(() => {
     let alive = true;
     api
@@ -892,7 +891,7 @@ function FilterSelect(props: {
 function RunRow(props: {
   run: CheckRun;
   /// Why this run will never start, when it is one of ours and blocked.
-  /// See `@/lib/hosted-runs`.
+  /// See `@/lib/workflow-runs`.
   refusal: string | null;
   navigate: (to: string, replace?: boolean) => void;
 }) {
@@ -973,8 +972,8 @@ function RunRow(props: {
         {props.refusal && (
           // Verbatim and on its own line. This sentence is the only
           // thing on the tab that distinguishes a build about to start
-          // from one that is waiting on a person — a fork's approval, an
-          // organisation over its minutes, hosted workflows suspended.
+          // from one that is waiting on something — a fork's approval,
+          // most often.
           <p className="mt-1 whitespace-pre-wrap break-words text-xs text-ink-2">
             {props.refusal}
           </p>

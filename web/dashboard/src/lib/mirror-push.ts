@@ -53,9 +53,8 @@ export function forwardingLine(origin: string | null): string {
     : "Pushes to this mirror are forwarded to its origin; the origin stays canonical.";
 }
 
-/// "Approve Contents: write on GitHub" — one permission today, listed
-/// the way the runners panel lists its two, so the two sentences read
-/// alike side by side.
+/// "Approve Contents: write on GitHub" — one permission today, and
+/// joined with "and" if a second ever joins it.
 export function approvePushLine(missing: readonly string[]): string {
   return `Approve ${missing.join(" and ")} on GitHub`;
 }

@@ -273,7 +273,7 @@ const AUTH_HEADINGS: Record<
   person: ["Sign in to Weft", "Welcome back."],
   signup: [
     "Create your Weft account",
-    "Free for public work. No card needed.",
+    "One account for every organization you work in.",
   ],
   forgot: [
     "Reset your password",

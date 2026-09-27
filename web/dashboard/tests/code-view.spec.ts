@@ -11,22 +11,20 @@
 // it is handed, and about what it must no longer print.
 
 import { expect, test, type Page } from "@playwright/test";
-import { REPOS } from "./fixtures";
+import { ME, REPOS } from "./fixtures";
 
 const widget = REPOS.repos[0];
 
 /// Refuse anything a test has not deliberately mocked; the specific
-/// routes registered after this win. Same helper as `public.spec.ts`,
-/// which cannot be imported from here without registering its tests a
-/// second time.
+/// routes registered after this win.
 async function hermetic(page: Page) {
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
 }
 
-/// A signed-out visitor on the public forge, with the front page's four
-/// reads mocked: the row, the branches, the head commit and the listing.
+/// A signed-in reader on the forge, with the front page's four reads
+/// mocked: the row, the branches, the head commit and the listing.
 /// `head` is the commit every read agrees on; `row` overrides the
 /// repository row, which is where the commit count arrives.
 async function frontPage(
@@ -34,11 +32,9 @@ async function frontPage(
   opts: { head: string; row: Record<string, unknown> },
 ) {
   await hermetic(page);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   await page.route("**/v1/orgs/acme/repos/widget", (r) =>
-    r.fulfill({ status: 200, json: { ...widget, public: true, ...opts.row } }),
+    r.fulfill({ status: 200, json: { ...widget, ...opts.row } }),
   );
   await page.route("**/v1/orgs/acme/repos/widget/branches*", (r) =>
     r.fulfill({

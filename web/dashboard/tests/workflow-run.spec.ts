@@ -37,12 +37,11 @@ import { PREVIEW_ORIGIN } from "./preview";
 
 const NOW = Date.now();
 
-/// The repository every test reads. Public, because a public
-/// repository's checks are public; `viewer_write` is what decides
-/// whether Cancel appears and each test that cares says so.
+/// The repository every test reads, by a signed-in reader;
+/// `viewer_write` is what decides whether Cancel appears and each test
+/// that cares says so.
 const widget = {
   ...REPOS.repos[0],
-  public: true,
   viewer_admin: false,
   viewer_write: false,
 };
@@ -59,7 +58,6 @@ interface Job {
   log_chunks: number;
   started_at: number | null;
   completed_at: number | null;
-  pool?: "hosted" | "self_hosted";
   labels?: string[];
   runner?: { id: string; name: string } | null;
 }
@@ -581,8 +579,8 @@ test("a viewer without write access is offered no Cancel at all", async ({
   });
   await page.goto("/acme/widget/checks/runs/wr1");
 
-  // The page itself renders, because a public repository's runs are
-  // public. Counted rather than awaited-absent: this is an absence on a
+  // The page itself renders, because reading a run needs only read
+  // access. Counted rather than awaited-absent: this is an absence on a
   // settled page, and a control that appears and is then refused is
   // worse than one that never appeared.
   await expect(page.getByRole("heading", { name: "CI" })).toBeVisible();
@@ -658,7 +656,7 @@ test("a check row pointing at one of our own runs navigates in-app", async ({
   // Every `detail_url` used to be somebody else's site, so both places
   // that render one opened a new tab with `rel="nofollow ugc noopener
   // noreferrer"`. That is right for a URL a third party posted to the
-  // intake and wrong for the one the server writes for a hosted run: it
+  // intake and wrong for the one the server writes for a workflow run: it
   // points at this very SPA, and a full page load costs a reader their
   // place to reach a page one client-side navigation away.
   // The origin `playwright.config.ts` serves the production build on.
@@ -797,7 +795,7 @@ test("a check row pointing at one of our own runs navigates in-app", async ({
   expect(new URL(page.url()).pathname).toBe("/acme/widget/checks/runs/wr1");
 });
 
-test("a self-hosted job says which machine ran it, and what it asked for", async ({
+test("a job says which machine ran it, and what it asked for", async ({
   page,
 }) => {
   // The question an operator has about a job that behaved oddly is
@@ -815,7 +813,6 @@ test("a self-hosted job says which machine ran it, and what it asked for", async
         job({
           id: "j1",
           key: "build",
-          pool: "self_hosted",
           labels: ["self-hosted", "gpu", "cuda"],
           runner: { id: "r1", name: "gpu-box" },
         }),
@@ -835,19 +832,20 @@ test("a self-hosted job says which machine ran it, and what it asked for", async
   expect(await chips.allTextContents()).toEqual(["self-hosted", "gpu", "cuda"]);
 });
 
-test("a hosted job names no runner and shows no labels", async ({ page }) => {
-  // Hosted capacity is ours and has no name anybody could act on, so
-  // `runner` is null and there is nothing to say. A chip reading
-  // `ubuntu-latest` on every hosted job would be noise dressed as
-  // information — the pool already said it.
+test("a job no runner has taken says what it asked for, and names no machine", async ({
+  page,
+}) => {
+  // The labels are the question an operator asks of a job that sits
+  // waiting — which of them does no machine offer — so they are shown
+  // before anything has taken it. There is no runner to name yet, and
+  // the page must not invent one.
   await runPage(page, {
     run: run({
       jobs: [
         job({
           id: "j1",
           key: "build",
-          pool: "hosted",
-          labels: ["ubuntu-latest"],
+          labels: ["self-hosted", "gpu"],
           runner: null,
         }),
       ],
@@ -858,16 +856,16 @@ test("a hosted job names no runner and shows no labels", async ({ page }) => {
 
   await expect(logPane(page)).toContainText("\u25b6 Build");
   await expect(page.getByText(/ran on/)).toHaveCount(0);
-  await expect(page.getByText("ubuntu-latest")).toHaveCount(0);
+  const chips = page.locator("span", { hasText: /^(self-hosted|gpu)$/ });
+  expect(await chips.allTextContents()).toEqual(["self-hosted", "gpu"]);
 });
 
-test("a job from a server that has never heard of pools renders unchanged", async ({
+test("a job whose server sends no labels or runner renders unchanged", async ({
   page,
 }) => {
-  // `pool`, `labels` and `runner` are optional on the type because a
-  // fixture or a server older than self-hosted runners does not send
-  // them, and a job that rendered "ran on undefined" would be worse
-  // than one that said nothing.
+  // `labels` and `runner` are optional on the type because a fixture or
+  // an older server does not send them, and a job that rendered "ran on
+  // undefined" would be worse than one that said nothing.
   await runPage(page, {
     run: run({ jobs: [job({ id: "j1", key: "build" })] }),
     log: { j1: "\u25b6 Build\n" },

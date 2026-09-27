@@ -28,7 +28,7 @@ function CopyRow(props: { label: string; value: string }) {
   // One row, and the value carried in `title` as well as in the field.
   //
   // This block was written for the dashboard's own column and is reused
-  // in the public page's 288px About panel, where the URL does not fit.
+  // in the forge page's 288px About panel, where the URL does not fit.
   // Letting it wrap put the Copy button on its own line and still cut
   // the text, so the row stays intact: the field selects on focus, Copy
   // takes the whole value whatever is visible, and hovering shows it in

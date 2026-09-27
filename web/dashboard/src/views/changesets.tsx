@@ -45,7 +45,7 @@ import {
 } from "@/components/ui/table";
 import { CloneBlock } from "@/components/clone-block";
 import { cn } from "@/lib/utils";
-import { HOSTED_PROVIDER } from "@/lib/hosted-runs";
+import { WORKFLOW_PROVIDER } from "@/lib/workflow-runs";
 import { STRUCTURAL_LINK } from "@/lib/links";
 import {
   MAX_MEMBERS,
@@ -102,9 +102,6 @@ export function ChangesetsView(props: {
         session={props.session}
         changesetKey={props.selectedKey}
         links={dashboardChangesetLinks(props.session.org, props.navigate)}
-        // Nothing reaches the dashboard without a session, so there is
-        // never a sign-in prompt to draw here.
-        signedIn
       />
     );
   return <ChangesetsList session={props.session} navigate={props.navigate} />;
@@ -529,33 +526,23 @@ export function composedPanelChecks(cs: Changeset): PanelCheck[] {
     // in a new tab with `rel="ugc"` — when it pointed at our own run
     // page one client-side navigation away. The repository is already
     // in the name.
-    posted_by: HOSTED_PROVIDER,
+    posted_by: WORKFLOW_PROVIDER,
     source: "composition",
   }));
 }
 
 /// One changeset, on either mount.
 ///
-/// Deliberately one rendering rather than two, the same rule the
-/// repository page keeps: signing in adds *actions* and never changes
-/// what the page says. A stranger following a link to a public set gets
-/// the verdict, the members in landing order, the order strip, the
-/// composed checks and the workspace clone block — a public set's clone
-/// URL is a public fact — and gets the writer's controls replaced by the
-/// sentence saying what they take. The API was already answering an
-/// anonymous reader over public repositories (`Scope::RepoRead` admits a
-/// `None` principal); only the address was missing.
+/// Deliberately one rendering rather than two. A reader without write
+/// access to every member gets the verdict, the members in landing
+/// order, the order strip, the composed checks and the workspace clone
+/// block, and gets the writer's controls replaced by the sentence saying
+/// what they take.
 export function ChangesetView(props: {
   session: Session;
   changesetKey: string;
   /// Where this page's links point on the mount it is drawn on.
   links: ChangesetLinks;
-  /// Whether the reader holds any credential at all — a browser session
-  /// or a pasted API token. False only on the forge, and it decides
-  /// whether the page offers a way in, not what it says.
-  signedIn: boolean;
-  /// Where "Sign in" goes, with a `next` back to this page.
-  loginHref?: string;
   /// The element this page's body is drawn in.
   ///
   /// The dashboard shell renders no `<main>` of its own, so this view is
@@ -756,7 +743,7 @@ export function ChangesetView(props: {
   // Subtractive, like every write control on the forge: the server's own
   // answer, and no until it has said yes. Land, revert, abandon, add and
   // remove all go through `load(.., RepoWrite)` and answer somebody who
-  // may not write with the masked `no changeset` a stranger gets — about
+  // may not write with the masked `no changeset` an outsider gets — about
   // a changeset they were looking at. So the controls are not drawn for
   // them, and the card says what they would need instead.
   const canWrite = cs.viewer_write === true;
@@ -1157,21 +1144,6 @@ export function ChangesetView(props: {
               <p className="text-xs text-ink-3">
                 Landing, reverting or abandoning this changeset takes write
                 access to every member repository.
-                {/* Additive, not a different sentence. FORGE-UX §0: the
-                    page reads the same signed in and signed out, and
-                    signing in adds actions — so a stranger gets the way
-                    in *appended* to what a signed-in reader without
-                    write access is already told, rather than a second
-                    wording for the same fact. */}
-                {!props.signedIn && props.loginHref && (
-                  <>
-                    {" "}
-                    <a className={STRUCTURAL_LINK} href={props.loginHref}>
-                      Sign in
-                    </a>{" "}
-                    if you have it.
-                  </>
-                )}
               </p>
             ) : (
               <div className="flex flex-col gap-2">

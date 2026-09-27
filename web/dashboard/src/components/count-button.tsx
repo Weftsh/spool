@@ -13,8 +13,8 @@ import { cn } from "@/lib/utils";
 /// second. Blank, "—", and a hidden cap all say the second thing.
 ///
 /// Anything that is not a count still says `–`. A NaN in the cap is a
-/// bug upstream of here, and printing `NaN` beside a star glyph is the
-/// one rendering worse than admitting we do not know.
+/// bug upstream of here, and printing `NaN` beside a glyph is the one
+/// rendering worse than admitting we do not know.
 export function countLabel(n: number): string {
   return Number.isFinite(n) && n >= 0 ? formatCount(n) : "–";
 }
@@ -22,27 +22,21 @@ export function countLabel(n: number): string {
 /// The masthead's split control: a labelled action, and the number it
 /// is about, in one bordered shape.
 ///
-/// Watch, Fork and Star are one row of siblings and a person reads them
-/// as one object, so they are one component rather than three that
-/// happen to agree. They did not agree: `StarButton` wrapped itself in a
-/// `flex-col` to hang an origin-stars caption under the button, which
-/// made it taller than the other two inside an `items-center` row and
-/// left the caption reading as an annotation on Star alone. A test
-/// already existed asserting Fork and Star were the same height —
-/// written after a `size` variant drifted — which is the shape of a
-/// problem that keeps coming back until the siblings stop being
-/// separately drawn.
+/// Watch and Fork are one row of siblings and a person reads them as one
+/// object, so they are one component rather than two that happen to
+/// agree. Separately drawn siblings drifted apart in height more than
+/// once, which is the shape of a problem that keeps coming back until
+/// they stop being separately drawn.
 ///
 /// The count sits in its own `bg-surface-2` cap behind a hairline rather
 /// than inline in the label, because that is the boundary that lets the
 /// number be scanned without being read: a column of three caps at the
 /// same x is a column of numbers. It is mono, per DESIGN.md.
 ///
-/// One `<button>`, not a button and a link. GitHub's Star is two
-/// controls — the count is a link to the stargazers list — and we have
-/// no stargazers page to send anybody to. A second focus stop that
-/// leads nowhere costs a keyboard user a keystroke on every repository
-/// page in exchange for nothing.
+/// One `<button>`, not a button and a link: there is no page listing
+/// the people behind a count to send anybody to, and a second focus stop
+/// that leads nowhere costs a keyboard user a keystroke on every
+/// repository page in exchange for nothing.
 export const CountButton = React.forwardRef<
   HTMLButtonElement,
   {
@@ -52,7 +46,7 @@ export const CountButton = React.forwardRef<
     label: string;
     count: number;
     /// Whether this control reports a state the viewer has chosen —
-    /// starred, watching. Drawn as a filled surface rather than a
+    /// watching everything. Drawn as a filled surface rather than a
     /// colour, so it survives being read by somebody who cannot see the
     /// difference between our two greens.
     active?: boolean;
@@ -61,7 +55,7 @@ export const CountButton = React.forwardRef<
     /// the accessibility tree rather than labelled.
     menu?: boolean;
     /// Overrides the accessible name. Give this only when the visible
-    /// label is not the whole sentence — "Sign in to fork" over a
+    /// label is not the whole sentence — "Fork this repository" over a
     /// button reading "Fork". The count stays in the visible text
     /// either way, so a test can still read it off the control.
     ariaLabel?: string;

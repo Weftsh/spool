@@ -1,11 +1,10 @@
-// The About rail on a public repository: language mix, licence,
-// community files and topics.
+// The About rail on a repository: language mix, licence, community
+// files and topics.
 //
-// The suite runs signed out, because that is who the panel is for. A
-// stranger deciding whether a project is worth their afternoon is
-// exactly the reader who cannot ask anyone what it is written in or
-// what licence it carries, and every one of these facts is served to
-// them anonymously.
+// The suite runs as a signed-in reader who may not administer the
+// repository, because that is who the panel is mostly for: somebody
+// arriving at a project they did not start, who wants to know what it
+// is written in and what licence it carries without asking anybody.
 //
 // Two of the assertions here are not about rendering at all:
 //
@@ -17,17 +16,16 @@
 //   test can see because the transport is the thing that is wrong.
 
 import { expect, test } from "@playwright/test";
-import { REPOS } from "./fixtures";
+import { ME, REPOS } from "./fixtures";
 
 const widget = {
   ...REPOS.repos[0],
-  public: true,
   description: "the fast one",
   // The server's own answer to "may this viewer administer the repo",
   // which is what gates the topic editor. Explicitly false here: every
-  // test in this file is a stranger unless it says otherwise, and a
-  // fixture that quietly granted admin would make the "no Edit topics
-  // button" assertions vacuous.
+  // test in this file is a reader without admin unless it says
+  // otherwise, and a fixture that quietly granted admin would make the
+  // "no Edit topics button" assertions vacuous.
   viewer_admin: false,
 };
 
@@ -66,7 +64,7 @@ const META = {
 /// It is a named helper rather than three copies of the same route
 /// because `src/hermetic-specs.test.ts` checks this **per test**, and
 /// it cannot see one level of indirection: `asAdmin` delegating to
-/// `anonymous` looked like three unguarded tests. Both helpers now
+/// `reader` looked like three unguarded tests. Both helpers now
 /// establish the refusal themselves, which is also the honest reading —
 /// each is a complete setup, not half of one.
 async function hermetic(page: import("@playwright/test").Page) {
@@ -75,15 +73,13 @@ async function hermetic(page: import("@playwright/test").Page) {
   );
 }
 
-/// A signed-out browser with nothing mocked but this page's reads.
-async function anonymous(
+/// A signed-in reader with nothing mocked but this page's reads.
+async function reader(
   page: import("@playwright/test").Page,
   meta: unknown = META,
 ) {
   await hermetic(page);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   await page.route("**/v1/orgs/acme/repos/widget", (r) =>
     r.fulfill({ status: 200, json: widget }),
   );
@@ -95,7 +91,7 @@ async function anonymous(
 test("the language bar names three languages and aggregates the rest", async ({
   page,
 }) => {
-  await anonymous(page);
+  await reader(page);
   await page.goto("/acme/widget");
 
   const segments = page.getByTestId("language-segment");
@@ -114,7 +110,7 @@ test("the language bar names three languages and aggregates the rest", async ({
 test("the licence and the community files are named and link to the files", async ({
   page,
 }) => {
-  await anonymous(page);
+  await reader(page);
   await page.goto("/acme/widget");
 
   // "MIT license" — GitHub's exact wording, built from the SPDX id and
@@ -157,7 +153,7 @@ test("every one of the six health rows is present, whether the file is or not", 
   // six still gets six rows — the rail is a checklist, and a checklist
   // that hides its unticked boxes is a list of things somebody already
   // did.
-  await anonymous(page, {
+  await reader(page, {
     ...META,
     license: null,
     community: [],
@@ -181,18 +177,16 @@ test("every one of the six health rows is present, whether the file is or not", 
 });
 
 test("the Activity row leads to a page that exists", async ({ page }) => {
-  // It led to `/{owner}/{repo}/insights`, which 404s — on every
-  // repository page in the product, public or private, signed in or
-  // out. Insights has no body and was deliberately kept out of the tab
-  // strip for that exact reason; the rule is written above `TABS` in
-  // `forge/index.tsx` ("add a tab here when its body exists, not when
-  // its name is decided") because the not-found copy offers to sign you
-  // in, so a visitor was invited to authenticate for a feature that is
-  // never coming. This rail kept linking there anyway.
+  // It led to `/{owner}/{repo}/insights`, which 404'd — on every
+  // repository page in the product. Insights had no body and was
+  // deliberately kept out of the tab strip for that exact reason; the
+  // rule is written above `TABS` in `forge/index.tsx` ("add a tab here
+  // when its body exists, not when its name is decided"). This rail
+  // kept linking there anyway.
   //
   // Asserting the destination and not merely that a link is present:
   // a link is what the bug had.
-  await anonymous(page);
+  await reader(page);
   await page.goto("/acme/widget");
 
   const activity = page.getByRole("link", { name: "Activity", exact: true });
@@ -215,7 +209,7 @@ test("nothing in the About rail points at a tab that has no body", async ({
   // The class, not the instance. Insights was one name; the rail links
   // to five other things and any of them could be pointed at a route
   // the tab strip deliberately does not carry.
-  await anonymous(page);
+  await reader(page);
   await page.goto("/acme/widget");
 
   // By element, not by role: an `<aside>` only exposes `complementary`
@@ -235,7 +229,7 @@ test("nothing in the About rail points at a tab that has no body", async ({
   expect(hrefs.length).toBeGreaterThan(0);
   for (const href of hrefs) {
     expect(href, `the About rail links to ${href}`).not.toMatch(
-      /\/(insights|feed|stars|topics|notifications)(\/|$)/,
+      /\/(insights|explore|feed|stars|topics|notifications)(\/|$)/,
     );
   }
 });
@@ -245,7 +239,7 @@ test("an unrecognised licence says so rather than naming a guess", async ({
 }) => {
   // The whole value of the badge is that a reader can believe it.
   // People redistribute code on the strength of one.
-  await anonymous(page, {
+  await reader(page, {
     ...META,
     license: {
       path: "COPYING",
@@ -272,7 +266,7 @@ test("a dual-licensed project lists both rather than reading as unlicensed", asy
   // what it did until the GitHub comparison — makes the project read as
   // having no licence at all. GitHub answers "Apache-2.0 and 2 other
   // licenses found"; we decline to pick a primary and list them.
-  await anonymous(page, {
+  await reader(page, {
     ...META,
     license: {
       path: null,
@@ -296,7 +290,7 @@ test("a dual-licensed project lists both rather than reading as unlicensed", asy
 });
 
 test("a partial walk says the bar is partial", async ({ page }) => {
-  await anonymous(page, { ...META, languages_truncated: true });
+  await reader(page, { ...META, languages_truncated: true });
   await page.goto("/acme/widget");
   await expect(page.getByText(/larger than\s+one pass counts/)).toBeVisible();
 });
@@ -304,27 +298,27 @@ test("a partial walk says the bar is partial", async ({ page }) => {
 test("topics are pills that lead to the other projects like this one", async ({
   page,
 }) => {
-  await anonymous(page);
+  await reader(page);
   await page.goto("/acme/widget");
   await expect(
     page.getByRole("link", { name: "rust", exact: true }),
-  ).toHaveAttribute("href", "/explore?topic=rust");
+  ).toHaveAttribute("href", "/search?topic=rust");
   await expect(
     page.getByRole("link", { name: "object-storage" }),
-  ).toHaveAttribute("href", "/explore?topic=object-storage");
-  // A stranger is shown the topics and never the form.
+  ).toHaveAttribute("href", "/search?topic=object-storage");
+  // A reader without admin is shown the topics and never the form.
   await expect(page.getByRole("button", { name: "Edit topics" })).toHaveCount(
     0,
   );
 });
 
-test("a repository with no topics shows a stranger nothing at all", async ({
+test("a repository with no topics shows a reader nothing at all", async ({
   page,
 }) => {
   // Not an empty "Topics" heading with a blank under it. A rail of
   // placeholders reads as an unfinished product rather than as a young
   // project.
-  await anonymous(page, { ...META, topics: [] });
+  await reader(page, { ...META, topics: [] });
   await page.goto("/acme/widget");
   // Anchored on something that can only exist *after* `/meta` resolved.
   // A bare `toHaveCount(0)` is satisfied by the loading state, so it
@@ -342,7 +336,7 @@ test("a repository with no recognised source draws no bar", async ({
   // Not a full-width band of one colour, which is what a zero total
   // produces if it is "defended" with a default, and which reads as
   // "100% of something".
-  await anonymous(page, { ...META, languages: [] });
+  await reader(page, { ...META, languages: [] });
   await page.goto("/acme/widget");
   // The topics are still populated in this fixture so the absence
   // below is asserted against a *loaded* rail rather than against the
@@ -372,7 +366,7 @@ test("the panel failing does not take the repository page with it", async ({
   // passing against a component that had stopped rendering a language
   // bar under any circumstances at all.
   let failing = true;
-  await anonymous(page);
+  await reader(page);
   await page.route("**/v1/orgs/acme/repos/widget/meta", (r) =>
     failing
       ? r.fulfill({ status: 500, json: { error: "store unreachable" } })
@@ -398,11 +392,11 @@ test("the panel failing does not take the repository page with it", async ({
 /// mocking that endpoint here would now grant nothing, which is how
 /// these three tests found the change.
 async function asAdmin(page: import("@playwright/test").Page) {
-  // Before `anonymous`, not after: a second catch-all registered later
+  // Before `reader`, not after: a second catch-all registered later
   // would be the most recent handler and would win over every specific
   // route below it, refusing the very calls this file mocks.
   await hermetic(page);
-  await anonymous(page);
+  await reader(page);
   await page.route("**/v1/orgs/acme/repos/widget", (r) =>
     r.fulfill({ status: 200, json: { ...widget, viewer_admin: true } }),
   );
@@ -522,10 +516,10 @@ test("a topic pill leads to the repositories carrying it", async ({ page }) => {
   // The rail invited this in as many words — "a word or two makes this
   // findable" — and it was false twice over: search never read the
   // topics table, so typing the word found nothing, and the pill linked
-  // to `/explore?topic=…`, which nothing parsed, so clicking it landed
+  // to an address whose `topic` nothing parsed, so clicking it landed
   // on the unfiltered list of everything. A maintainer following the
   // prompt got no findability and no sign that anything had gone wrong.
-  await anonymous(page);
+  await reader(page);
   let asked: string | null = null;
   await page.route("**/v1/search/repos*", (r) => {
     asked = new URL(r.request().url()).searchParams.get("topic");
@@ -539,7 +533,6 @@ test("a topic pill leads to the repositories carrying it", async ({ page }) => {
             org: "acme",
             name: "widget",
             description: "the fast one",
-            public: true,
             kind: "native",
             created_at: Date.now(),
           },
@@ -551,10 +544,10 @@ test("a topic pill leads to the repositories carrying it", async ({ page }) => {
   await page.goto("/acme/widget");
 
   const pill = page.getByRole("link", { name: "rust", exact: true });
-  await expect(pill).toHaveAttribute("href", "/explore?topic=rust");
+  await expect(pill).toHaveAttribute("href", "/search?topic=rust");
   await pill.click();
 
-  await expect(page).toHaveURL(/\/explore\?topic=rust$/);
+  await expect(page).toHaveURL(/\/search\?topic=rust$/);
   await expect(
     page.getByRole("heading", { name: "Repositories tagged rust" }),
   ).toBeVisible();

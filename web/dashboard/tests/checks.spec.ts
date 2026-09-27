@@ -29,9 +29,9 @@
 import { expect, test, type Page } from "@playwright/test";
 import { ME, REPOS } from "./fixtures";
 
-/// The repository the whole file reads. Public, because checks on a
-/// public repository are public; `viewer_admin` decides only whether the
-/// two write-shaped controls appear, and each test that cares says so.
+/// The repository the whole file reads, by a signed-in member.
+/// `viewer_admin` decides only whether the two write-shaped controls
+/// appear, and each test that cares says so.
 ///
 /// `viewer_write: false` for the same reason it says `viewer_admin:
 /// false` — the caller here is a reader. It used to be a reader by
@@ -40,7 +40,6 @@ import { ME, REPOS } from "./fixtures";
 /// inherited by accident is one no test in this file is asserting.
 const widget = {
   ...REPOS.repos[0],
-  public: true,
   viewer_admin: false,
   viewer_write: false,
 };
@@ -138,7 +137,6 @@ interface Options {
   workflows?: string[];
   poll?: Record<string, unknown> | null;
   admin?: boolean;
-  signedIn?: boolean;
 }
 
 interface Mocked {
@@ -170,9 +168,7 @@ async function checksPage(page: Page, opts: Options = {}): Promise<Mocked> {
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
   await page.route("**/v1/auth/me", (r) =>
-    opts.signedIn === false
-      ? r.fulfill({ status: 401, json: { error: "not signed in" } })
-      : r.fulfill({ status: 200, json: ME }),
+    r.fulfill({ status: 200, json: ME }),
   );
   await page.route("**/v1/orgs/acme/repos/widget", (r) =>
     r.fulfill({
@@ -664,13 +660,12 @@ test("the re-poll control asks GitHub once, and never says re-run", async ({
   }).toPass();
 });
 
-test("a stranger reads a public repository's checks and is offered no controls", async ({
+test("a reader who may not administer reads the checks and is offered no controls", async ({
   page,
 }) => {
-  // Checks on a public repository are public, and this is the reader the
-  // page is most useful to: somebody deciding whether a project is worth
-  // their afternoon, who cannot ask anybody whether its build is green.
-  await checksPage(page, { signedIn: false, admin: false });
+  // A member with the `viewer` role reads every row, and is not handed a
+  // control the server would refuse.
+  await checksPage(page, { admin: false });
   await page.goto("/acme/widget/checks");
 
   await expect(rows(page)).toHaveCount(3);
@@ -695,7 +690,7 @@ test("/actions redirects to /checks and lands on the real tab", async ({
 
   // The address people's fingers type. 404ing them to prove a naming
   // point helps nobody, and two live URLs for one page is two things to
-  // share and two for a crawler to index.
+  // share.
   await expect(page).toHaveURL(/\/acme\/widget\/checks$/);
   // And it is the tab, not merely the address: a redirect that landed
   // on a shell with no list would satisfy the URL assertion alone.
@@ -810,7 +805,7 @@ test("composed changeset runs have a place on the member's Checks tab", async ({
   // and the consequence was that they appeared on the member's Checks
   // tab nowhere at all. Composing three repositories and opening one of
   // them showed the push run and nothing else. Found on the manual pass.
-  const mock = await checksPage(page, { signedIn: false, admin: false });
+  const mock = await checksPage(page, { admin: false });
   const asked: string[] = [];
   await page.route(/\/workflow-runs(\?|$)/, (route) => {
     const url = new URL(route.request().url());
@@ -882,7 +877,7 @@ test("composed changeset runs have a place on the member's Checks tab", async ({
 test("a repository with no composed runs shows no changeset panel", async ({
   page,
 }) => {
-  await checksPage(page, { signedIn: false, admin: false });
+  await checksPage(page, { admin: false });
   await page.route(/\/workflow-runs(\?|$)/, (r) =>
     r.fulfill({ status: 200, json: { runs: [] } }),
   );

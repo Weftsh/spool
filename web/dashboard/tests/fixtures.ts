@@ -1,7 +1,7 @@
 /// The mocked control plane every dashboard spec runs against.
 ///
 /// These live here rather than in `dashboard.spec.ts` because they are
-/// no longer one suite's private furniture: the public-repo, profile,
+/// no longer one suite's private furniture: the forge, profile,
 /// repo-tab and issues suites all need the same org, the same three
 /// repos and the same two ways of signing in. A fixture copied into a
 /// second spec is a fixture that drifts, and a suite that drifts from
@@ -17,9 +17,9 @@ import { expect, type Page } from "@playwright/test";
 /// rather than inferred, and the repository page gates a real control on
 /// each: Settings on the first, Insights on the second, the Changes
 /// tab's Land and start-review forms on the third. A fixture without
-/// them renders the page a *stranger* gets, and every assertion about a
-/// member's controls fails for a reason that has nothing to do with the
-/// test.
+/// them renders the page a reader with no role gets, and every
+/// assertion about a member's controls fails for a reason that has
+/// nothing to do with the test.
 export const REPOS = {
   repos: [
     {
@@ -28,7 +28,6 @@ export const REPOS = {
       name: "widget",
       description: "the fast one",
       kind: "mirror",
-      public: false,
       default_branch: "main",
       origin_url: "acme/widget",
       last_sync_at: Date.now() - 30_000,
@@ -47,7 +46,6 @@ export const REPOS = {
       name: "broken-mirror",
       description: null,
       kind: "mirror",
-      public: false,
       default_branch: "main",
       origin_url: "acme/broken",
       last_sync_at: Date.now() - 600_000,
@@ -66,7 +64,6 @@ export const REPOS = {
       name: "session-1",
       description: null,
       kind: "native",
-      public: false,
       default_branch: "main",
       origin_url: null,
       last_sync_at: null,
@@ -83,7 +80,6 @@ export const REPOS = {
 };
 
 export const USAGE = {
-  plan: "free",
   days: [
     {
       day: "2026-08-20",
@@ -102,51 +98,6 @@ export const USAGE = {
       reported_at: 1,
     },
   ],
-};
-
-/// Copied from the server's billing view, not invented: every field
-/// the page decides on is here, with the numbers the deployment sells
-/// at. A fixture that drifts from the server is a suite that passes
-/// against a page the server never renders.
-///
-/// This is the **older** shape — minutes only, no pools — on purpose:
-/// the specs that read it assert the page a server without usage
-/// billing renders, and `billing-meters.spec.ts` builds the pooled
-/// shape on top of it.
-export const BILLING = {
-  org: "acme",
-  plan: "paid",
-  billable_seats: 3,
-  paid_seats: 4,
-  status: "active",
-  current_period_end: Date.UTC(2026, 11, 1),
-  card_on_file: true,
-  may_create_public: true,
-  may_create_private: true,
-  may_add_people: true,
-  price_per_seat_cents: 400,
-  paid_minutes_per_seat: 2000,
-  free_minutes: 500,
-  ci_minutes_limit: 8000,
-  ci_minutes_used: 100,
-  ci_minutes_remaining: 7900,
-  ci_suspended_reason: null,
-  ci_suspended_at: null,
-};
-
-/// Nothing bought yet: public repositories and members, no private
-/// ones, and no card asked for.
-export const FREE_BILLING = {
-  ...BILLING,
-  plan: "free",
-  paid_seats: 0,
-  billable_seats: 1,
-  status: null,
-  current_period_end: null,
-  may_create_private: false,
-  ci_minutes_limit: 500,
-  ci_minutes_used: 0,
-  ci_minutes_remaining: 500,
 };
 
 export const METRICS = {
@@ -518,8 +469,7 @@ export async function mockApi(
   // whatever is listening on :8080, which during development is a real
   // seeded server. A suite in that state is hermetic only while nobody
   // has the manual stack up, which is the sort of intermittency that
-  // gets called a flake and re-run. `tests/public.spec.ts` spells the
-  // same hazard out at length; it has been found here once already.
+  // gets called a flake and re-run. It has been found here once already.
   //
   // Empty rather than populated on purpose: this is the fixture for
   // suites that are about something else, and a language bar appearing
@@ -564,9 +514,6 @@ export async function mockApi(
   );
   await page.route("**/v1/orgs/acme/repos/*/tags", (r) =>
     r.fulfill({ json: { tags: [] } }),
-  );
-  await page.route("**/v1/orgs/acme/repos/*/star", (r) =>
-    r.fulfill({ json: { starred: false, stars: 0, origin: null } }),
   );
   await page.route("**/v1/orgs/acme/repos/*/checks/runs*", (r) =>
     r.fulfill({ json: { runs: [], workflows: [], next_before: null } }),

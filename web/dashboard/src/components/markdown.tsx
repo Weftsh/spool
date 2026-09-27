@@ -5,9 +5,9 @@ import { PROSE_LINK } from "@/lib/links";
 
 /// Rendered markdown: a README, a repository description, a change comment.
 ///
-/// The content is **untrusted** — it is whatever a stranger pushed to a
-/// public repository — so the shape of this file is driven by that fact
-/// more than by typography.
+/// The content is **untrusted** — it is whatever anybody with push
+/// access, or the origin a mirror follows, put in a repository — so the
+/// shape of this file is driven by that fact more than by typography.
 ///
 /// **We never build an HTML string.** `marked` is used as a *lexer only*:
 /// `Lexer.lex` returns a token tree, and we walk that tree into React

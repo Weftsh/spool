@@ -7,17 +7,15 @@ import {
   homepageLabel,
   latestTag,
   licenseLabel,
-  originStarsLine,
   overflow,
   parseVersionTag,
   type HealthKind,
 } from "./about";
 
-// The About rail is the OSS calling card, and almost every honesty
-// question it raises is answerable without a DOM: whether an absent
-// health file survives as an *absence* rather than as a missing row,
-// whether "latest" means anything we can defend, and whether an imported
-// star count that we never imported renders as zero. Those are the tests
+// The About rail is a repository's calling card, and almost every
+// honesty question it raises is answerable without a DOM: whether an
+// absent health file survives as an *absence* rather than as a missing
+// row, and whether "latest" means anything we can defend. Those are the tests
 // worth having, so the logic lives in the module and the components
 // above it are arrangement.
 
@@ -366,71 +364,28 @@ describe("overflow", () => {
 });
 
 describe("countRows", () => {
-  it("names the three counts in FORGE-UX's order", () => {
+  it("names the counts in FORGE-UX's order", () => {
     expect(
-      countRows({ stars: 4, watchers: 12, forks: 0 }).map((r) => [
+      countRows({ watchers: 12, forks: 0 }).map((r) => [
         r.kind,
         r.value,
         r.label,
       ]),
     ).toEqual([
-      ["stars", 4, "stars"],
       ["watching", 12, "watching"],
       ["forks", 0, "forks"],
     ]);
   });
 
   it("uses the singular for exactly one", () => {
-    const rows = countRows({ stars: 1, watchers: 1, forks: 1 });
-    expect(rows.map((r) => r.label)).toEqual(["star", "watching", "fork"]);
+    const rows = countRows({ watchers: 1, forks: 1 });
+    expect(rows.map((r) => r.label)).toEqual(["watching", "fork"]);
   });
 
   it("renders zero rather than hiding the row", () => {
-    // A project with no stars is a fact about the project. A missing row
-    // reads as a missing feature.
-    expect(countRows({ stars: 0, watchers: 0, forks: 0 })).toHaveLength(3);
-  });
-});
-
-describe("originStarsLine", () => {
-  it("says nothing when we never imported a count", () => {
-    // `null` is not "the origin reported zero". Rendering `0 on GitHub`
-    // under a project with sixty thousand stars is the most damaging
-    // thing this rail could say.
-    expect(originStarsLine(null)).toBe(null);
-  });
-
-  it("names the forge from the origin URL", () => {
-    // Compacted by the house `formatCount`, which keeps one decimal
-    // below ten thousand and drops it above — so a big number is "60k"
-    // and not "60.3k". Pinned here because the rail must not grow its
-    // own number formatter beside the one every other count uses.
-    expect(
-      originStarsLine({
-        stars: 6_030,
-        at: 1,
-        url: "https://github.com/rails/rails",
-      }),
-    ).toBe("6.0k on GitHub");
-    expect(
-      originStarsLine({
-        stars: 60_300,
-        at: 1,
-        url: "https://github.com/rails/rails",
-      }),
-    ).toBe("60k on GitHub");
-  });
-
-  it("says 'upstream' for a forge it cannot name", () => {
-    expect(originStarsLine({ stars: 12, at: null, url: null })).toBe(
-      "12 on upstream",
-    );
-  });
-
-  it("renders an origin that really did report zero", () => {
-    expect(
-      originStarsLine({ stars: 0, at: 1, url: "https://gitlab.com/a/b" }),
-    ).toBe("0 on GitLab");
+    // A project nobody has forked is a fact about the project. A missing
+    // row reads as a missing feature.
+    expect(countRows({ watchers: 0, forks: 0 })).toHaveLength(2);
   });
 });
 

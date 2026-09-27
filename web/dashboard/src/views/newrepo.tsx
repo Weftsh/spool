@@ -15,7 +15,6 @@
 
 import { useCallback, useEffect, useState } from "react";
 import {
-  ApiError,
   api,
   type GithubInstallation,
   type Probe,
@@ -27,7 +26,6 @@ import { href, navigateTo } from "@/router";
 import { formatBytes } from "@/format";
 import { Alert } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { Paywall } from "@/components/paywall";
 import { PROSE_LINK } from "@/lib/links";
 import {
   CONTENTS_WRITE,
@@ -55,60 +53,14 @@ export function NewRepo(props: {
   /// the screen can open on the picker instead of making them start
   /// over.
   justConnected?: boolean;
-  /// The current namespace is the person's own. A personal namespace
-  /// holds only public repositories — private ones live in an
-  /// organization with a subscription — so the form starts public and
-  /// says where private goes, and a refusal offers to make an
-  /// organization rather than to subscribe to nothing.
-  personal?: boolean;
-  /// Open the organization form. Creating one has no address of its own
-  /// (it is an entry in the sidebar's switcher), so this is a callback
-  /// rather than a link.
-  onCreateOrg?: () => void;
 }) {
-  const { session, personal } = props;
+  const { session } = props;
   const [mode, setMode] = useState<Mode>("mirror");
   const [name, setName] = useState("");
   const [description, setDescription] = useState("");
-  // Public by default in a personal namespace, because private is the
-  // one thing it cannot hold and a default that is refused on submit is
-  // a default that teaches the rule by failing.
-  const [isPublic, setPublic] = useState(!!personal);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [created, setCreated] = useState<string | null>(null);
-  // The server refused a private repository for want of a subscription,
-  // and this is how to try again once there is one. Held as the retry
-  // itself rather than as a flag, so the paywall's "continue" does the
-  // exact thing that was refused — the form is not filled in twice.
-  const [paywall, setPaywall] = useState<(() => Promise<void>) | null>(null);
-  // The server refused a private repository because this is a personal
-  // namespace. The sentence is the server's; the action is the only one
-  // that helps, and it is not "subscribe" — there is nothing here to
-  // subscribe to.
-  const [needsOrg, setNeedsOrg] = useState<string | null>(null);
-
-  /// A refusal, sorted: a personal namespace's 402 offers an
-  /// organization; any other 402 with a way to retry becomes the
-  /// paywall; everything else is the server's sentence, shown as it was
-  /// said.
-  const failed = (err: unknown, retry?: () => Promise<void>) => {
-    if (err instanceof ApiError && err.status === 402) {
-      if (isPersonalRefusal(err.message)) {
-        setError(null);
-        setPaywall(null);
-        setNeedsOrg(err.message);
-        return;
-      }
-      if (retry) {
-        setError(null);
-        setNeedsOrg(null);
-        setPaywall(() => retry);
-        return;
-      }
-    }
-    setError(String((err as Error)?.message ?? err));
-  };
 
   const submitEmpty = async () => {
     setBusy(true);
@@ -116,12 +68,12 @@ export function NewRepo(props: {
     try {
       const repo = await api.createRepo(session, {
         name,
-        public: isPublic,
         description: description.trim() || undefined,
       });
       setCreated(repo.name);
     } catch (err) {
-      failed(err, submitEmpty);
+      // The server's sentence, shown as it was said.
+      setError(String((err as Error)?.message ?? err));
     } finally {
       setBusy(false);
     }
@@ -163,59 +115,6 @@ export function NewRepo(props: {
 
       {error && <Alert variant="destructive">{error}</Alert>}
 
-      {needsOrg && (
-        <div
-          role="region"
-          aria-label="Organization needed"
-          className="space-y-3 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm"
-        >
-          <p>{needsOrg}</p>
-          <div className="flex flex-wrap gap-2">
-            <Button
-              type="button"
-              onClick={() => {
-                setNeedsOrg(null);
-                props.onCreateOrg?.();
-              }}
-            >
-              Create an organization
-            </Button>
-            <Button
-              type="button"
-              variant="outline"
-              onClick={() => {
-                setNeedsOrg(null);
-                setPublic(true);
-              }}
-            >
-              Keep it public
-            </Button>
-          </div>
-        </div>
-      )}
-
-      {paywall && (
-        <Paywall
-          session={session}
-          what="a private repository"
-          declineLabel="Keep it public"
-          intent={{
-            org: session.org,
-            kind: "create",
-            name,
-            description: description.trim() || undefined,
-          }}
-          onPaid={() => {
-            setPaywall(null);
-            void paywall();
-          }}
-          onDecline={() => {
-            setPaywall(null);
-            setPublic(true);
-          }}
-        />
-      )}
-
       {created ? (
         <FirstSync
           session={session}
@@ -242,13 +141,7 @@ export function NewRepo(props: {
             value={description}
             onChange={setDescription}
             placeholder="the fast one"
-            hint="Optional, one line. This is what search matches, and the only thing a stranger can find a public repo by."
-          />
-          <Visibility
-            value={isPublic}
-            onChange={setPublic}
-            personal={personal}
-            onCreateOrg={props.onCreateOrg}
+            hint="Optional, one line. This is what search matches."
           />
           <Button disabled={busy || !name.trim()}>
             {busy ? "Creating…" : "Create repository"}
@@ -257,14 +150,9 @@ export function NewRepo(props: {
       ) : (
         <MirrorFlow
           session={session}
-          isPublic={isPublic}
-          setPublic={setPublic}
-          personal={personal}
-          onCreateOrg={props.onCreateOrg}
           justConnected={props.justConnected}
           onCreated={setCreated}
           onError={setError}
-          onFailed={failed}
         />
       )}
     </div>
@@ -274,17 +162,9 @@ export function NewRepo(props: {
 /// Paste a URL; everything else follows from what the probe says.
 function MirrorFlow(props: {
   session: Session;
-  isPublic: boolean;
-  setPublic: (v: boolean) => void;
-  personal?: boolean;
-  onCreateOrg?: () => void;
   justConnected?: boolean;
   onCreated: (repo: string) => void;
   onError: (e: string | null) => void;
-  /// A refusal of the mirror itself, with the way to retry it. Kept
-  /// apart from `onError`, which only carries a sentence: a 402 here
-  /// is answered with a subscription and a second attempt, not text.
-  onFailed: (err: unknown, retry: () => Promise<void>) => void;
 }) {
   const { session } = props;
   const [origin, setOrigin] = useState("");
@@ -316,11 +196,10 @@ function MirrorFlow(props: {
         origin: full,
         provider: "github",
         installation_id: installation,
-        public: props.isPublic,
       });
       props.onCreated(out.repo.name);
     } catch (e) {
-      props.onFailed(e, () => create(full, installation));
+      props.onError(String((e as Error)?.message ?? e));
     } finally {
       setBusy(false);
     }
@@ -355,12 +234,6 @@ function MirrorFlow(props: {
           }}
           placeholder="github.com/owner/repo"
           hint="A GitHub URL, owner/repo, or any git URL."
-        />
-        <Visibility
-          value={props.isPublic}
-          onChange={props.setPublic}
-          personal={props.personal}
-          onCreateOrg={props.onCreateOrg}
         />
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" disabled={busy || !origin.trim()}>
@@ -640,9 +513,7 @@ function PickerPushNote(props: { inst: GithubInstallation | undefined }) {
 ///
 /// Creation answers 202 and the ingest runs in the background, so this
 /// is the difference between "it worked" and a screen that looks stuck.
-/// Exported for the billing screen, which finishes a create the paywall
-/// wrote down and lands the person exactly where this form would have.
-export function FirstSync(props: {
+function FirstSync(props: {
   session: Session;
   repo: string;
   mirror: boolean;
@@ -774,64 +645,6 @@ function Field(props: {
         <span className="mt-1 block text-ink-3">{props.hint}</span>
       )}
     </label>
-  );
-}
-
-/// The start of the sentence the server answers a private create in a
-/// personal namespace with. The rest of it says to make an organization
-/// from the dashboard, which is what the action beside it does.
-///
-/// Matched on the prefix rather than the status alone: a free
-/// organization's private create is also a 402, and that one is
-/// answered with a subscription. The two refusals share a status and
-/// nothing else.
-const PERSONAL_PRIVATE = "quota: private repositories live in an organization";
-
-/// Is this 402 the personal-namespace one?
-///
-/// Exported for the test that pins the exact server sentence: if the
-/// server rewords it, the vitest fails here rather than the paywall
-/// quietly appearing on a namespace that has nothing to subscribe to.
-export function isPersonalRefusal(message: string): boolean {
-  return message.startsWith(PERSONAL_PRIVATE);
-}
-
-function Visibility(props: {
-  value: boolean;
-  onChange: (v: boolean) => void;
-  personal?: boolean;
-  onCreateOrg?: () => void;
-}) {
-  return (
-    <div className="space-y-1 text-sm">
-      <label className="flex items-center gap-2">
-        <input
-          type="checkbox"
-          checked={props.value}
-          onChange={(e) => props.onChange(e.target.checked)}
-        />
-        <span>Anyone can read this repository</span>
-      </label>
-      {/* Said before the box is unticked, not after the server refuses
-          it: a personal namespace holds public repositories only, and
-          the rule is cheaper to read than to discover. */}
-      {props.personal && (
-        <p className="text-ink-3">
-          Private repositories live in an organization —{" "}
-          {/* Not "Create an organization": that is the refusal's
-              button, and two controls with one name is one the
-              walkthrough cannot tell apart. */}
-          <button
-            type="button"
-            className="text-brand hover:underline"
-            onClick={props.onCreateOrg}
-          >
-            create one
-          </button>{" "}
-          to hold private code.
-        </p>
-      )}
-    </div>
   );
 }
 

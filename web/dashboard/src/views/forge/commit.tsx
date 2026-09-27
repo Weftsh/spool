@@ -27,7 +27,7 @@ export function CommitView(props: {
   repo: string;
   sha: string;
   /// Passed down only so the checks strip can navigate in-app when a
-  /// row's `detail_url` is one of ours — a hosted run's page — instead
+  /// row's `detail_url` is one of ours — a workflow run's page — instead
   /// of opening a new tab onto our own SPA.
   navigate: (to: string, replace?: boolean) => void;
 }) {

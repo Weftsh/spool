@@ -1,7 +1,7 @@
-// Abuse controls, as a person meets them.
+// Blocked workflow runs, as a person meets them.
 //
-// Three refusals reach the dashboard as one state. A hosted run that is
-// `blocked` mirrors into the checks list as **queued** — deliberately,
+// Every refusal reaches the dashboard as one state. A workflow run that
+// is `blocked` mirrors into the checks list as **queued** — deliberately,
 // because nothing is wrong with the change and a red row would tell its
 // author to go and fix code that is fine — so on every page that lists
 // checks, a build waiting on a person is pixel-for-pixel a build about
@@ -26,39 +26,18 @@
 //   patchset must not put a button on this page.
 
 import { expect, test, type Page } from "@playwright/test";
-import { ME, REPOS, signInAsPerson } from "./fixtures";
+import { ME, REPOS } from "./fixtures";
 
 const NOW = Date.now();
 const TIP = "1".repeat(40);
 const OLD = "9".repeat(40);
 
-/// Noon UTC on 14 August 2026, in **milliseconds** — the unit
-/// `ci_suspended_at` is actually sent in (`runner_api.rs` stores
-/// `now_ms()`). It reached this dashboard as "seconds" secondhand, and
-/// converting a figure that needs no converting dated a 2026 suspension
-/// to the year 57000.
-const SUSPENDED_AT_MS = Date.UTC(2026, 7, 14, 12);
-
-/// What `formatDay` makes of it: "Aug 14" this year, "Aug 14, 2026"
-/// once the year has turned. Written out here rather than imported so
-/// that the spec is not asserting the implementation against itself.
-function expectedSuspendedDay(): string {
-  const d = new Date(SUSPENDED_AT_MS);
-  return d.toLocaleDateString(undefined, {
-    month: "short",
-    day: "numeric",
-    ...(d.getFullYear() === new Date().getFullYear()
-      ? {}
-      : { year: "numeric" }),
-  });
-}
-
 const FORK =
   "this change comes from a fork; a maintainer has to approve its workflows before they run";
-const SUSPENDED =
-  "hosted workflows are suspended for this organisation: mining software detected: xmrig";
-const BUDGET =
-  "this organisation has used its 2000 hosted-runner minutes for the month";
+/// A refusal that is not a fork's, under a code this bundle does not
+/// know — the shape any reason other than `fork` arrives in.
+const PAUSED =
+  "workflows are paused for this repository by an organization administrator";
 
 // `native`, and not incidentally: `REPOS.repos[0]` is a mirror, and a
 // mirror can never carry a change — `changes_api::create` refuses one at
@@ -68,7 +47,6 @@ const BUDGET =
 const widget = {
   ...REPOS.repos[0],
   name: "widget",
-  public: true,
   kind: "native",
   viewer_admin: false,
   viewer_write: false,
@@ -76,7 +54,7 @@ const widget = {
 
 interface Run {
   id: string;
-  blocked_reason?: "fork" | "budget" | "suspended" | null;
+  blocked_reason?: string | null;
   file: string;
   name: string;
   commit_sha: string;
@@ -131,7 +109,7 @@ interface Options {
   /// `true` gives the viewer `repo:write` — the same scope the land
   /// route demands, and so the same one approval is gated on.
   write?: boolean;
-  /// The hosted runs the repository answers with.
+  /// The workflow runs the repository answers with.
   runs?: Run[];
   /// The rows the change's checks route answers with.
   checks?: Record<string, unknown>[];
@@ -315,7 +293,7 @@ test("a fork's blocked run is explained, and a writer is offered approval in two
   // And the review itself is not held hostage by its own garnish. The
   // runs read began life inside the load's `Promise.all`, which made the
   // diff, the verdict and the land button all wait on a request that
-  // only annotates them: a deployment whose hosted-runner route was slow
+  // only annotates them: a deployment whose workflow-runs route was slow
   // showed "Loading…" over a review that had everything it needed.
   await expect(
     page.getByRole("button", { name: "Land on main" }),
@@ -332,11 +310,12 @@ test("a fork's blocked run is explained, and a writer is offered approval in two
   await expect(page.getByText(FORK)).toHaveCount(2);
 
   // One click arms; it does not run anything. A control that starts a
-  // stranger's code on our runners does not fire on a stray click.
+  // stranger's code on the organization's runners does not fire on a
+  // stray click.
   await page.getByRole("button", { name: "Approve and run workflows" }).click();
   expect(m.approvals).toBe(0);
   await expect(
-    page.getByText("This runs code from a fork on our runners."),
+    page.getByText("This runs code from a fork on this organization’s runners."),
   ).toBeVisible();
 
   await page.getByRole("button", { name: "Run them" }).click();
@@ -471,18 +450,18 @@ test("the checks panel says Blocked with the reason, not Queued", async ({
   ).toBeVisible();
 });
 
-test("an organisation over its minutes is told so, in the server's words", async ({
+test("a refusal that is not a fork's is told in the server's words", async ({
   page,
 }) => {
   // The same machinery, a different refusal — and the page renders it
-  // without knowing which of the three it is.
+  // without knowing which one it is.
   await changePage(page, {
     write: true,
-    runs: [run({ error: BUDGET })],
+    runs: [run({ error: PAUSED })],
   });
   // On the row and in the panel, and the page has not needed to know
-  // which of the three refusals this is to render either of them.
-  await expect(page.getByText(BUDGET)).toHaveCount(2);
+  // which refusal this is to render either of them.
+  await expect(page.getByText(PAUSED)).toHaveCount(2);
 });
 
 /// The Checks tab, where the same refusal has to survive a different
@@ -580,144 +559,14 @@ test("a row whose run is not blocked is left exactly as it was", async ({
   await expect(page.getByRole("img", { name: "Blocked" })).toHaveCount(0);
 });
 
-/// Remaining minutes on the org's billing view.
-///
-/// Driven through `signInAsPerson`, which registers the catch-all
-/// itself; only the billing route is answered here.
-async function billingPage(
-  page: Page,
-  over: Record<string, unknown>,
-): Promise<void> {
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({
-      json: {
-        org: "acme",
-        plan: "paid",
-        billable_seats: 3,
-        paid_seats: 3,
-        status: "active",
-        current_period_end: Date.UTC(2026, 11, 1),
-        card_on_file: true,
-        may_create_public: true,
-        may_create_private: true,
-        may_add_people: true,
-        price_per_seat_cents: 400,
-        paid_minutes_per_seat: 2000,
-        free_minutes: 500,
-        ...over,
-      },
-    }),
-  );
-  await page.getByRole("link", { name: "Billing" }).click();
-}
-
-test("billing shows what is left of the hosted-minutes window", async ({
+test("a fork change blocked for another reason gets the reason and no button", async ({
   page,
 }) => {
-  await billingPage(page, {
-    ci_minutes_limit: 2000,
-    ci_minutes_used: 1240,
-    ci_minutes_remaining: 760,
-  });
-  await expect(page.getByText("Hosted CI minutes")).toBeVisible();
-  await expect(page.getByText("760")).toBeVisible();
-  // Both figures. "760 left" alone gives a reader no idea whether that
-  // is most of the month or the last of it.
-  await expect(
-    page.getByText("1,240 of 2,000 minutes used in the last 30 days"),
-  ).toBeVisible();
-  await expect(page.getByText("being refused")).toHaveCount(0);
-});
-
-test("an exhausted budget says runs are being refused", async ({ page }) => {
-  await billingPage(page, {
-    ci_minutes_limit: 2000,
-    ci_minutes_used: 2000,
-    ci_minutes_remaining: 0,
-  });
-  await expect(
-    page.getByText("Hosted workflows are being refused"),
-  ).toBeVisible();
-  // And the question a maintainer asks straight afterwards, answered
-  // before they have to go and find out the hard way.
-  await expect(
-    page.getByText("Runs already going are left alone"),
-  ).toBeVisible();
-});
-
-test("a deployment that meters nothing says nothing", async ({ page }) => {
-  // Null is not zero. Rendering "0 minutes left" here would tell an
-  // organisation with working CI that its CI is dead — and it is what a
-  // page reaching for `?? 0` does.
-  await billingPage(page, { ci_minutes_limit: null });
-  await expect(page.getByText("Seats in use")).toBeVisible();
-  await expect(page.getByText("Hosted CI minutes")).toHaveCount(0);
-});
-
-test("a suspended organisation is told so on its billing page", async ({
-  page,
-}) => {
-  // The gap this closes: minutes and suspension are independent, and a
-  // suspended organisation usually still has most of its budget. So the
-  // minutes panel on its own said "1,940 minutes left" to somebody
-  // whose CI had been stopped for mining, and the reason was legible
-  // only on a change page they had no cause to open.
-  await billingPage(page, {
-    ci_minutes_limit: 2000,
-    ci_minutes_used: 60,
-    ci_minutes_remaining: 1940,
-    ci_suspended_reason: "mining software detected: xmrig",
-    // Noon, not UTC midnight: a midnight timestamp renders as the day
-    // before for every reader west of Greenwich, and reading a picked
-    // day as UTC midnight has been a real defect on this dashboard.
-    // Milliseconds, which is what the server sends.
-    ci_suspended_at: SUSPENDED_AT_MS,
-  });
-  await expect(page.getByText("Hosted CI is suspended")).toBeVisible();
-  // Verbatim, and the plentiful minutes are still shown beside it —
-  // they are true, they are just not the answer.
-  await expect(page.getByText("mining software detected: xmrig")).toBeVisible();
-  await expect(page.getByText("1,940")).toBeVisible();
-  // Seconds, not milliseconds: read as ms this date lands in 1970, and
-  // a suspension dated to the epoch reads as our bug rather than as
-  // what happened.
-  // The day the timestamp actually names, in the reader's own timezone
-  // — derived rather than typed, so the assertion is about the *unit*
-  // and not about where the machine running it happens to be. Multiplied
-  // into seconds-as-milliseconds the same number lands in the year
-  // 57000, which is the bug this discriminates against.
-  await expect(
-    page.getByText(`Suspended ${expectedSuspendedDay()}`),
-  ).toBeVisible();
-  await expect(page.getByText("an operator has to clear it")).toBeVisible();
-  await expect(page.getByText("Pushing and landing still work")).toBeVisible();
-});
-
-test("an organisation that is not suspended is told nothing about it", async ({
-  page,
-}) => {
-  // `null` is the whole test. A panel headed "Hosted CI is suspended"
-  // on a healthy organisation is worse than no panel at all.
-  await billingPage(page, {
-    ci_minutes_limit: 2000,
-    ci_minutes_used: 60,
-    ci_minutes_remaining: 1940,
-    ci_suspended_reason: null,
-    ci_suspended_at: null,
-  });
-  await expect(page.getByText("Hosted CI minutes")).toBeVisible();
-  await expect(page.getByText("Hosted CI is suspended")).toHaveCount(0);
-});
-
-test("a suspended organisation's fork change gets the reason and no button", async ({
-  page,
-}) => {
-  // The three refusals arrive as one state, and only one of them is
-  // answerable from this page. A fork change in a suspended org is
-  // blocked with the *suspension's* reason: approving it would trigger
-  // another run, which blocks again with the same sentence, and the
-  // server answers 409 to somebody the page had just invited to press a
+  // Every refusal arrives as one state, and only the fork's is
+  // answerable from this page. A fork change blocked for some other
+  // reason carries *that* reason: approving it would trigger another
+  // run, which blocks again with the same sentence, and the server
+  // answers 409 to somebody the page had just invited to press a
   // button. So the reason is shown and the control is not offered.
   //
   // The viewer here *may* land the change — the gate being tested is the
@@ -726,15 +575,15 @@ test("a suspended organisation's fork change gets the reason and no button", asy
     write: true,
     runs: [
       run({
-        blocked_reason: "suspended",
-        error: SUSPENDED,
+        blocked_reason: "paused",
+        error: PAUSED,
       }),
     ],
     checks: [refusalRow()],
   });
   // Twice: once on the check row, once nowhere else — the panel that
   // would have carried the second copy is the thing that must be absent.
-  await expect(page.getByText(SUSPENDED)).toHaveCount(1);
+  await expect(page.getByText(PAUSED)).toHaveCount(1);
   await expect(page.getByText("waiting for approval")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "Approve and run workflows" }),
@@ -757,7 +606,7 @@ test("a fork change still gets its button when the block is the fork", async ({
 });
 
 /// The commit page. `/acme/widget/commit/<sha>` with its checks strip,
-/// its hosted runs and nothing else it needs to render.
+/// its workflow runs and nothing else it needs to render.
 async function commitPage(
   page: Page,
   opts: {
@@ -841,9 +690,9 @@ test("the commit strip reads a blocked run as Blocked, with its reason", async (
   // there is no change to read instead, so "why did my build not start"
   // is asked here. It read "Queued" with no sentence anywhere on it.
   await commitPage(page, {
-    runs: [run({ blocked_reason: "suspended", error: SUSPENDED })],
+    runs: [run({ blocked_reason: "paused", error: PAUSED })],
   });
-  await expect(page.getByText(SUSPENDED)).toBeVisible();
+  await expect(page.getByText(PAUSED)).toBeVisible();
   await expect(page.getByText("Blocked", { exact: true })).toBeVisible();
   await expect(page.getByText("Queued")).toHaveCount(0);
 });

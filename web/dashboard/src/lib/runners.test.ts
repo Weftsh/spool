@@ -138,39 +138,27 @@ describe("registrationCommands", () => {
 });
 
 describe("groupAccessLine", () => {
-  it("composes the rule rather than printing its two halves", () => {
-    expect(
-      groupAccessLine({ repo_access: "all", allow_public: false, repos: [] }),
-    ).toBe("Every repository · private repositories only");
-    expect(
-      groupAccessLine({ repo_access: "all", allow_public: true, repos: [] }),
-    ).toBe("Every repository · public repositories allowed");
+  it("says every repository rather than printing the mode", () => {
+    expect(groupAccessLine({ repo_access: "all", repos: [] })).toBe(
+      "Every repository",
+    );
   });
 
   it("counts the selected repositories, singular and plural", () => {
     expect(
-      groupAccessLine({
-        repo_access: "selected",
-        allow_public: false,
-        repos: ["widget"],
-      }),
-    ).toBe("1 repository · private repositories only");
+      groupAccessLine({ repo_access: "selected", repos: ["widget"] }),
+    ).toBe("1 repository");
     expect(
       groupAccessLine({
         repo_access: "selected",
-        allow_public: false,
         repos: ["widget", "session-1"],
       }),
-    ).toBe("2 repositories · private repositories only");
+    ).toBe("2 repositories");
     // `selected` with nothing selected admits nothing at all, and the
     // line has to say so rather than reading like a default.
-    expect(
-      groupAccessLine({
-        repo_access: "selected",
-        allow_public: false,
-        repos: [],
-      }),
-    ).toBe("0 repositories · private repositories only");
+    expect(groupAccessLine({ repo_access: "selected", repos: [] })).toBe(
+      "0 repositories",
+    );
   });
 });
 

@@ -461,7 +461,7 @@ describe("blocked checks", () => {
     "this change comes from a fork; a maintainer has to approve its workflows before they run";
 
   it("counts a blocked row from its refusal, not from its state word", () => {
-    // The whole difficulty in one assertion. A blocked hosted run
+    // The whole difficulty in one assertion. A blocked workflow run
     // mirrors as `queued` — deliberately, because nothing is wrong with
     // the change — so nothing in `state` distinguishes "about to start"
     // from "will never start unless a person acts". The caller joins the

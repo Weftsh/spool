@@ -18,7 +18,7 @@ export interface RailLink {
 /// column is 300 characters of somebody's typing, the validation that
 /// protects it lives in another process and another language, and the
 /// failure mode if the two ever disagree is script execution on a page
-/// any stranger can open. A guard on a security boundary is worth its
+/// anybody signed in can open. A guard on a security boundary is worth its
 /// three lines even when its only caller is already correct.
 ///
 /// It is an allowlist, not a denylist, and that is the whole of the
@@ -87,11 +87,6 @@ function MetaItem(props: { icon: React.ReactNode; children: React.ReactNode }) {
 /// out; the absence of the row is the same information, rendered
 /// honestly. That is FORGE-UX's rule about sections that lead nowhere,
 /// applied one field at a time.
-///
-/// What the spec puts here and this does not render — Follow / Edit
-/// profile, `N followers · N following` — is not an oversight: there is
-/// no following substrate and no self-service edit route yet, and a
-/// button that cannot do anything is the thing the rule forbids.
 export function ProfileRail(props: {
   handle: string;
   displayName?: string | null;

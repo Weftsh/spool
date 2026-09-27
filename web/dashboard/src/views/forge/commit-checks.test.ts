@@ -68,14 +68,14 @@ describe("rollupLabel", () => {
 
 /// The strip's own presentation, and the one case it exists for.
 ///
-/// A refused hosted run is mirrored as `queued` (`workflow/mirror.rs`),
+/// A refused workflow run is mirrored as `queued` (`workflow/mirror.rs`),
 /// so on the commit page — the surface a maintainer lands on for a
 /// branch push, where there is no change to read instead — a build that
 /// will never start read "Queued" with nothing beside it. "Why did my
 /// build not start" gets asked here.
 describe("stripPresentation", () => {
   it("says Blocked over the stored word when there is a refusal", () => {
-    const p = stripPresentation("queued", "over budget");
+    const p = stripPresentation("queued", "waiting for approval");
     expect(p.label).toBe("Blocked");
     // The same warning tone the Checks tab and the change panel use. A
     // blocked run has not failed, and three pages must not have three
@@ -99,6 +99,6 @@ describe("stripPresentation", () => {
     // not be silently folded into a state we do know — and a refusal is
     // still a refusal over one.
     expect(stripPresentation("quarantined", null).label).toBe("quarantined");
-    expect(stripPresentation("quarantined", "suspended").label).toBe("Blocked");
+    expect(stripPresentation("quarantined", "paused").label).toBe("Blocked");
   });
 });

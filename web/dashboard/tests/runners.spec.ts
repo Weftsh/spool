@@ -38,7 +38,6 @@ interface Group {
   id: string;
   name: string;
   repo_access: "all" | "selected";
-  allow_public: boolean;
   is_default: boolean;
   repos: string[];
   runners: number;
@@ -67,7 +66,6 @@ function groups(): Group[] {
       id: "g-default",
       name: "default",
       repo_access: "all",
-      allow_public: false,
       is_default: true,
       repos: [],
       runners: 2,
@@ -78,7 +76,6 @@ function groups(): Group[] {
       id: "g-farm",
       name: "build-farm",
       repo_access: "selected",
-      allow_public: false,
       is_default: false,
       repos: ["widget"],
       runners: 1,
@@ -151,7 +148,6 @@ interface Refusal {
 
 interface Options {
   policy?: {
-    hosted: string;
     self_hosted: string;
     self_hosted_repos: string[];
   };
@@ -194,7 +190,6 @@ async function runnersPage(page: Page, opts: Options = {}): Promise<Mocked> {
     mints: [],
   };
   const policy = opts.policy ?? {
-    hosted: "allowed",
     self_hosted: "all",
     self_hosted_repos: [],
   };
@@ -233,7 +228,6 @@ async function runnersPage(page: Page, opts: Options = {}): Promise<Mocked> {
       id: `g-${gs.length + 1}`,
       name: body.name,
       repo_access: "all",
-      allow_public: false,
       is_default: false,
       repos: [],
       runners: 0,
@@ -322,17 +316,14 @@ test("the policy is read, edited and saved, and Saved means the server said so",
   // The section is reachable by its own address and names itself.
   await expect(page.getByText("Runner policy")).toBeVisible();
   await expect(
-    page.getByLabel("Weft-hosted runners", { exact: true }),
-  ).toContainText("Allowed");
-  await expect(
     page.getByLabel("Self-hosted runners", { exact: true }),
   ).toContainText("All repositories");
+  // One pool: the organisation's own machines. There is no fleet of
+  // somebody else's to allow or refuse.
+  await expect(page.getByLabel("Weft-hosted runners")).toHaveCount(0);
 
   // Nothing is claimed before anything is sent.
   await expect(page.getByText("Saved")).toHaveCount(0);
-
-  await page.getByLabel("Weft-hosted runners", { exact: true }).click();
-  await page.getByRole("option", { name: "Disabled" }).click();
 
   // "Selected" is the one value that needs a second answer, so the repo
   // picker only exists for it. Choosing it must not send anything by
@@ -349,13 +340,12 @@ test("the policy is read, edited and saved, and Saved means the server said so",
   await expect(page.getByRole("button", { name: "Saving…" })).toBeVisible();
   await expect(page.getByText("Saved")).toBeVisible();
 
-  // All three keys, in the shape the contract names them, and the repo
-  // by **name**. The object, not a JSON string: a client that stringified
-  // its own body would send `"{\"hosted\":…}"` and this would be a
-  // string rather than an object.
+  // Both keys, in the shape the contract names them, and the repo by
+  // **name**. The object, not a JSON string: a client that stringified
+  // its own body would send `"{\"self_hosted\":…}"` and this would be
+  // a string rather than an object.
   expect(mock.policyPatches).toEqual([
     {
-      hosted: "disabled",
       self_hosted: "selected",
       self_hosted_repos: ["widget"],
     },
@@ -388,13 +378,10 @@ test("groups list what they admit, and a new one is created", async ({
 }) => {
   const mock = await runnersPage(page);
 
-  // The rule the two access columns encode, composed into one line
-  // rather than left for the reader to assemble.
+  // What each group admits, as a count rather than a mode word.
   const table = page.getByRole("table").first();
-  await expect(table).toContainText(
-    "Every repository · private repositories only",
-  );
-  await expect(table).toContainText("1 repository · private repositories only");
+  await expect(table).toContainText("Every repository");
+  await expect(table).toContainText("1 repository");
   // The count is what makes deleting a group a decision.
   await expect(table.getByRole("row", { name: /build-farm/ })).toContainText(
     "1",
@@ -465,9 +452,10 @@ test("a group's access is edited in place, and the default group's name is not",
   await expect(page.getByRole("checkbox", { name: "widget" })).toBeChecked();
 
   await page.getByRole("checkbox", { name: "session-1" }).check();
-  await page
-    .getByRole("checkbox", { name: "Allow public repositories" })
-    .check();
+  // No public repositories exist to allow, so there is no box for them.
+  await expect(
+    page.getByRole("checkbox", { name: "Allow public repositories" }),
+  ).toHaveCount(0);
   await name.fill("build-farm-2");
   // Nothing is claimed before the server has answered.
   await expect(
@@ -488,15 +476,12 @@ test("a group's access is edited in place, and the default group's name is not",
       body: {
         name: "build-farm-2",
         repo_access: "selected",
-        allow_public: true,
         repos: ["widget", "session-1"],
       },
     },
   ]);
   // The line recomposes itself from what came back.
-  await expect(table).toContainText(
-    "2 repositories · public repositories allowed",
-  );
+  await expect(table).toContainText("2 repositories");
 
   // …and the claim does not outlive the thing it was about: opening a
   // group again is the start of a new edit, not proof of the last one.

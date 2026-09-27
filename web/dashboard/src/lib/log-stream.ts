@@ -1,4 +1,4 @@
-/// Reading a hosted job's log as it is produced.
+/// Reading a workflow job's log as it is produced.
 ///
 /// The server's live log is a server-sent-event feed, and this file is
 /// the half of it that has no `fetch` in it: bytes in, events out. That

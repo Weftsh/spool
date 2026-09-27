@@ -16,7 +16,7 @@ import { NewRepo } from "@/views/newrepo";
 import { NewOrg, OrgView } from "@/views/org";
 import { Search } from "@/views/search";
 import { SettingsView } from "@/views/settings";
-import { DASH, href, mountedAt, segments, useRoute } from "./router";
+import { DASH, dash, href, mountedAt, segments, useRoute } from "./router";
 import { match } from "./routes";
 import { ForgeView } from "@/views/forge";
 
@@ -89,8 +89,8 @@ export default function App() {
   const [creatingOrg, setCreatingOrg] = useState(false);
   const [browserRoute, browserNavigate] = useRoute();
   // Everything below this line is written as if the SPA were mounted at
-  // `/dashboard`, because it is — the public forge mounts the same views
-  // at the root with a different base. Views therefore never spell the
+  // `/dashboard`, because it is — the forge mounts the same views at the
+  // root with a different base. Views therefore never spell the
   // prefix themselves. It is a smaller claim than it used to be: the
   // repository surfaces all live on the forge mount now, so what is
   // written relative to `/dashboard` is what is genuinely about a
@@ -103,10 +103,8 @@ export default function App() {
   //
   // There used to be two: `/dashboard/repos/{name}` rendered the file
   // browser, and the repo *screen* had no address at all because it was
-  // held in `useState`. Both were unsendable. The dashboard one because
-  // a stranger following it met the sign-in wall below, even for a
-  // public repository; the state one because there was nothing in the
-  // address bar to copy and a reload lost the repo.
+  // held in `useState`, so there was nothing in the address bar to copy
+  // and a reload lost the repo.
   const routed = segments(route.path);
   const routedNew = routed[0] === "new";
   // Search is its own address so a result set can be sent to somebody,
@@ -271,24 +269,11 @@ export default function App() {
     );
   }
 
-  // The public forge is decided before the session is, and that ordering
-  // is the feature. Everything below this point assumes somebody signed
-  // in and belongs to a namespace; a stranger following a link to an
-  // open-source repository has neither, and asking them to sign in to
-  // read public code would undo the whole point of hosting it.
-  //
-  // It sits *after* the mailed-link gates on purpose: a confirmation or
-  // invitation link has to be redeemable from whatever page it was
-  // opened on, including this one.
+  // Which page the address means, decided *after* the mailed-link gates
+  // on purpose: a confirmation or invitation link has to be redeemable
+  // from whatever page it was opened on.
   const forge = match(browserRoute.path, browserRoute.query);
-  // `/login` is the forge's own way in, and it was the one control
-  // offered to a signed-out visitor that led nowhere: the header's Sign
-  // in link pointed here, `match` returned a `login` route, and
-  // `ForgeView` had no branch for it — so the button on every public
-  // page rendered "We couldn't find that page". `safeNext` had been
-  // written, and its open-redirect hole found and fixed, for a
-  // destination that never rendered.
-  //
+  // `/login` is the one page somebody who is not signed in may see.
   // Signing in returns to where they were, which is the whole reason
   // `next` is carried at all.
   if (forge.kind === "login") {
@@ -325,7 +310,7 @@ export default function App() {
       .proveEmail(session ?? { org: handle, token: "" }, handle, token)
       .then(({ address }) =>
         toast.success(
-          `${address} is proved — commits you have already pushed under it now count`,
+          `${address} is proved — commits you have already pushed under it are now attributed to you`,
         ),
       )
       // The server's own sentence. A link can be spent, expired, or for
@@ -334,11 +319,38 @@ export default function App() {
       .catch((e) => toast.error(String((e as Error)?.message ?? e)));
   }
 
+  // `/` has no page of its own. It is the way in, and the way in is the
+  // dashboard — moved to rather than rendered, so the overview keeps one
+  // address. `replace`, so Back does not bounce off it. A visitor who is
+  // not signed in meets the dashboard's own sign-in form there.
+  if (forge.kind === "home") {
+    browserNavigate(dash([]), true);
+    return null;
+  }
+
+  // Every other page is for somebody signed in — there is no public
+  // repository, and so nothing a visitor could be shown. They are sent
+  // to `/login` with the address they asked for, and signing in brings
+  // them back to it. `session` rather than `me`, because a session held
+  // by an API token is signed in with no person behind it.
+  //
+  // The dashboard mount is left to its own inline form below, which
+  // also carries the "your GitHub installation is ready" notice an
+  // install round trip lands with.
+  if (!session && forge.kind !== "dash") {
+    const q = browserRoute.query.toString();
+    browserNavigate(
+      href(["login"], { next: `${browserRoute.path}${q ? `?${q}` : ""}` }),
+      true,
+    );
+    return null;
+  }
+
   // An address that is an alias for a tab's real one — `/o/r/actions`
   // for `/o/r/checks` — moves the browser rather than rendering under
   // the name it was asked for. Two live URLs for one page is two things
-  // to keep the tab strip's `active` logic agreeing about, two to share,
-  // and two for a crawler to index as duplicates.
+  // to keep the tab strip's `active` logic agreeing about, and two to
+  // share.
   //
   // `replace: true`, so Back goes where the reader came from instead of
   // bouncing off the alias and landing straight back here. `render`
@@ -360,7 +372,6 @@ export default function App() {
         match={forge}
         me={me}
         token={session?.token ?? null}
-        currentPath={browserRoute.path}
         navigate={browserNavigate}
         onSignOut={signOut}
       />
@@ -490,13 +501,6 @@ export default function App() {
           session={session}
           navigate={navigate}
           justConnected={connectOutcome === "ok" || onboardingMirrors}
-          // The personal namespace is the membership named by the
-          // person's own handle — the server says which, rather than
-          // this guessing from the list. A token session has no `me`
-          // and is treated as an organization, which is what a token
-          // is minted for.
-          personal={me?.handle != null && me.handle === session.org}
-          onCreateOrg={() => setCreatingOrg(true)}
         />
       ) : routed.length === 0 ? (
         <OrgView

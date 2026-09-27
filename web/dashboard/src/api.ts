@@ -139,146 +139,6 @@ export function parseIdent(ident: string): { name: string; time: number } {
   };
 }
 
-export interface Billing {
-  org: string;
-  /// Where the organisation is on the way to paying. `free` may hold
-  /// public repositories and people, and no card has been asked for —
-  /// the provider only meets one on its subscription page; `paid` may
-  /// hold private ones; `past_due` is a paid organisation whose last
-  /// invoice did not settle. A personal namespace reads `free` and is
-  /// never asked for anything.
-  plan: "free" | "paid" | "past_due";
-  /// What we would charge for right now.
-  billable_seats: number;
-  /// How many repositories here are private. Read with `plan`: on
-  /// `free` these are what a lapsed subscription left read-only, and the
-  /// page says so instead of "the first private repository starts a
-  /// subscription" to somebody already holding three. Absent from a
-  /// server older than the field.
-  private_repos?: number;
-  /// What the provider has been told. These differ for a moment between
-  /// a membership change and the push that follows it.
-  paid_seats: number;
-  status: string | null;
-  current_period_end: number | null;
-  /// The questions a screen has to answer before it draws. Each is
-  /// `true` on a deployment that sells nothing and on a personal
-  /// namespace.
-  may_create_public: boolean;
-  may_create_private: boolean;
-  may_add_people: boolean;
-  /// What a publish to this organization's registry would be refused
-  /// with — a free plan, a personal namespace, a failed payment, or the
-  /// package pool and spend limit spent — or `null` when it may publish.
-  /// Installing is never refused. Absent from a server older than the
-  /// registry's plan gate.
-  packages_refusal?: string | null;
-  /// What a seat costs per month, in cents, or `null` where nothing is
-  /// for sale. Sent so this page and the site quote the same number.
-  price_per_seat_cents: number | null;
-  /// Hosted minutes a paying organisation gets per seat, and what a
-  /// free one gets in total. `null` with `price_per_seat_cents`.
-  paid_minutes_per_seat: number | null;
-  free_minutes: number | null;
-  /// Hosted-runner minutes this organisation may spend in a month, or
-  /// `null` for a deployment that does not meter them
-  /// (`STRATUM_RUNNER_MINUTES_PER_MONTH` unset or zero). **Null is not
-  /// zero**: a zero budget refuses every run, and rendering "0 minutes
-  /// left" on an unmetered deployment would tell a whole organisation
-  /// its CI is dead when nothing is wrong.
-  ci_minutes_limit?: number | null;
-  /// Minutes already spent in the current window, counted per job and
-  /// rounded up. Present whenever the deployment meters at all — a
-  /// used figure with no budget beside it is still worth showing.
-  ci_minutes_used?: number | null;
-  /// What is left. Sent rather than subtracted here so that the
-  /// arithmetic the server refuses runs on is the arithmetic the page
-  /// shows; a page that computes its own can disagree with the refusal
-  /// a reader is looking at.
-  ci_minutes_remaining?: number | null;
-  /// The share of `ci_minutes_used` that GitHub Actions jobs spent on
-  /// Weft runners, already at their multiplier. Absent from a server
-  /// older than the GitHub door; `0` when nothing came through it,
-  /// and the page says nothing about GitHub in either case.
-  ci_minutes_github_used?: number | null;
-  /// Why this organisation's hosted CI was suspended, or `null` for the
-  /// ordinary case. Set by a runner reporting `abuse` on a job it
-  /// stopped; from then on every trigger for the org is `blocked` with
-  /// this reason and everything it had running was cancelled. **Null is
-  /// the whole "not suspended" test** — there is no separate flag.
-  ci_suspended_reason?: string | null;
-  /// When that happened, in epoch **seconds** — not milliseconds, which
-  /// is what every date on this dashboard is rendered from. Convert
-  /// once, in `readCiSuspension`, rather than at each call site.
-  ci_suspended_at?: number | null;
-  /// When the current billing period began, epoch ms. Sent with
-  /// `current_period_end` once the server meters by period; absent from
-  /// a server that only knew the rolling window, and the page keeps
-  /// rendering "Renews" when it is.
-  period_start?: number | null;
-  /// What each paid seat adds to the transfer and storage pools, in
-  /// decimal gigabytes. `null` with `price_per_seat_cents`; absent from
-  /// a server older than the pools.
-  paid_egress_gb_per_seat?: number | null;
-  paid_packages_gb_per_seat?: number | null;
-  paid_storage_gb_per_seat?: number | null;
-  /// The pools, read by `readMeters`. **Absent** from a server that
-  /// only meters minutes the old way — the page then renders the
-  /// `ci_minutes_*` fields exactly as it always has.
-  ///
-  /// `packages_gb` is optional for the same reason the whole object is:
-  /// a server from before the registry sends the other three and the
-  /// page shows three rows rather than an empty fourth.
-  meters?: {
-    minutes: BillingMeter;
-    egress_gb: BillingMeter;
-    storage_gb: BillingMeter;
-    packages_gb?: BillingMeter;
-  };
-  /// What use past the pools would cost so far this period, in cents.
-  overage_estimated_cents?: number | null;
-  /// How much use past the pools this organization has agreed to pay
-  /// for this period, in cents. `0` means none: every pool refuses at
-  /// its edge. Absent from a server without usage billing, and the
-  /// spend-limit panel is absent with it.
-  spend_limit_cents?: number | null;
-  /// Whether the caller may change that figure — an owner or admin of a
-  /// paying organization. The page shows the editor on this flag, never
-  /// on the caller's role: the server is the one that refuses.
-  may_raise_spend_limit?: boolean;
-  /// `"on"` when use past the pool is billed; `"off"` on a deployment
-  /// with no usage prices; `"resubscribe"` for a subscription made before
-  /// usage billing existed, which has to be made again before a spend
-  /// limit means anything.
-  metering?: "on" | "off" | "resubscribe";
-  /// What use past the pool costs, so the page never types a price.
-  rates?: BillingRates;
-}
-
-/// One pool: what the seats bring, what has been used, and whether the
-/// server is refusing at its edge right now.
-///
-/// `included: null` is **unmetered** — no pool, nothing refused, nothing
-/// to draw — and is never the same as `0`, which is a pool with nothing
-/// in it. `refusing` is the server's own verdict; the page never derives
-/// it from the numbers, because the refusal a reader is looking at was
-/// decided by the server's arithmetic and not by ours.
-export interface BillingMeter {
-  included: number | null;
-  used: number;
-  remaining: number | null;
-  overage: number;
-  estimated_cents: number;
-  refusing: boolean;
-}
-
-export interface BillingRates {
-  cents_per_1000_minutes: number;
-  cents_per_gb_egress: number;
-  cents_per_gb_month_storage: number;
-  cents_per_gb_month_packages: number;
-}
-
 export interface Member {
   user_id: string;
   email: string;
@@ -444,7 +304,7 @@ export type RunState =
 /// is a fourth, the UI must not need a fourth arm.
 ///
 /// `detail_url` is where the log actually lives, and it is no longer
-/// always somebody else's site: a hosted run's row points at our own
+/// always somebody else's site: a workflow run's row points at our own
 /// [`WorkflowRun`] page, and a third party's points out to theirs.
 /// `DetailLink` is what tells those apart, because the first must
 /// navigate in-app and the second must not.
@@ -492,71 +352,6 @@ export interface Webhook {
   created_at: number;
 }
 
-/// One publish of this repository's static site.
-///
-/// `tree` is the tree of the published *directory*, not of the commit:
-/// a no-build deploy stores no bytes at all and serves straight out of
-/// the repository, which is why there is nothing here that looks like an
-/// artifact.
-export interface SiteDeploy {
-  id: string;
-  commit: string;
-  tree: string;
-  /// The directory the config named when this went out, kept for
-  /// display. It can differ from the config's *current* `publish`, and
-  /// that difference is a real answer to "why is the old page still up".
-  publish: string;
-  spa: boolean;
-  not_found: string | null;
-  created_at: number;
-}
-
-/// What `GET …/repos/:repo/site` answers.
-///
-/// Two independent facts, and the panel must not collapse them.
-/// `enabled` and `deploys` describe **what is being served right now**;
-/// `config_state` describes `.weft/site.yml` **as it parses this
-/// second**. They disagree exactly when somebody has just broken the
-/// file — the site keeps serving the last good deploy, and
-/// `config_error` is the sentence that says why nothing new has
-/// appeared. A client that reported only one of them would answer the
-/// commonest support question with silence.
-export interface SiteStatus {
-  /// Whether a site row exists at all. `false` means nothing has ever
-  /// published; it is **not** the same as a config that fails to parse.
-  enabled: boolean;
-  /// The DNS label this site is served under, or `null` when there is
-  /// no site.
-  host: string | null;
-  /// The absolute address, or `null` — either because there is no site,
-  /// or because this deployment does not host sites at all. Never
-  /// synthesised from `host` on the client: a URL that resolves nowhere
-  /// is worse than none, because somebody sends it to a colleague.
-  url: string | null;
-  /// The ref whose pushes publish. `null` means the repository's
-  /// default branch, resolved at push time.
-  branch: string | null;
-  /// `ok`, `absent` or `refused` — typed as a bare string, the way
-  /// every other open enum in this client is, because a fourth word
-  /// means the server is newer than this bundle and must not be
-  /// silently folded into one of the three.
-  config_state: string;
-  /// The refusal, with its file and line, verbatim. Only on `refused`.
-  config_error: string | null;
-  /// The parsed config. Only on `ok`.
-  config: {
-    publish: string;
-    branch: string | null;
-    spa: boolean;
-    not_found: string | null;
-  } | null;
-  /// The id of the deploy being served, or `null` when a site exists
-  /// and nothing has published yet.
-  current: string | null;
-  /// Newest first, at most 20.
-  deploys: SiteDeploy[];
-}
-
 /// How the last GitHub Actions poll went, and — the field that earns
 /// this type — whether we were allowed to look.
 ///
@@ -578,12 +373,12 @@ export interface ChecksPoll {
   retry_in_ms: number | null;
 }
 
-/// Where a **hosted** run got to.
+/// Where a workflow run got to.
 ///
 /// A different vocabulary from [`RunState`], and deliberately not
 /// reconciled at the type level: these are our own words for our own
 /// runner, and `CheckRun.state` is the six-word language every provider's
-/// verdict is translated into. A hosted run also produces a check row —
+/// verdict is translated into. A workflow run also produces a check row —
 /// that translation is the server's — so the two exist side by side and
 /// a client that assumed one type covered both would read `passed` as
 /// an unknown state and draw it grey.
@@ -594,7 +389,7 @@ export interface ChecksPoll {
 export type WorkflowRunState =
   "running" | "passed" | "failed" | "cancelled" | "blocked";
 
-/// Where one job of a hosted run got to. The same words as a run, plus
+/// Where one job of a workflow run got to. The same words as a run, plus
 /// `queued` — a run is `running` from the moment it exists, but a job
 /// spends real time waiting for a runner and a reader is owed the
 /// difference.
@@ -625,24 +420,18 @@ export interface WorkflowJob {
   log_chunks: number;
   started_at: number | null;
   completed_at: number | null;
-  /// Which pool this job asked for. **Optional on the type**, because a
-  /// fixture or a server older than self-hosted runners does not send
-  /// it, and a job that renders as `undefined` is worse than one that
-  /// renders as an ordinary hosted job.
-  pool?: "hosted" | "self_hosted";
   /// The `runs-on` list, in file order — which is the order the
   /// server's own refusal sentence quotes them in, so it is the order
-  /// they are shown in.
+  /// they are shown in. Optional because a fixture or an older server
+  /// does not send it.
   labels?: string[];
   /// The runner that actually took this job, or `null` for one nothing
-  /// picked up. Only a self-hosted job ever names one: hosted capacity
-  /// is ours and has no name an operator could act on.
+  /// picked up yet.
   runner?: { id: string; name: string } | null;
 }
 
 /// The org-wide answer to "where may jobs run".
 export interface RunnerPolicy {
-  hosted: "allowed" | "disabled";
   self_hosted: "all" | "selected" | "disabled";
   /// Repository **names**, not ids — the same currency every other
   /// repo-shaped route on this client speaks.
@@ -654,7 +443,6 @@ export interface RunnerGroup {
   id: string;
   name: string;
   repo_access: "all" | "selected";
-  allow_public: boolean;
   /// The default group cannot be renamed or deleted; every removed
   /// group's runners land in it.
   is_default: boolean;
@@ -709,7 +497,7 @@ export interface RunnerRegistrationToken {
   command: string;
 }
 
-/// One run of a workflow **on our own runners**.
+/// One run of a `.weft/*.yml` workflow, on the organization's runners.
 ///
 /// `error` is the field this type exists for. A workflow file we refused
 /// to run — bad YAML, an unknown key, a dependency cycle — produces a
@@ -743,13 +531,12 @@ export interface WorkflowRun {
   error: string | null;
   /// Why a `blocked` run is blocked, as a code rather than as prose —
   /// `null` when it is not blocked, and **absent** from a server older
-  /// than the field. The three refusals read alike on a page and are
-  /// completely different situations: only `"fork"` is waiting on a
-  /// person who is looking at it, so only `"fork"` can be answered with
-  /// a button. Never decided by matching `error`, which is written to
-  /// be read and will be reworded.
-  blocked_reason?:
-    "fork" | "budget" | "suspended" | "billing" | "spend_limit" | null;
+  /// than the field. `"fork"` is the one code waiting on a person who is
+  /// looking at it, so it is the only one answered with a button; any
+  /// other code is shown by its sentence and nothing more. Typed as a
+  /// bare string for the reason `state` is. Never decided by matching
+  /// `error`, which is written to be read and will be reworded.
+  blocked_reason?: string | null;
   created_at: number;
   updated_at: number;
   completed_at: number | null;
@@ -786,7 +573,6 @@ export interface Repo {
   /// rather than as `undefined`.
   homepage?: string | null;
   kind: "native" | "mirror";
-  public: boolean;
   default_branch: string;
   origin_url: string | null;
   /// The GitHub App installation this mirror was connected through.
@@ -831,9 +617,9 @@ export interface Repo {
   /// People subscribed to everything that happens here.
   ///
   /// On the repository row rather than on `…/watch`, because that
-  /// endpoint answers "what did *you* choose" and refuses a stranger.
-  /// The masthead needs the number before it knows who is asking, or
-  /// the control has no count to draw until sign-in and then grows one.
+  /// endpoint answers "what did *you* choose" and not "how many". The
+  /// masthead needs the number with the row, or the control draws with
+  /// no count and then grows one.
   ///
   /// Optional for the same reason `fork_count` is: an older server, or
   /// a fixture written before this field existed, must render a zero
@@ -849,14 +635,13 @@ export interface Repo {
   /// whether some admin-only endpoint happened to reply.
   viewer_admin: boolean;
   /// Whether the caller holds a role *here* — an org membership or a
-  /// per-repo grant — as opposed to reading this repository because it
-  /// is public.
+  /// per-repo grant.
   ///
-  /// The distinction only exists on a public repository, and it is the
-  /// whole of what this is for. Every other `viewer_*` answer is about
-  /// what somebody may *do*; this one is about whether they are on the
-  /// inside at all. Insights is gated on it: publishing the code does
-  /// not publish how the code is used.
+  /// Every other `viewer_*` answer is about what somebody may *do*; this
+  /// one is about whether they are on the inside at all, and Insights is
+  /// gated on it. It is the server's answer rather than an inference
+  /// from the row having arrived, so the gate cannot drift from the rule
+  /// the server applies.
   ///
   /// Weaker than `viewer_write` — a `viewer`-role member may not push
   /// and is exactly who this includes. Optional on the type for the
@@ -872,27 +657,15 @@ export interface Repo {
   /// no `source`. Optional on the type for the same reason the counts
   /// are: a fixture written before the field existed must read as "no"
   /// rather than as `undefined`.
-  ///
-  /// `false` as well while the organization's plan refuses writes — the
-  /// server folds `write_blocked` in, so nothing here has to.
   viewer_write?: boolean;
-  /// Why nobody may write to this repository right now — the sentence a
-  /// push is refused with, beginning `quota:` — or `null` when writes
-  /// are allowed. About the repository rather than the caller, so the
-  /// page can say "read-only" to a reader too. The case is a private
-  /// repository on an organization whose subscription has ended: it
-  /// used to look exactly like any other repository until `git push`.
-  /// Absent from a server older than the field, which reads as allowed.
-  write_blocked?: string | null;
   /// For a mirror: whether a push here reaches the origin, and if not
   /// why. `null` for a native repository; absent from a server older
   /// than write-through mirrors, which the page must not read as
   /// "forwarding".
   push?: MirrorPush | null;
-  /// Bytes this repository holds in our storage — the figure the
-  /// storage pool counts for a private repository. `null` when the
-  /// server has not measured it yet; absent from a server older than
-  /// the field. Either way the page shows nothing rather than "0 GB".
+  /// Bytes this repository holds in storage. `null` when the server has
+  /// not measured it yet; absent from a server older than the field.
+  /// Either way the page shows nothing rather than "0 GB".
   stored_bytes?: number | null;
 }
 
@@ -904,7 +677,6 @@ export interface RepoHit {
   org: string;
   name: string;
   description: string | null;
-  public: boolean;
   kind: "native" | "mirror";
   created_at: number;
 }
@@ -957,22 +729,15 @@ export interface GithubInstallation {
   /// when the list is read. Three shapes and a fourth absence, each a
   /// different fact: the permissions it holds; `{ gone: true }` when
   /// the App has been uninstalled there; `null` when GitHub could not
-  /// be asked at all; and **absent** from a server older than the
-  /// hosted GitHub runners, which the page treats like `null`.
+  /// be asked at all; and **absent** from an older server, which the
+  /// page treats like `null`.
   detail?: GithubInstallationDetail | { gone: true } | null;
 }
 
-/// What an installation may do, as GitHub reports it. `runners_ready`
-/// is the server's own conjunction of the two permissions the runner
-/// feature needs — registering a just-in-time runner takes
-/// `Administration: write`, and cancelling a run we refused takes
-/// `Actions: write` — sent so the page and the intake agree.
+/// What an installation may do, as GitHub reports it.
 export interface GithubInstallationDetail {
   account: string;
   target_type: "Organization" | "User";
-  administration_write: boolean;
-  actions_write: boolean;
-  runners_ready: boolean;
   /// `Contents: write` — what forwarding a push to the origin needs.
   /// Absent from a server older than write-through mirrors.
   contents_write?: boolean;
@@ -982,62 +747,6 @@ export interface GithubInstallationDetail {
   /// Where on GitHub the missing permissions are approved.
   approve_url: string;
   suspended: boolean;
-}
-
-/// One GitHub Actions job that asked for a Weft runner — `runs-on:
-/// weft`, `weft-2x` or `weft-4x` — and what became of it.
-///
-/// The jobs are GitHub's: nothing here is writable, and a job we
-/// refused sits queued *on GitHub* until it is cancelled there, which
-/// is why `cancelled_on_github` is a field and not an assumption.
-export interface GithubJob {
-  id: string;
-  /// `owner/name`, as GitHub names it.
-  repo: string;
-  private: boolean;
-  github_job_id: number;
-  github_run_id: number;
-  run_attempt: number;
-  name: string;
-  html_url: string;
-  labels: string[];
-  size: string;
-  /// How many hosted minutes one wall-clock minute costs at this size.
-  multiplier: number;
-  state:
-    | "refused"
-    | "queued"
-    | "launching"
-    | "running"
-    | "completed"
-    | "failed"
-    | "abandoned";
-  /// Why it was refused, in the intake's own sentence, or `null`.
-  refusal: string | null;
-  cancelled_on_github: boolean;
-  /// Whether the refusal or the error is a permission the installation
-  /// has not approved — decided by the server, so the page can offer
-  /// the approve link without knowing the sentence.
-  needs_permission: boolean;
-  error: string | null;
-  conclusion: string | null;
-  runner_name: string | null;
-  /// Billed minutes so far, rounded up, at the multiplier.
-  minutes: number;
-  queued_at: number | null;
-  launched_at: number | null;
-  started_at: number | null;
-  completed_at: number | null;
-}
-
-/// One of the three sizes a workflow can ask for. `cpu` is in Fargate
-/// units (1024 to a vCPU) and `memory_mib` in MiB, exactly as the task
-/// override is written, and the page does the arithmetic once.
-export interface GithubRunnerSize {
-  label: string;
-  multiplier: number;
-  cpu: number;
-  memory_mib: number;
 }
 
 export interface RemoteRepo {
@@ -1082,19 +791,9 @@ export interface UsageDay {
   total_repos: number;
   requests: number;
   bytes_out: number;
-  /// Minutes spent on hosted runners that day. Absent from a server
-  /// older than usage billing, and the tile renders "—" rather than 0:
-  /// a zero would claim nothing ran.
-  hosted_minutes?: number | null;
-  /// Bytes served out of *private* repositories that day — the figure
-  /// the transfer pool counts. Public traffic is never in it.
-  private_bytes_out?: number | null;
-  /// Bytes held in private repositories at the end of that day.
-  private_bytes_stored?: number | null;
 }
 
 export interface Usage {
-  plan: string;
   days: UsageDay[];
 }
 
@@ -1572,8 +1271,8 @@ export interface ProfileLink {
   url: string;
 }
 
-/// A namespace's public face. Exactly what `profile_json()` publishes —
-/// no email, no private repo, no count a private repo moves.
+/// What a namespace says about itself. Exactly what `profile_json()`
+/// publishes — no email.
 export interface Profile {
   handle: string;
   name: string;
@@ -1583,43 +1282,11 @@ export interface Profile {
   company: string | null;
   pronouns: string | null;
   kind: string;
-  contrib_private_optin: boolean;
   profile_repo: string | null;
   created_at: number;
   links: ProfileLink[];
-  public_repos: number;
 }
 
-/// What an upstream said its star count was, and when.
-///
-/// Present only when there *is* an imported number. It is never added
-/// to `stars`: a mirrored project shows its own count here and this one
-/// separately labelled, because summing them invents a figure nobody
-/// can check and showing only ours says a migrated project is dead.
-export interface OriginStars {
-  stars: number;
-  /// Epoch ms. An imported count is a snapshot, and one shown with no
-  /// sense of when quietly becomes a lie as the mirror ages.
-  at: number | null;
-  url: string | null;
-}
-
-export interface StarState {
-  /// This forge's own count. Always a number; `0` is honest.
-  stars: number;
-  /// Whether the person asking has starred it. `false` for a stranger.
-  starred: boolean;
-  /// `null` when there is no imported number — which is not the same as
-  /// an origin that reported zero, and must not be rendered as one.
-  origin: OriginStars | null;
-}
-
-/// One address on an account.
-///
-/// `verified_at` is the whole point of the row: the contribution graph
-/// counts a commit only when its author line carries a **proved**
-/// address, because anybody can put anybody's address in
-/// `git config user.email`.
 /// Where an issue import has got to.
 ///
 /// Per phase rather than one percentage, because the phases are what
@@ -1654,55 +1321,15 @@ export interface Milestone {
   closed_issues: number;
 }
 
+/// One address on an account. `verified_at` is when it was proved, and
+/// `null` until it has been: anybody can put anybody's address in
+/// `git config user.email`, so an unproved address claims nothing.
 export interface EmailRow {
   address: string;
   verified_at: number | null;
   private: boolean;
   primary: boolean;
   created_at: number;
-}
-
-export interface Pin {
-  kind: string;
-  org: string;
-  name: string;
-  description: string | null;
-  public: boolean;
-}
-
-/// One square on a contribution graph.
-///
-/// `repos` names only the **public** repositories behind `count`. The
-/// difference between the two is private work, and there is no field
-/// holding it — a separate number would be one subtraction away from
-/// being a private-repository detector.
-export interface ContributionDay {
-  day: number;
-  date: string;
-  count: number;
-  repos: { org: string; name: string; count: number }[];
-}
-
-/// A year of somebody's commits, as anybody may see it.
-///
-/// `days` carries only the days with something on them; the client draws
-/// the gaps. `private_included` is false both for somebody opted out and
-/// for somebody with no private work — deliberately indistinguishable,
-/// since telling those apart would publish the existence of private
-/// work.
-export interface ContributionGraph {
-  from: string;
-  to: string;
-  total: number;
-  private_included: boolean;
-  days: ContributionDay[];
-}
-
-/// Follower and following counts, and whether the viewer follows.
-export interface FollowState {
-  followers: number;
-  following: number;
-  you_follow: boolean;
 }
 
 export type WatchLevel = "all" | "participating" | "ignore";
@@ -1944,35 +1571,14 @@ async function rawWithStatus<T>(
   return { status: resp.status, body: (await resp.json()) as T };
 }
 
-/// A client for reading a namespace as a stranger.
-///
-/// `Session` has always named the namespace a request is *about* rather
-/// than proof of who is asking — an empty token means "whatever cookie
-/// this browser has, or nothing", and `raw` already omits the
-/// `Authorization` header entirely in that case. So a signed-out visitor
-/// reading a public repository needs no new transport and no second code
-/// path: it is this value, and the server's existing public-read rule
-/// does the rest.
-export function anon(owner: string): Session {
-  return { org: owner, token: "" };
-}
-
 /// The session a forge page should make: the namespace it is about, and
 /// the credential of whoever is looking.
 ///
-/// This exists because `anon(owner)` reads as "the session for this
-/// page" and means "no credential at all", and every forge page had
-/// been built with it. On a cookie session that is invisible — the
-/// browser attaches the cookie itself — so the bug only ever showed for
-/// somebody signed in with an API token, and it showed *silently*: the
-/// server filters by who is asking, so a person looking at their own
-/// profile or their own private repository was shown less and told
-/// nothing. A page that says your work does not exist is worse than one
-/// that errors.
-///
-/// Prefer this everywhere on the forge. `anon()` is now for the one
-/// thing its name actually claims: a request made deliberately as a
-/// stranger.
+/// Both halves matter. On a cookie session the second is invisible —
+/// the browser attaches the cookie itself — so a page that forgot it
+/// only ever broke for somebody signed in with an API token, and it
+/// broke *silently*: the server filters by who is asking, so a person
+/// looking at their own repository was shown less and told nothing.
 export function viewerSession(owner: string, token: string | null): Session {
   return { org: owner, token: token ?? "" };
 }
@@ -1989,118 +1595,6 @@ function call<T>(
   );
 }
 
-/// What an organization does with one package ecosystem.
-///
-/// `off` answers nothing at all — a registry nobody switched on is
-/// indistinguishable from no registry, which is what keeps a 404 from
-/// being a way to enumerate organizations. `private` serves what this
-/// organization published. `proxy` additionally caches from upstream,
-/// which is not built yet.
-export type PackageMode = "off" | "private" | "proxy";
-
-export interface PackageEcosystem {
-  ecosystem: string;
-  /// What a person calls it — "PyPI", not "pypi".
-  label: string;
-  mode: PackageMode;
-  /// What to do with a package whose licence cannot be determined.
-  /// Per ecosystem, because most container images declare none.
-  license_unknown: string;
-}
-
-export interface PackagePolicy {
-  ecosystems: PackageEcosystem[];
-  /// The base a client points its `.npmrc` at, so the screen can show
-  /// the snippet without knowing the server's URL scheme.
-  registry_base: string;
-}
-
-export interface Package {
-  id: string;
-  ecosystem: string;
-  name: string;
-  private: boolean;
-  /// `local` was published here; `proxied` was cached from upstream.
-  origin: string;
-  created_at: number;
-  updated_at: number;
-}
-
-export interface PackageVersion {
-  id: string;
-  version: string;
-  yanked: boolean;
-  yank_reason: string | null;
-  license: string | null;
-  /// `declared`, `detected` or `unknown` — where the licence came from,
-  /// which matters more than the licence itself when it is wrong.
-  license_source: string;
-  size_bytes: number;
-  /// Provenance: which repository, commit and job produced this. Null
-  /// for a version published by a person from their laptop, where there
-  /// is no commit to record.
-  repo_id: string | null;
-  commit_sha: string | null;
-  job_id: string | null;
-  published_by: string | null;
-  published_at: number;
-}
-
-export interface PackageDetail extends Package {
-  versions: PackageVersion[];
-  tags: { tag: string; version: string }[];
-}
-
-/// `audit` records what it would have refused and serves anyway;
-/// `block` refuses. Audit is the default, and is the reason the feature
-/// is adoptable at all: a policy that blocks from day one meets a
-/// deadline in week one and gets switched off entirely, and nobody ever
-/// learns what it would have cost.
-export type AdmissionMode = "audit" | "block";
-
-/// `allow_list` admits only what is listed; `deny_list` admits
-/// everything except. They are not the same policy. An organization
-/// that has approved four licences wants a fifth refused; one that has
-/// banned AGPL wants a licence nobody has heard of to pass.
-export type LicenseMode = "allow_list" | "deny_list";
-
-export interface LicenseRule {
-  spdx_id: string;
-  disposition: "allow" | "deny";
-}
-
-export interface AdmissionPolicy {
-  ecosystem: string;
-  mode: AdmissionMode;
-  /// An upstream release younger than this is not served. 0 disables.
-  cooldown_days: number;
-  license_mode: LicenseMode;
-  license_rules: LicenseRule[];
-  /// Name prefixes this organization has claimed, which are never
-  /// fetched from an upstream registry whether or not anything has been
-  /// published under them.
-  reserved: string[];
-}
-
-/// One thing the admission policy caught, deduplicated to a row per
-/// (ecosystem, name, version) with a hit count — a CI run resolving
-/// eight hundred dependencies must not write eight hundred rows.
-export interface PolicyFinding {
-  ecosystem: string;
-  name: string;
-  version: string;
-  /// `blocked` was refused; `would_block` was served by audit mode and
-  /// written down. The second is the whole point of audit mode.
-  disposition: "blocked" | "would_block";
-  /// `reserved`, `cooldown` or `license`.
-  rule: string;
-  /// The sentence the client printed, already assembled.
-  reason: string;
-  hits: number;
-  first_at: number;
-  last_at: number;
-}
-
 export const api = {
   /// Sign in as a person. The server sets the session cookie; nothing
   /// about the credential is readable from here, which is the point.
@@ -2113,14 +1607,11 @@ export const api = {
   /// Accept an invitation. Creates the account when the address is new;
   /// an existing account is attached to the org instead, and its
   /// password is not needed or changed.
-  /// Create an organization, owned by the signed-in person. Free at
-  /// once — no card is asked for until something here costs money —
-  /// and `detail` says whether this deployment sells anything at all.
+  /// Create an organization, owned by the signed-in person. Ready at
+  /// once; `detail` is the server's sentence about what it holds.
   createOrg(name: string): Promise<{
     id: string;
     name: string;
-    plan: "free";
-    billable_seats: number;
     detail: string;
   }> {
     return raw("/v1/orgs", "", { method: "POST", body: { name } });
@@ -2316,38 +1807,6 @@ export const api = {
       `/repos/${encodeURIComponent(repo)}/log${q.toString() ? `?${q}` : ""}`,
     );
   },
-  billing(session: Session): Promise<Billing> {
-    return call(session, "/billing");
-  },
-  /// Set how much use past the pools this organization will pay for
-  /// this period. Whole cents, never negative — the server answers 400
-  /// to anything else, 402 to a free organization, 403 to a member who
-  /// is not an admin, and 503 where usage billing is not configured.
-  /// Comes back with the billing view, so the page re-renders from the
-  /// server's figures rather than from what it just sent.
-  setSpendLimit(session: Session, cents: number): Promise<Billing> {
-    return call(session, "/billing/spend-limit", {
-      method: "PATCH",
-      body: { spend_limit_cents: cents },
-    });
-  },
-  /// The provider's billing portal (`kind: "portal"`), where cards,
-  /// invoices and cancellation live. 402 until a subscription exists —
-  /// the card arrives with it, on the provider's subscription page.
-  startCheckout(session: Session): Promise<{ url: string; kind: "portal" }> {
-    return call(session, "/billing", { method: "POST", body: {} });
-  },
-  /// Start paying: the provider's subscription page for every seat,
-  /// with the saved card already on it and a box for a promotion code.
-  /// Answers `{ url, kind: "checkout" }` to go to; the plan moves to
-  /// paid when the provider says the page was finished, and the billing
-  /// view comes back instead for an organisation that already pays.
-  /// 402 when there is no card yet — the message says so.
-  subscribe(
-    session: Session,
-  ): Promise<{ url: string; kind: "checkout" } | Billing> {
-    return call(session, "/billing/subscribe", { method: "POST", body: {} });
-  },
   invite(
     session: Session,
     email: string,
@@ -2507,21 +1966,18 @@ export const api = {
     session: Session,
     body: {
       name: string;
-      public?: boolean;
       default_branch?: string;
       description?: string;
     },
   ): Promise<Repo> {
     return call(session, "/repos", { method: "POST", body });
   },
-  /// Edit what a repo says about itself. An absent field is left alone,
-  /// so describing a repo never silently publishes it.
+  /// Edit what a repo says about itself. An absent field is left alone.
   patchRepo(
     session: Session,
     name: string,
     body: {
       description?: string | null;
-      public?: boolean;
       /// Absent leaves it alone; `null` or `""` clears it. Anything
       /// else must be an absolute http(s) URL or the server refuses it
       /// by name — the client does not pre-validate, because a second
@@ -2575,7 +2031,6 @@ export const api = {
       origin: string;
       provider?: string;
       installation_id?: string;
-      public?: boolean;
     },
   ): Promise<{ repo: Repo; clone_url: string }> {
     return call(session, "/mirrors", { method: "POST", body });
@@ -2584,15 +2039,11 @@ export const api = {
     return call(session, `/repos/${encodeURIComponent(repo)}/sync-status`);
   },
   /// Where to send somebody to install the GitHub App, with the
-  /// single-use state already in it. `app: "runners"` asks for the
-  /// Runners App where the deployment has one; otherwise the server
-  /// answers the mirror App's page, which on a one-App deployment is
-  /// also the App that runs jobs.
+  /// single-use state already in it.
   startGithubInstall(
     session: Session,
-    app?: "runners",
   ): Promise<{ url: string; state: string; expires_in: number }> {
-    return call(session, `/github/install${app ? `?app=${app}` : ""}`, {
+    return call(session, "/github/install", {
       method: "POST",
       body: {},
     });
@@ -2614,13 +2065,10 @@ export const api = {
       { method: "POST" },
     );
   },
-  async githubInstallations(
-    session: Session,
-    app?: "runners",
-  ): Promise<GithubInstallation[]> {
+  async githubInstallations(session: Session): Promise<GithubInstallation[]> {
     const out = await call<{ installations: GithubInstallation[] }>(
       session,
-      `/github/installations${app ? `?app=${app}` : ""}`,
+      "/github/installations",
     );
     return out.installations;
   },
@@ -2683,7 +2131,6 @@ export const api = {
     body: {
       name: string;
       repo_access?: RunnerGroup["repo_access"];
-      allow_public?: boolean;
       repos?: string[];
     },
   ): Promise<RunnerGroup> {
@@ -2695,7 +2142,6 @@ export const api = {
     body: {
       name?: string;
       repo_access?: RunnerGroup["repo_access"];
-      allow_public?: boolean;
       repos?: string[];
     },
   ): Promise<RunnerGroup> {
@@ -2709,150 +2155,9 @@ export const api = {
       method: "DELETE",
     });
   },
-  /// Which package ecosystems this organization admits, and the base
-  /// URL a client configures against. Every ecosystem the deployment
-  /// knows comes back, including the ones nobody has switched on — the
-  /// screen shows a row per ecosystem whether or not it is configured.
-  async packageEcosystems(session: Session): Promise<PackagePolicy> {
-    return call<PackagePolicy>(session, "/packages/ecosystems");
-  },
-  /// Switch one ecosystem on or off. Admin only, server-side.
-  /// `license_unknown` is optional: omitting it leaves the existing
-  /// disposition alone, so enabling an ecosystem does not silently reset
-  /// a policy somebody set.
-  setPackageEcosystem(
-    session: Session,
-    ecosystem: string,
-    mode: PackageMode,
-    licenseUnknown?: string,
-  ): Promise<PackageEcosystem> {
-    return call(session, "/packages/ecosystems", {
-      method: "PUT",
-      body: {
-        ecosystem,
-        mode,
-        ...(licenseUnknown ? { license_unknown: licenseUnknown } : {}),
-      },
-    });
-  },
-  async packages(session: Session, ecosystem?: string): Promise<Package[]> {
-    const q = ecosystem ? `?ecosystem=${encodeURIComponent(ecosystem)}` : "";
-    const out = await call<{ packages: Package[] }>(session, `/packages${q}`);
-    return out.packages;
-  },
-  packageDetail(session: Session, id: string): Promise<PackageDetail> {
-    return call(session, `/packages/${encodeURIComponent(id)}`);
-  },
-  /// Hide a version from resolution, or put it back. Not a delete: a
-  /// yanked version still downloads by exact version so a lockfile that
-  /// already names it keeps building.
-  yankPackageVersion(
-    session: Session,
-    id: string,
-    version: string,
-    yanked: boolean,
-    reason?: string,
-  ): Promise<PackageVersion> {
-    return call(
-      session,
-      `/packages/${encodeURIComponent(id)}/versions/${encodeURIComponent(version)}/yank`,
-      { method: "POST", body: { yanked, reason: reason ?? null } },
-    );
-  },
-  deletePackage(session: Session, id: string): Promise<void> {
-    return call(session, `/packages/${encodeURIComponent(id)}`, {
-      method: "DELETE",
-    });
-  },
-  /// What may enter this organization's builds from an upstream
-  /// registry. Readable by any member: a developer whose install was
-  /// refused needs to be able to see why without an admin in the room.
-  packagePolicy(session: Session, ecosystem = "npm"): Promise<AdmissionPolicy> {
-    return call(
-      session,
-      `/packages/policy?ecosystem=${encodeURIComponent(ecosystem)}`,
-    );
-  },
-  setPackagePolicy(
-    session: Session,
-    body: {
-      mode: AdmissionMode;
-      cooldown_days: number;
-      license_mode: LicenseMode;
-    },
-  ): Promise<AdmissionPolicy> {
-    return call(session, "/packages/policy", { method: "PUT", body });
-  },
-  /// Add, change or remove one licence rule. `disposition: null`
-  /// removes it, which is a third answer and not the same as denying:
-  /// under a deny list an absent rule admits, and under an allow list it
-  /// refuses.
-  setLicenseRule(
-    session: Session,
-    spdxId: string,
-    disposition: "allow" | "deny" | null,
-  ): Promise<AdmissionPolicy> {
-    return call(session, "/packages/policy/licenses", {
-      method: "PUT",
-      body: { spdx_id: spdxId, ...(disposition ? { disposition } : {}) },
-    });
-  },
-  reserveNamespace(
-    session: Session,
-    ecosystem: string,
-    pattern: string,
-  ): Promise<AdmissionPolicy> {
-    return call(session, "/packages/policy/namespaces", {
-      method: "POST",
-      body: { ecosystem, pattern },
-    });
-  },
-  releaseNamespace(
-    session: Session,
-    ecosystem: string,
-    pattern: string,
-  ): Promise<void> {
-    return call(
-      session,
-      `/packages/policy/namespaces?ecosystem=${encodeURIComponent(ecosystem)}&pattern=${encodeURIComponent(pattern)}`,
-      { method: "DELETE" },
-    );
-  },
-  async packageFindings(session: Session): Promise<PolicyFinding[]> {
-    const out = await call<{ findings: PolicyFinding[] }>(
-      session,
-      "/packages/findings",
-    );
-    return out.findings;
-  },
-  /// Forget one finding. This does not admit the package — the rule
-  /// that produced the row is still in force and the next fetch writes
-  /// it again. Allowing something is a change to the rule; clearing the
-  /// row afterwards is what makes a cleared row mean somebody acted.
-  forgetFinding(
-    session: Session,
-    f: Pick<PolicyFinding, "ecosystem" | "name" | "version">,
-  ): Promise<void> {
-    const q = new URLSearchParams({
-      ecosystem: f.ecosystem,
-      name: f.name,
-      version: f.version,
-    });
-    return call(session, `/packages/findings?${q.toString()}`, {
-      method: "DELETE",
-    });
-  },
   async runners(session: Session): Promise<Runner[]> {
     const out = await call<{ runners: Runner[] }>(session, "/runners");
     return out.runners;
-  },
-  /// The GitHub Actions jobs that asked for a Weft runner, newest
-  /// first, and the sizes a workflow may ask for. Membership, not admin:
-  /// a refusal is *seen* here and nowhere on GitHub.
-  githubJobs(
-    session: Session,
-  ): Promise<{ jobs: GithubJob[]; sizes: GithubRunnerSize[] }> {
-    return call(session, "/github-jobs");
   },
   removeRunner(session: Session, id: string): Promise<void> {
     return call(session, `/runners/${encodeURIComponent(id)}`, {
@@ -3414,9 +2719,8 @@ export const api = {
   /// is a property of a person, and there is nobody to have one. The
   /// control treats that as "do not render", not as an error worth
   /// putting on the page.
-  /// `GET /v1/users/{handle}` — public. Sent with whatever credential
-  /// the viewer has because the server answers a stranger and the
-  /// account itself from the same route.
+  /// `GET /v1/users/{handle}` — what a namespace says about itself.
+  /// Sent with whatever credential the viewer has, like every read.
   getProfile(session: Session, handle: string): Promise<Profile> {
     return raw(`/v1/users/${encodeURIComponent(handle)}`, session.token);
   },
@@ -3499,61 +2803,11 @@ export const api = {
       { method: "DELETE" },
     );
   },
-  /// `GET /v1/users/{handle}/pins` — public, and visibility-filtered
-  /// server-side by the caller, so the page needs no permission logic.
-  getPins(session: Session, handle: string): Promise<{ pins: Pin[] }> {
-    return raw(`/v1/users/${encodeURIComponent(handle)}/pins`, session.token);
-  },
-  /// `GET /v1/users/{handle}/contributions` — the graph. Anonymous, and
-  /// the same answer for every reader: a public page that says different
-  /// things to different people is one nobody can quote.
-  getContributions(
-    session: Session,
-    handle: string,
-    range?: { from: string; to: string },
-  ): Promise<ContributionGraph> {
-    const q = range ? `?from=${range.from}&to=${range.to}` : "";
-    return raw(
-      `/v1/users/${encodeURIComponent(handle)}/contributions${q}`,
-      session.token,
-    );
-  },
-  /// `GET /v1/users/{handle}/follow` — counts, plus the viewer's own
-  /// edge when they have an account.
-  getFollow(session: Session, handle: string): Promise<FollowState> {
-    return raw(`/v1/users/${encodeURIComponent(handle)}/follow`, session.token);
-  },
-  /// Follow or unfollow. A person's act: a service token is refused by
-  /// the server, so this is only ever called from a signed-in page.
-  setFollow(
-    session: Session,
-    handle: string,
-    following: boolean,
-  ): Promise<FollowState> {
-    return raw(
-      `/v1/users/${encodeURIComponent(handle)}/follow`,
-      session.token,
-      {
-        method: following ? "PUT" : "DELETE",
-      },
-    );
-  },
-  /// Star counts. Sent with whatever credential the viewer has: the
-  /// server answers a stranger and the account itself from one route,
-  /// and a signed-out visitor deciding whether a project is alive is
-  /// exactly who the number is for.
-  getStars(session: Session, repo: string): Promise<StarState> {
-    return call(session, `/repos/${encodeURIComponent(repo)}/star`);
-  },
-  /// Language mix, licence, community files and topics. Sent with
-  /// whatever credential the viewer has: the server answers a stranger
-  /// about a public repository from the same route, and masks a private
-  /// one exactly as it masks the code.
   /// Who has contributed to this repository, biggest share first.
   ///
-  /// Derived from the commits themselves, like the profile heatmap
-  /// beside it — which is what makes a project that mirrored in
-  /// yesterday show its real contributors rather than an empty grid.
+  /// Derived from the commits themselves, which is what makes a project
+  /// that mirrored in yesterday show its real contributors rather than
+  /// an empty grid.
   /// The server clamps `limit`; the client does not second-guess it.
   async contributors(
     session: Session,
@@ -3695,18 +2949,6 @@ export const api = {
       method: "DELETE",
     });
   },
-  /// What this repository publishes as a static site, and the address
-  /// it is served at. `repo:read` — the same right as reading the code,
-  /// because the answer is a fact about the code.
-  ///
-  /// A GET with no body, deliberately spelled like every other read
-  /// here: `call` is the only place a request body is ever serialised,
-  /// and a caller that hands it `JSON.stringify(...)` gets a
-  /// double-encoded string on the wire. That bug has shipped from this
-  /// file once already.
-  siteStatus(session: Session, repo: string): Promise<SiteStatus> {
-    return call(session, `/repos/${encodeURIComponent(repo)}/site`);
-  },
   /// How the last poll of this repository's GitHub Actions runs went.
   ///
   /// Read by the Checks tab so an empty list can say *why* it is empty.
@@ -3722,7 +2964,7 @@ export const api = {
       method: "POST",
     });
   },
-  /// This repository's **hosted** runs, newest first, jobs included.
+  /// This repository's workflow runs, newest first, jobs included.
   ///
   /// Jobs ride along rather than costing a request each: a run without
   /// its jobs is a row that can say "failed" and nothing about what
@@ -3731,7 +2973,7 @@ export const api = {
   /// A server that does not yet filter on them ignores them and answers
   /// the same page it always did, so a caller that wants one commit's
   /// runs must **still** filter what comes back — see
-  /// `@/lib/hosted-runs`. Sending them is what makes the answer exact
+  /// `@/lib/workflow-runs`. Sending them is what makes the answer exact
   /// once the server can: without a filter the runs for the commit under
   /// review fall out of the newest-first window on a busy repository,
   /// and a page that reads "nothing is blocked" from a truncated list is
@@ -3761,7 +3003,7 @@ export const api = {
     );
     return out.runs;
   },
-  /// One hosted run. A run belonging to another repository answers 404,
+  /// One workflow run. A run belonging to another repository answers 404,
   /// not 403 — an id that resolves differently for a stranger is an
   /// existence oracle — so a caller must render "no such run" for both.
   workflowRun(
@@ -3794,7 +3036,7 @@ export const api = {
       { method: "POST" },
     );
   },
-  /// Approve the blocked hosted runs on a change from a fork, and start
+  /// Approve the blocked workflow runs on a change from a fork, and start
   /// them.
   ///
   /// Deliberately **not** named `approve`: that one is the review
@@ -3919,12 +3161,11 @@ export const api = {
       reader.cancel().catch(() => {});
     }
   },
-  /// Public repositories forked directly from this one.
+  /// Repositories forked directly from this one that the caller may see.
   ///
-  /// `count` is the length of the list and never the stored total: a
-  /// fork can be made private after the fact, so publishing a larger
-  /// number than the list would say exactly how many private ones
-  /// exist.
+  /// `count` is the length of the list and never the stored total:
+  /// publishing a larger number than the list would say exactly how many
+  /// forks exist that the caller cannot read.
   forks(
     session: Session,
     repo: string,
@@ -3949,17 +3190,6 @@ export const api = {
       // the double-encoding bug the Playwright suite caught once
       // already: `raw` stringifies the body itself.
       body: { topics },
-    });
-  },
-  /// Idempotent — starring twice is starring once, server-side.
-  star(session: Session, repo: string): Promise<StarState> {
-    return call(session, `/repos/${encodeURIComponent(repo)}/star`, {
-      method: "PUT",
-    });
-  },
-  unstar(session: Session, repo: string): Promise<StarState> {
-    return call(session, `/repos/${encodeURIComponent(repo)}/star`, {
-      method: "DELETE",
     });
   },
   /// Fork a repository into a namespace — the caller's own when `org`
@@ -4142,7 +3372,7 @@ export const api = {
   /// not an addition, which is the same shape `setTopics` uses.
   ///
   /// Needs write access: the server resolves with read and then checks
-  /// write explicitly, so a reporter on a public tracker gets a 403 that
+  /// write explicitly, so a reader without write access gets a 403 that
   /// explains itself rather than a 404 that denies the issue exists.
   setIssueLabels(
     session: Session,

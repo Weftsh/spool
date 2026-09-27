@@ -26,8 +26,8 @@ export interface SuggestionActors {
   /// Whether this viewer may commit at all — `repo:write`, the same
   /// scope the apply route demands, and the change still being open.
   /// False draws no control anywhere: the 403 is the honest fallback
-  /// for a race, not the primary check, and a reader on a public
-  /// repository must not be handed a button that leads to one.
+  /// for a race, not the primary check, and a reader without write
+  /// access must not be handed a button that leads to one.
   canApply: boolean;
   /// The comment ids gathered for the next patchset. Held by the view
   /// above rather than per card, because the whole point of the route

@@ -18,16 +18,12 @@ import { test as setup, expect } from "@playwright/test";
 /// The budgets are the first real build plus a little: tighten them when
 /// a change makes the entry smaller, never loosen one without saying why
 /// in the commit.
-// Raised from 880_000 on 2026-09-16, and the reason belongs here rather
-// than only in a commit nobody will find. Two features landed together —
-// the packages settings and findings screens, and signing in with GitHub
-// — and neither crossed the line alone; together they were 1,782 bytes
-// over, which is 0.2%. What this guard actually watches was checked
-// before loosening it: the entry chunk contains no `@pierre`, no
-// `diffs-container` and no `file-tree-container`, and the code library is
-// still a separate asset. A highlighter leaking in is hundreds of
-// kilobytes, so the headroom here does not blind it.
-const ENTRY_BUDGET = 890_000;
+// Lowered from 890_000 on 2026-09-27, when the self-hosted edition took
+// out the package registry, billing, stars, follows, the contribution
+// graph, Sites and the signed-out forge: the entry fell to 813,737
+// bytes, and this is that plus 2%. A highlighter leaking in is hundreds
+// of kilobytes, so the headroom here does not blind the guard.
+const ENTRY_BUDGET = 830_000;
 const SURFACE_BUDGET = 1_200_000;
 
 setup("the entry chunk stays free of the code libraries", () => {

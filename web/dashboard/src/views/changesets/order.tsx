@@ -64,7 +64,7 @@ const WIDE_ENOUGH_FOR_COLUMNS = 4;
 export function LandingOrder(props: {
   session: Session;
   /// Where a member chip links, in the terms of the mount this strip is
-  /// drawn on — the dashboard's, or the forge's public changeset page.
+  /// drawn on — the dashboard's, or the forge's changeset page.
   links: ChangesetLinks;
   cs: Changeset;
   /// Members in landing order, as the members table has them, so the

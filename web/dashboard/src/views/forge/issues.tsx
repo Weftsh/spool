@@ -26,7 +26,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { Err, Loading } from "@/components/feedback";
 import { Markdown } from "@/components/markdown";
 import { NotFound } from "@/components/not-found";
-import { FOCUS_RING, PROSE_LINK, STRUCTURAL_LINK } from "@/lib/links";
+import { FOCUS_RING, STRUCTURAL_LINK } from "@/lib/links";
 import { cn } from "@/lib/utils";
 import { href } from "@/router";
 
@@ -283,22 +283,11 @@ export interface IssuesProps {
   token: string | null;
   /// The signed-in person, when they signed in with a password.
   me: Me | null;
-  /// The address bar's own path — where to come back to after signing in.
-  currentPath: string;
   /// Whether this viewer may push here, from the server's own answer.
   /// Labelling and the label vocabulary are both write-gated; this is
   /// what keeps the UI from offering a control that will only refuse.
   canWrite: boolean;
   navigate: (to: string, replace?: boolean) => void;
-}
-
-/// Signed in is signed in, however you did it.
-///
-/// `me` is null on a token session — the password flow is what fills it
-/// — so testing it alone tells a service caller they are a stranger, and
-/// then offers them a sign-in link they are already past.
-function isSignedIn(props: { me: Me | null; token: string | null }): boolean {
-  return props.me !== null || (props.token ?? "") !== "";
 }
 
 export function IssuesView(props: IssuesProps) {
@@ -312,23 +301,9 @@ export function IssuesView(props: IssuesProps) {
   return <IssueIndexView {...props} />;
 }
 
-/// The control that files an issue — or, for a stranger, the invitation
-/// to sign in first.
-///
-/// Never a button that only errors. Filing an issue needs a credential
-/// and nothing else (`RepoRead`, not `RepoWrite`, which is the whole
-/// reason this feature is usable on open source), so a signed-out
-/// visitor is one sign-in away and is told exactly that.
+/// The control that files an issue. Filing one needs `RepoRead`, not
+/// `RepoWrite`, so anybody who can read the repository may.
 function NewIssueButton(props: IssuesProps) {
-  if (!isSignedIn(props)) {
-    return (
-      <Button asChild variant="outline">
-        <a href={href(["login"], { next: props.currentPath })}>
-          Sign in to open an issue
-        </a>
-      </Button>
-    );
-  }
   return (
     <Button asChild>
       <a
@@ -1131,7 +1106,6 @@ function IssueDetailView(props: IssuesProps & { number: number }) {
   if (!issue) return <Loading />;
 
   const open = issue.state === "open";
-  const signedIn = isSignedIn(props);
   // The server allows editing the text, and closing, to a writer **or**
   // the issue's own author — somebody who filed a bug and worked out it
   // was their own mistake should not have to wait for a maintainer to
@@ -1294,85 +1268,70 @@ function IssueDetailView(props: IssuesProps & { number: number }) {
         </ul>
       )}
 
-      {signedIn ? (
-        <form
-          className="mt-6 flex flex-col gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            const body = draft.trim();
-            if (!body || busy) return;
-            setBusy(true);
-            setError(null);
-            api
-              .commentOnIssue(session, repo, number, body)
-              .then((c) => {
-                setComments((prev) => bySeq([...(prev ?? []), c]));
-                setIssue((prev) =>
-                  prev
-                    ? { ...prev, comment_count: prev.comment_count + 1 }
-                    : prev,
-                );
-                setDraft("");
-              })
-              .catch((err: Error) => setError(err.message))
-              .finally(() => setBusy(false));
-          }}
-        >
-          <textarea
-            aria-label="Comment on this issue"
-            placeholder="Leave a comment"
-            className="min-h-24 rounded-lg border border-borderline bg-surface-1 px-3 py-2 text-sm text-ink"
-            value={draft}
-            onChange={(e) => setDraft(e.target.value)}
-            maxLength={65536}
-          />
-          <div className="flex items-center gap-2">
-            <Button type="submit" disabled={busy || draft.trim() === ""}>
-              Comment
+      <form
+        className="mt-6 flex flex-col gap-2"
+        onSubmit={(e) => {
+          e.preventDefault();
+          const body = draft.trim();
+          if (!body || busy) return;
+          setBusy(true);
+          setError(null);
+          api
+            .commentOnIssue(session, repo, number, body)
+            .then((c) => {
+              setComments((prev) => bySeq([...(prev ?? []), c]));
+              setIssue((prev) =>
+                prev
+                  ? { ...prev, comment_count: prev.comment_count + 1 }
+                  : prev,
+              );
+              setDraft("");
+            })
+            .catch((err: Error) => setError(err.message))
+            .finally(() => setBusy(false));
+        }}
+      >
+        <textarea
+          aria-label="Comment on this issue"
+          placeholder="Leave a comment"
+          className="min-h-24 rounded-lg border border-borderline bg-surface-1 px-3 py-2 text-sm text-ink"
+          value={draft}
+          onChange={(e) => setDraft(e.target.value)}
+          maxLength={65536}
+        />
+        <div className="flex items-center gap-2">
+          <Button type="submit" disabled={busy || draft.trim() === ""}>
+            Comment
+          </Button>
+          {/* Only for somebody the server will let do it. Closing is
+              a writer's or the author's, so a signed-in stranger was
+              being offered a button that could only come back 403 —
+              the same shape the Changes tab had. */}
+          {canEdit && (
+            <Button
+              type="button"
+              variant="outline"
+              disabled={busy}
+              onClick={() => {
+                setBusy(true);
+                setError(null);
+                api
+                  .setIssueState(
+                    session,
+                    repo,
+                    number,
+                    open ? "closed" : "open",
+                  )
+                  .then(setIssue)
+                  .catch((err: Error) => setError(err.message))
+                  .finally(() => setBusy(false));
+              }}
+            >
+              {open ? "Close issue" : "Reopen issue"}
             </Button>
-            {/* Only for somebody the server will let do it. Closing is
-                a writer's or the author's, so a signed-in stranger was
-                being offered a button that could only come back 403 —
-                the same shape the Changes tab had. */}
-            {canEdit && (
-              <Button
-                type="button"
-                variant="outline"
-                disabled={busy}
-                onClick={() => {
-                  setBusy(true);
-                  setError(null);
-                  api
-                    .setIssueState(
-                      session,
-                      repo,
-                      number,
-                      open ? "closed" : "open",
-                    )
-                    .then(setIssue)
-                    .catch((err: Error) => setError(err.message))
-                    .finally(() => setBusy(false));
-                }}
-              >
-                {open ? "Close issue" : "Reopen issue"}
-              </Button>
-            )}
-          </div>
-        </form>
-      ) : (
-        // A prompt, not a disabled control and not a form that only
-        // errors. Commenting needs `RepoRead` and a credential; a
-        // stranger is exactly one sign-in away from being able to.
-        <p className="mt-6 rounded-lg border border-borderline bg-surface-1 p-4 text-sm text-ink-2">
-          <a
-            className={PROSE_LINK}
-            href={href(["login"], { next: props.currentPath })}
-          >
-            Sign in
-          </a>{" "}
-          to join this conversation.
-        </p>
-      )}
+          )}
+        </div>
+      </form>
     </div>
   );
 }
@@ -1387,23 +1346,6 @@ function NewIssueView(props: IssuesProps) {
   const [body, setBody] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-
-  if (!isSignedIn(props)) {
-    return (
-      <div className="py-10 text-center">
-        <h1 className="text-xl font-semibold text-ink">Open an issue</h1>
-        <p className="mx-auto mt-2 max-w-md text-sm text-ink-2">
-          Anybody with an account can file an issue here — you do not need write
-          access to the repository.
-        </p>
-        <div className="mt-4">
-          <Button asChild>
-            <a href={href(["login"], { next: props.currentPath })}>Sign in</a>
-          </Button>
-        </div>
-      </div>
-    );
-  }
 
   return (
     <div className="max-w-3xl py-6">

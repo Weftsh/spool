@@ -1,16 +1,16 @@
 // A profile page opened by somebody holding an API token.
 //
-// The forge's data calls used to be built as `anon(owner)` everywhere,
-// so a caller signed in with a token was sent unauthenticated requests
-// and shown a stranger's view of the world. core-1f fixed that for the
-// repository page; this pins the profile page, which is reached through
-// the same shell and had the same defect.
+// The forge's data calls used to be built with an empty token
+// everywhere, so a caller signed in with a token was sent
+// unauthenticated requests. core-1f fixed that for the repository page;
+// this pins the profile page, which is reached through the same shell
+// and had the same defect.
 //
 // The visible cost is not cosmetic: the repository grid is fed by
 // `/v1/search/repos`, which the server filters by who is asking. With
 // no credential on the request, a person looking at their own profile
-// while signed in with a token does not see their own private
-// repositories — the page tells them their work is not there.
+// while signed in with a token does not see their own repositories —
+// the page tells them their work is not there.
 
 import { expect, test } from "@playwright/test";
 
@@ -28,10 +28,6 @@ test("a profile read carries the viewer's token", async ({ page }) => {
     auth.push(r.request().headers()["authorization"] ?? null);
     return r.fulfill({ status: 200, json: { repos: [], next: null } });
   });
-  await page.route("**/v1/users/ada/pins", (r) => {
-    auth.push(r.request().headers()["authorization"] ?? null);
-    return r.fulfill({ status: 200, json: { pins: [] } });
-  });
   await page.route("**/v1/users/ada", (r) =>
     r.fulfill({
       status: 200,
@@ -44,11 +40,9 @@ test("a profile read carries the viewer's token", async ({ page }) => {
         company: null,
         pronouns: null,
         kind: "human",
-        contrib_private_optin: false,
         profile_repo: null,
         created_at: 1,
         links: [],
-        public_repos: 0,
       },
     }),
   );

@@ -138,17 +138,7 @@ pub async fn fallback(State(state): State<SharedState>, uri: Uri) -> Response {
 /// page that exists in one and not the other is either an unreachable
 /// route or a namespace nobody can use. `dashboard` is absent because it
 /// has real routes of its own and never reaches this fallback.
-const SPA_SEGMENTS: &[&str] = &[
-    "explore",
-    "feed",
-    "issues",
-    "login",
-    "notifications",
-    "orgs",
-    "search",
-    "stars",
-    "topics",
-];
+const SPA_SEGMENTS: &[&str] = &["issues", "login", "notifications", "orgs", "search"];
 
 /// The dashboard shell for a forge URL, or 404.
 ///

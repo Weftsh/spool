@@ -1,18 +1,16 @@
 // The Fork control on a repository page, and the line that says whose
 // history a fork is carrying.
 //
-// Four things are worth pinning here. The count is public, so it shows
-// to a stranger while the action does not. Forking navigates to the
-// fork — a POST that leaves you on the page you were already on reads
-// as having done nothing. A fork says "forked from" under its name,
-// because a fork that does not is a repository claiming somebody
-// else's history as its own. And the control is the same size as the
-// ones beside it: Fork, Star and Watch are one row of siblings, and a
-// row where one sibling is a size smaller is the first thing a person
-// notices about the page.
+// Three things are worth pinning here. The count is on the control,
+// from the repository row. Forking navigates to the fork — a POST that
+// leaves you on the page you were already on reads as having done
+// nothing. And a fork says "forked from" under its name, because a
+// fork that does not is a repository claiming somebody else's history
+// as its own. (That it is the same size as Watch beside it is
+// `watch.spec.ts`'s to hold.)
 
 import { expect, test, type Page } from "@playwright/test";
-import { REPOS, signIn } from "./fixtures";
+import { ME, REPOS, signIn } from "./fixtures";
 
 // `native`, and not incidentally: `REPOS.repos[0]` is a mirror, and a
 // mirror can never carry a change — `changes_api::create` refuses one at
@@ -22,17 +20,15 @@ import { REPOS, signIn } from "./fixtures";
 const widget = {
   ...REPOS.repos[0],
   org: "acme",
-  public: true,
   kind: "native",
   fork_count: 2,
 };
 
 /// A repository page with nothing mocked but what the test names.
 ///
-/// The catch-all is registered first, for the reason `public.spec.ts`
-/// sets out at length: an unmocked `/v1` call otherwise proxies to
-/// whatever is listening on :8080, so the suite would be hermetic only
-/// when nobody had the manual stack up.
+/// The catch-all is registered first: an unmocked `/v1` call otherwise
+/// proxies to whatever is listening on :8080, so the suite would be
+/// hermetic only when nobody had the manual stack up.
 async function onRepo(page: Page, repo: Record<string, unknown>) {
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
@@ -43,23 +39,15 @@ async function onRepo(page: Page, repo: Record<string, unknown>) {
 }
 
 const forkButton = (page: Page) =>
-  page.getByRole("button", { name: /fork this repository|sign in to fork/i });
+  page.getByRole("button", { name: /fork this repository/i });
 
-test("a stranger sees the fork count and is asked to sign in", async ({
+test("the fork count is on the control, from the repository row", async ({
   page,
 }) => {
   await onRepo(page, widget);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   await page.goto("/acme/widget");
-
-  // The count is public information — it is one of the few honest
-  // signals a stranger has about whether a project is worked on.
   await expect(forkButton(page)).toContainText("2");
-  await forkButton(page).click();
-  // A prompt, not a failed write.
-  await expect(page).toHaveURL(/\/login/);
 });
 
 test("forking lands you in the fork, not back on the upstream", async ({
@@ -201,9 +189,7 @@ test("a fork still being made says so, then shows its files without a reload", a
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   const fork = { ...widget, org: "alice", fork_parent: "acme/widget" };
   let rowReads = 0;
   await page.route("**/v1/orgs/alice/repos/widget", (r) => {
@@ -218,8 +204,8 @@ test("a fork still being made says so, then shows its files without a reload", a
   let contentWhilePending = 0;
   await page.route("**/v1/orgs/alice/repos/widget/*", (r) => {
     const url = r.request().url();
-    // Only what needs the fork's objects; the About rail's forks, star
-    // and contributor reads are the row's facts and answer fine.
+    // Only what needs the fork's objects; the About rail's forks and
+    // contributor reads are the row's facts and answer fine.
     if (
       rowReads < 3 &&
       /\/(tree|files|log|branches|tags|meta)(\?|\/|$)/.test(url)
@@ -264,9 +250,7 @@ test('a fork that could not be made says that, not "404"', async ({ page }) => {
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   await page.route("**/v1/orgs/alice/repos/widget", (r) =>
     r.fulfill({
       status: 200,
@@ -289,9 +273,7 @@ test("a fork says whose history it is carrying", async ({ page }) => {
   await page.route("**/v1/**", (r) =>
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   await page.route("**/v1/orgs/alice/repos/widget", (r) =>
     r.fulfill({
       status: 200,
@@ -314,41 +296,10 @@ test("a repository that is not a fork says nothing about one", async ({
   page,
 }) => {
   await onRepo(page, widget);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
+  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
   await page.goto("/acme/widget");
   await expect(forkButton(page)).toBeVisible();
   await expect(page.getByText(/forked from/i)).toHaveCount(0);
-});
-
-test("fork and star are the same size", async ({ page }) => {
-  await onRepo(page, widget);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
-  await page.route("**/v1/orgs/acme/repos/widget/star", (r) =>
-    r.fulfill({
-      status: 200,
-      json: { starred: false, stars: 4, origin: null },
-    }),
-  );
-  await page.goto("/acme/widget");
-
-  // What Star says to a stranger, which is now a sentence like its two
-  // siblings': it used to have no `ariaLabel` at all, so a signed-out
-  // visitor's accessible name for it was "Star 4" on a control that
-  // navigates to /login. This page is signed out, so it reads the
-  // sign-in name.
-  const star = page.getByRole("button", { name: /^sign in to star/i });
-  await expect(star).toBeVisible();
-  const a = await forkButton(page).boundingBox();
-  const b = await star.boundingBox();
-  // Height, not width — the widths differ legitimately with the word
-  // and the count. What a person actually sees when two siblings carry
-  // different `size` variants is one button shorter than the other,
-  // which is what this caught.
-  expect(a && b && Math.abs(a.height - b.height)).toBeLessThanOrEqual(1);
 });
 
 // ---------------------------------------------------------------------
@@ -423,37 +374,6 @@ async function capturePost(page: Page): Promise<() => unknown> {
   });
   return () => body;
 }
-
-test("a signed-out visitor is not offered a form they cannot submit", async ({
-  page,
-}) => {
-  // This is the defect exactly: signed out, the Changes tab drew "Start
-  // a review", took a branch name, and only then answered "opening a
-  // change from this repository needs write access". The remedy it
-  // named was a REST parameter. Nobody can open a change without an
-  // account, so the honest surface is the account.
-  await onChangesTab(page, { ...widget, viewer_write: false });
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
-  await page.goto("/acme/widget/changes");
-
-  await expect(
-    page.getByText("Opening a change needs an account"),
-  ).toBeVisible();
-  await expect(
-    page.getByLabel("Branch to review"),
-    "a signed-out visitor is still offered the branch field",
-  ).toHaveCount(0);
-  // Scoped to the panel: the masthead carries a "Sign in" link too, and
-  // a bare match would pass on that one — which is the control this test
-  // is asserting is *not* enough on its own.
-  await expect(
-    page.getByRole("main").getByRole("link", { name: "Sign in" }),
-  ).toBeVisible();
-  // And it says the thing a contributor actually needs to know.
-  await expect(page.getByText(/fork this repository/i)).toBeVisible();
-});
 
 test("a reader without write access is given the fork field, and it is sent", async ({
   page,
@@ -534,9 +454,9 @@ test("the fork field suggests this repository's forks", async ({ page }) => {
   ]);
   await page.goto("/acme/widget/changes");
 
-  // A datalist, not a select: the listing is public forks only, and a
-  // contributor's fork may be private, so the field has to accept one
-  // that was never offered.
+  // A datalist, not a select: the listing is only the forks this reader
+  // may see, and a contributor's fork may not be one of them, so the
+  // field has to accept one that was never offered.
   const options = page.locator("#review-source-forks option");
   await expect(options).toHaveCount(2);
   await expect(options.first()).toHaveAttribute("value", "bob/widget");

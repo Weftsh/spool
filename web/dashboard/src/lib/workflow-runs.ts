@@ -1,19 +1,19 @@
-/// Joining a hosted run back onto the check rows it produced.
+/// Joining a workflow run back onto the check rows it produced.
 ///
-/// A hosted run mirrors into `check_runs` so that a project on our own
-/// runners reads exactly like a project on Buildkite. That is the right
-/// default and it loses one thing: a run that was **refused** — a fork
-/// awaiting approval, an organisation over its minutes, one whose hosted
-/// workflows are suspended — mirrors as `queued`, because nothing is
-/// wrong with the change and a red row would tell its author to go and
-/// fix code that is fine (`workflow/mirror.rs`).
+/// A `.weft/*.yml` workflow run mirrors into `check_runs` so that a
+/// project on the organization's own runners reads exactly like a
+/// project on Buildkite. That is the right default and it loses one
+/// thing: a run that was **refused** — a fork awaiting approval, say —
+/// mirrors as `queued`, because nothing is wrong with the change and a
+/// red row would tell its author to go and fix code that is fine
+/// (`workflow/mirror.rs`).
 ///
 /// The cost is a reader waiting forever for a check that will never
 /// start, with the reason sitting on the run where nothing on the page
 /// looks. The row says "Queued"; the run says "this change comes from a
 /// fork; a maintainer has to approve its workflows before they run".
 ///
-/// So the pages that list checks fetch the hosted runs as well and join
+/// So the pages that list checks fetch the workflow runs as well and join
 /// them here. The join is two-keyed because the mirror writes two shapes
 /// of row and they are addressed differently:
 ///
@@ -28,8 +28,8 @@
 /// and neither reads the reason's prose.
 import type { CheckRun, WorkflowRun } from "@/api";
 
-/// `check_runs.provider` for a run on our own runners.
-export const HOSTED_PROVIDER = "weft";
+/// `check_runs.provider` for a row mirrored from a workflow run.
+export const WORKFLOW_PROVIDER = "weft";
 
 /// What a blocked run says when the server sent no sentence with it.
 ///
@@ -39,34 +39,13 @@ export const HOSTED_PROVIDER = "weft";
 export const UNEXPLAINED_BLOCK =
   "This run is blocked, and the server gave no reason.";
 
-/// What a run held at the spend limit says.
-///
-/// The one refusal with its own sentence here, because it is the one
-/// a reader can do something about from this product — raise the limit
-/// on Billing — and the one where "what is *not* affected" matters:
-/// jobs on the organization's own runners are running as normal, and a
-/// reader who is not told that goes looking for a fault in them.
-export const SPEND_LIMIT_BLOCK =
-  "Hosted jobs are waiting at the spend limit. This organization has " +
-  "used its pooled minutes this period and reached its spend limit; jobs " +
-  "on hosted runners wait until minutes free up or the limit is raised in " +
-  "Settings → Billing. Jobs on your own runners are running as normal.";
-
 /// The reason a run is blocked, never blank.
 ///
 /// The server's own sentence when it sent one — verbatim, because a
-/// paraphrase is a reason nobody gave. A run blocked at the spend limit
-/// that arrived without one gets the sentence above rather than the
-/// unexplained fallback: the reason *code* says what happened, and
-/// "the server gave no reason" would be false.
-export function blockReason(
-  run: Pick<WorkflowRun, "error"> & Partial<Pick<WorkflowRun, "blocked_reason">>,
-): string {
+/// paraphrase is a reason nobody gave.
+export function blockReason(run: Pick<WorkflowRun, "error">): string {
   const text = (run.error ?? "").trim();
-  if (text !== "") return text;
-  return run.blocked_reason === "spend_limit"
-    ? SPEND_LIMIT_BLOCK
-    : UNEXPLAINED_BLOCK;
+  return text !== "" ? text : UNEXPLAINED_BLOCK;
 }
 
 /// The blocked runs, optionally only those for one commit.
@@ -88,11 +67,9 @@ export function blockedRuns(
 
 /// The blocked runs at this tip that approving would actually start.
 ///
-/// Only a fork's. The three refusals arrive as one state and are three
-/// different situations: a fork's run waits on the maintainer reading
-/// the page, while a suspended organisation's waits on an operator and
-/// an out-of-minutes one waits on the window rolling. Offering a button
-/// for those two offers a control that cannot work — pressing it
+/// Only a fork's. Every refusal arrives as one state, and only a fork's
+/// run is waiting on the maintainer reading the page. Offering a button
+/// for any other reason offers a control that cannot work — pressing it
 /// triggers another run, which blocks again with the same sentence, and
 /// the server answers 409 to somebody who was given every reason to
 /// expect otherwise.
@@ -138,7 +115,7 @@ export function refusalsByFile(
 }
 
 /// The refusal on one check row, or `null` if it is not a blocked
-/// hosted run.
+/// workflow run.
 ///
 /// Provider-gated before anything else. A third party can post a check
 /// row named after one of our workflow files, and without this it would
@@ -147,7 +124,7 @@ export function rowRefusal(
   row: Pick<CheckRun, "provider" | "external_id">,
   byRunId: ReadonlyMap<string, string>,
 ): string | null {
-  if (row.provider !== HOSTED_PROVIDER) return null;
+  if (row.provider !== WORKFLOW_PROVIDER) return null;
   if (row.external_id === null) return null;
   return byRunId.get(row.external_id) ?? null;
 }
@@ -156,12 +133,12 @@ export function rowRefusal(
 ///
 /// `posted_by` is the provider for a commit-scoped row, so it is the
 /// same gate one field over. A patchset-scoped row is somebody's intake
-/// posting and never a hosted run, whatever it calls itself.
+/// posting and never a workflow run, whatever it calls itself.
 export function panelRowRefusal(
   row: { name: string; source?: string | null; posted_by?: string | null },
   byFile: ReadonlyMap<string, string>,
 ): string | null {
-  if (row.posted_by !== HOSTED_PROVIDER) return null;
+  if (row.posted_by !== WORKFLOW_PROVIDER) return null;
   if (
     row.source !== undefined &&
     row.source !== null &&

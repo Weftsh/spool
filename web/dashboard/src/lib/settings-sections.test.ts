@@ -15,10 +15,8 @@ describe("settingsSections", () => {
   it("gives an owner every section, admin ones first", () => {
     expect(slugs(person("owner"))).toEqual([
       "members",
-      "billing",
       "runners",
       "teams",
-      "packages",
       "activity",
       "tokens",
       "ssh-keys",
@@ -28,17 +26,11 @@ describe("settingsSections", () => {
     expect(slugs(person("admin"))).toEqual(slugs(person("owner")));
   });
 
-  // Packages is visible to everybody, unlike Members, Billing and
-  // Runners. A member is the person who publishes and installs, and the
-  // screen is where the `.npmrc` snippet lives; switching an ecosystem
-  // on is the admin-only part, and the panel and the server both gate
-  // that rather than hiding the whole page.
-  it("hides Members and Billing from members and viewers", () => {
+  it("hides Members and Runners from members and viewers", () => {
     for (const role of ["member", "viewer"]) {
       expect(slugs(person(role))).toEqual([
         "teams",
-        "packages",
-        "activity",
+          "activity",
         "tokens",
         "ssh-keys",
         "emails",
@@ -56,10 +48,8 @@ describe("settingsSections", () => {
     // others have.
     expect(slugs(null)).toEqual([
       "members",
-      "billing",
       "runners",
       "teams",
-      "packages",
       "activity",
       "tokens",
       "ssh-keys",
@@ -69,7 +59,6 @@ describe("settingsSections", () => {
   it("a person outside the org gets the unprivileged set", () => {
     expect(slugs(person("owner", "elsewhere"), "acme")).toEqual([
       "teams",
-      "packages",
       "activity",
       "tokens",
       "ssh-keys",
@@ -84,17 +73,15 @@ describe("settingsSections", () => {
   });
 
   it("files each section under whose it is, the organization's first", () => {
-    // The rail renders one group per value, in this order. Billing and
+    // The rail renders one group per value, in this order. Runners and
     // Password used to share one "Settings" label.
     const groups = Object.fromEntries(
       settingsSections(person("owner"), "acme").map((s) => [s.slug, s.group]),
     );
     expect(groups).toEqual({
       members: "org",
-      billing: "org",
       runners: "org",
       teams: "org",
-      packages: "org",
       activity: "org",
       tokens: "account",
       "ssh-keys": "account",

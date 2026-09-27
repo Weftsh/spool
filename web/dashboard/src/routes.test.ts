@@ -17,40 +17,18 @@ describe("match", () => {
       expect(at(p)).toEqual({ kind: "dash" });
   });
 
-  it("carries a topic on explore, and the front page too", () => {
-    // The About rail's topic pills have always linked to
-    // `/explore?topic=…`, and nothing read the parameter — so every pill
-    // in the product landed on the unfiltered list of everything, which
-    // reads as the topic having no repositories rather than as the
-    // filter having been dropped.
-    expect(at("/explore", "topic=rust")).toEqual({
-      kind: "explore",
-      topic: "rust",
-    });
-    // The front page is the same listing and takes the same filter.
-    expect(at("/", "topic=rust")).toEqual({ kind: "explore", topic: "rust" });
-    // Absent is empty, not undefined: one shape for the view to read.
-    expect(at("/explore")).toEqual({ kind: "explore", topic: "" });
+  it("reads the front page as the way in, whatever it carries", () => {
+    // `/` has no listing of its own; `App.tsx` moves the browser to the
+    // dashboard. A stray query does not turn it into a page.
+    expect(at("/")).toEqual({ kind: "home" });
+    expect(at("/", "topic=rust")).toEqual({ kind: "home" });
   });
 
-  it("reads a bare namespace as a profile", () => {
-    expect(at("/ada")).toEqual({
-      kind: "owner",
-      owner: "ada",
-      tab: "overview",
-    });
-    expect(at("/acme", "tab=stars")).toEqual({
-      kind: "owner",
-      owner: "acme",
-      tab: "stars",
-    });
-    // An unknown tab is the overview, not a blank page: `?tab=` is
-    // somebody else's URL as often as it is ours.
-    expect(at("/acme", "tab=nonsense")).toEqual({
-      kind: "owner",
-      owner: "acme",
-      tab: "overview",
-    });
+  it("reads a bare namespace as its owner's page", () => {
+    expect(at("/ada")).toEqual({ kind: "owner", owner: "ada" });
+    // A `?tab=` from an older link is ignored rather than refused: the
+    // page it names is the only one there is.
+    expect(at("/acme", "tab=stars")).toEqual({ kind: "owner", owner: "acme" });
   });
 
   it("reads owner/repo as the code tab, because that is what links point at", () => {
@@ -89,10 +67,24 @@ describe("match", () => {
   });
 
   it("gives the header's search box somewhere to land", () => {
-    // `/explore` is curated lists, not results; a query sent there would
-    // be ignored or would quietly redefine what explore means.
-    expect(at("/search", "q=widget")).toEqual({ kind: "search", q: "widget" });
-    expect(at("/search")).toEqual({ kind: "search", q: "" });
+    expect(at("/search", "q=widget")).toEqual({
+      kind: "search",
+      q: "widget",
+      topic: "",
+    });
+    // Absent is empty, not undefined: one shape for the view to read.
+    expect(at("/search")).toEqual({ kind: "search", q: "", topic: "" });
+  });
+
+  it("carries a topic on search, which is where the About rail's pills go", () => {
+    // A pill is an exact facet, not text: `topic` rather than `q`, or a
+    // pill would also find every repository that merely mentions the
+    // word.
+    expect(at("/search", "topic=rust")).toEqual({
+      kind: "search",
+      q: "",
+      topic: "rust",
+    });
   });
 
   it("parses the address a review notification mails out", () => {
@@ -119,10 +111,10 @@ describe("match", () => {
 
   it("refuses a claimed segment rather than reading it as a namespace", () => {
     // These are reserved server-side precisely so nobody owns them; if
-    // one fell through to the profile page it would render a namespace
+    // one fell through to the owner page it would render a namespace
     // that cannot exist, which reads as the platform being broken.
     expect(at("/notifications")).toEqual({ kind: "not-found" });
-    expect(at("/topics")).toEqual({ kind: "not-found" });
+    expect(at("/orgs")).toEqual({ kind: "not-found" });
   });
 
   it("only returns after signing in to a path on this origin", () => {
@@ -182,14 +174,9 @@ describe("match", () => {
     );
   });
 
-  it("gives a changeset an address anybody can open", () => {
-    // A changeset used to live only at `/dashboard/changesets/{key}` —
-    // behind sign-in, and unreadable by a stranger — while a single
-    // change had `/{owner}/{repo}/changes/{key}`, a real public address.
-    // That was an inconsistency rather than a gap: the API's
-    // `Scope::RepoRead` already admits an anonymous reader over public
-    // repositories, so the review was readable on the wire the whole
-    // time and only the routing was missing.
+  it("gives a changeset an address of its own beside its repositories", () => {
+    // A single change has `/{owner}/{repo}/changes/{key}`; a changeset,
+    // which crosses repositories, has one level up.
     expect(at("/acme/changesets/rename-payments")).toEqual({
       kind: "changeset",
       owner: "acme",
@@ -198,11 +185,8 @@ describe("match", () => {
   });
 
   it("does not read `/{owner}/changesets` as an org-wide list", () => {
-    // Deliberately not-found rather than a public list. The list's rows
-    // are filtered per caller — you see the sets whose members you can
-    // read — so a public one would silently hide half of itself, and a
-    // list that lies about its own completeness is worse than none. The
-    // signed-in list stays under `/dashboard`, where the caller is known.
+    // Deliberately not-found rather than a second copy of the list that
+    // lives at `/dashboard/changesets`: one list, one address.
     expect(at("/acme/changesets")).toEqual({ kind: "not-found" });
     // And nothing hangs off a changeset's address either: a stray tail
     // is a mistyped link, not a sub-page to invent.
@@ -255,8 +239,8 @@ describe("the checks tab and its GitHub-shaped alias", () => {
     expect((m as { redirect?: string }).redirect).toBeUndefined();
   });
 
-  it("routes a hosted run's own address under the checks tab", () => {
-    // `detail_url` on a hosted check row is this address, so it is a
+  it("routes a workflow run's own address under the checks tab", () => {
+    // `detail_url` on a workflow's check row is this address, so it is a
     // link people are sent and a URL they paste. It is dispatched from
     // `rest` rather than by a tab of its own, which is what keeps the
     // tab strip lit and what makes the `/actions` alias carry it for
@@ -275,8 +259,8 @@ describe("the checks tab and its GitHub-shaped alias", () => {
   it("sends /{owner}/{repo}/actions to checks, once, by moving the browser", () => {
     // The address somebody arriving from GitHub types. 404ing them to
     // prove a naming point helps nobody; giving the page two live URLs
-    // is two things to keep the tab strip agreeing about and two for a
-    // crawler to index as duplicates. So it redirects.
+    // is two things to keep the tab strip agreeing about. So it
+    // redirects.
     const m = match("/acme/widget/actions", new URLSearchParams());
     expect(m).toMatchObject({
       kind: "repo",

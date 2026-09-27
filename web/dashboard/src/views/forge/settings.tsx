@@ -1,20 +1,15 @@
 import { useCallback, useEffect, useState } from "react";
 import { toast } from "sonner";
 import {
-  ApiError,
   api,
   type ImportStatus,
   type Repo,
   type Session,
-  type SiteStatus,
   type Webhook,
 } from "@/api";
 import { Err, Loading } from "@/components/feedback";
 import { NotFound } from "@/components/not-found";
 import { Panel } from "@/components/panel";
-import { Paywall } from "@/components/paywall";
-import { RelativeTime } from "@/components/relative-time";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import {
@@ -41,19 +36,7 @@ import { AccessPanel } from "@/views/access";
 import { PoliciesPanel } from "@/views/policies";
 import { href } from "@/router";
 import { formatAgo } from "@/format";
-import { PROSE_LINK, STRUCTURAL_LINK } from "@/lib/links";
-import {
-  CONFIG_PATH,
-  EXAMPLE_CONFIG,
-  PUBLIC_WARNING,
-  isCurrent,
-  nothingPublishedLine,
-  siteLabel,
-  siteLinkLabel,
-  siteView,
-  unknownConfigLine,
-} from "@/lib/site";
-import { shortSha } from "./checks";
+import { PROSE_LINK } from "@/lib/links";
 
 /// What `GET …/ci/secret` answers, and the whole of it.
 ///
@@ -160,9 +143,9 @@ export function RepoSettingsView(props: {
   useEffect(() => setInfo(props.row), [props.row]);
 
   if (props.admin === null || !info) return <Loading />;
-  // Not "you may not": the same answer a private repository gives a
-  // stranger. A page that says "forbidden" tells somebody who is not an
-  // admin that there is an admin surface here to come back for.
+  // Not "you may not": the same answer a repository gives somebody who
+  // may not read it. A page that says "forbidden" tells somebody who is
+  // not an admin that there is an admin surface here to come back for.
   if (!props.admin)
     return <NotFound onNavigate={props.navigate} what={`${owner}/${repo}`} />;
 
@@ -214,24 +197,10 @@ export function RepoSettingsView(props: {
 
       <CiIntakePanel session={session} owner={owner} repo={repo} />
 
-      {/* The end of that same loop: push, build somewhere, publish here.
-          It sits after the CI pair for that reason, and deliberately
-          *not* in the Danger Zone — publishing is an ordinary thing to
-          do, and burying it beside "delete this repository" would make
-          it look like one. The warning it carries is the reason it is
-          adjacent to the visibility control rather than far from it. */}
-      <SitePanel
-        session={session}
-        repo={repo}
-        defaultBranch={info.default_branch}
-      />
-
       <DangerZone
         session={session}
         owner={owner}
         repo={repo}
-        info={info}
-        onRepo={setInfo}
         navigate={props.navigate}
       />
     </div>
@@ -239,9 +208,7 @@ export function RepoSettingsView(props: {
 }
 
 /// What the repository says about itself: its description and its
-/// homepage. Visibility is not here — it is a change with consequences
-/// outside the org, so it lives in the danger zone behind the name
-/// confirmation.
+/// homepage.
 ///
 /// One form and one save for both fields, because they are one thought.
 /// Two forms would mean somebody who edited both and pressed the first
@@ -372,27 +339,17 @@ function GeneralPanel(props: {
   );
 }
 
-/// The two irreversible-enough things this server can actually do.
-///
-/// Publishing is in here rather than beside the description on purpose:
-/// it is the one edit whose blast radius is outside the organization,
-/// and the PATCH that carries it takes org admin for that reason. Making
-/// a repository private again is equally a confirmation — a URL that has
-/// been handed out stops working.
+/// The one irreversible thing this server can actually do to a
+/// repository.
 function DangerZone(props: {
   session: Session;
   owner: string;
   repo: string;
-  info: Repo;
-  onRepo: (r: Repo) => void;
   navigate: (to: string, replace?: boolean) => void;
 }) {
-  const { session, repo, info } = props;
+  const { session, repo } = props;
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  // Going private was refused for want of a subscription; the paywall
-  // answers with the price and replays the change once it is paid.
-  const [paywall, setPaywall] = useState(false);
 
   const act = useCallback(
     async (what: () => Promise<unknown>, verb: string) => {
@@ -401,26 +358,13 @@ function DangerZone(props: {
       try {
         await what();
       } catch (e) {
-        if (
-          e instanceof ApiError &&
-          e.status === 402 &&
-          verb === "change the visibility"
-        ) {
-          setPaywall(true);
-        } else {
-          setError(`Could not ${verb}: ${e instanceof Error ? e.message : e}`);
-        }
+        setError(`Could not ${verb}: ${e instanceof Error ? e.message : e}`);
       } finally {
         setBusy(false);
       }
     },
     [],
   );
-
-  const setPrivate = () =>
-    act(async () => {
-      props.onRepo(await api.patchRepo(session, repo, { public: false }));
-    }, "change the visibility");
 
   return (
     <section className="rounded-xl border border-serious/40 bg-surface-1 p-6">
@@ -430,65 +374,9 @@ function DangerZone(props: {
           every piece of writing about GitHub uses. */}
       <h2 className="text-sm font-medium text-ink">Danger Zone</h2>
       <p className="mt-1 mb-4 text-xs text-ink-3">
-        Each of these asks you to type the repository&apos;s name first.
+        This asks you to type the repository&apos;s name first.
       </p>
       <Err message={error} />
-      {paywall && (
-        <div className="mb-4">
-          <Paywall
-            session={session}
-            what="making this repository private"
-            declineLabel="Leave it public"
-            intent={{ org: session.org, kind: "private", name: repo }}
-            onPaid={() => {
-              setPaywall(false);
-              void setPrivate();
-            }}
-            onDecline={() => setPaywall(false)}
-          />
-        </div>
-      )}
-
-      <div className="flex flex-wrap items-center gap-3 border-t border-borderline py-4">
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-medium text-ink">
-            Change repository visibility
-          </div>
-          <p className="text-xs text-ink-3">
-            This repository is currently {info.public ? "public" : "private"}.{" "}
-            {info.public
-              ? "Anyone can read it and find it in search, signed in or not."
-              : "Only people with access can see that it exists."}
-          </p>
-        </div>
-        <TypeToConfirm
-          name={repo}
-          busy={busy}
-          trigger={info.public ? "Make private" : "Make public"}
-          title={info.public ? `Make ${repo} private?` : `Make ${repo} public?`}
-          description={
-            info.public
-              ? "Clone URLs you have handed out will stop working for anyone without access."
-              : "The code, its history and every issue become readable by anyone, signed in or not."
-          }
-          // The confirming button says the whole thing, as GitHub's
-          // does: by the time you press it you have typed a repository
-          // name, and "Make public" no longer names which repository.
-          action={
-            info.public
-              ? "Make this repository private"
-              : "Make this repository public"
-          }
-          onConfirm={() =>
-            void act(async () => {
-              props.onRepo(
-                await api.patchRepo(session, repo, { public: !info.public }),
-              );
-            }, "change the visibility")
-          }
-        />
-      </div>
-
       <div className="flex flex-wrap items-center gap-3 border-t border-borderline pt-4">
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium text-ink">
@@ -1141,269 +1029,3 @@ function WebhooksPanel(props: { session: Session; repo: string }) {
   );
 }
 
-/// What this repository publishes as a website, and the address it is
-/// served at.
-///
-/// A real `<section>` with a real `<h2>`, rather than `Panel`: `Panel`
-/// draws its title as a `<div>`, so a page of Panels has no outline
-/// past the `<h1>` at all. The Danger Zone in this same file already
-/// reaches past `Panel` for exactly that reason, and the classes below
-/// are the Card's own rather than a second look.
-///
-/// The panel exists because publishing here is driven entirely by a
-/// committed file. Nothing else in the product would ever tell an
-/// author the address their site is now at, and a hosting feature whose
-/// URL you have to guess is not one.
-///
-/// Two things it must never do, both straight from the route's own
-/// contract:
-///
-///   * **Collapse the config into the site.** `config_state` is how
-///     `.weft/site.yml` parses *right now*; the deploys are what is
-///     being served. They disagree exactly when somebody has just
-///     broken the file, and that is when this panel is being read.
-///   * **Be quiet about who can see it.** A published site is served to
-///     anyone with the address, with no sign-in, out of a repository
-///     that may well be private. That sentence is in the panel whenever
-///     a site is live, at warning weight, not in a docs page.
-function SitePanel(props: {
-  session: Session;
-  repo: string;
-  /// For resolving `branch: null`, which the server uses to mean "the
-  /// repository's default branch, whatever it is when the push lands".
-  defaultBranch: string;
-}) {
-  const { session, repo } = props;
-  const [status, setStatus] = useState<SiteStatus | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  const refresh = useCallback(() => {
-    api
-      .siteStatus(session, repo)
-      .then(setStatus)
-      .catch((e: unknown) =>
-        setError(
-          `Could not read this repository's site: ${
-            e instanceof Error ? e.message : e
-          }`,
-        ),
-      );
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [session.org, session.token, repo]);
-
-  useEffect(refresh, [refresh]);
-
-  const view = status ? siteView(status, props.defaultBranch) : null;
-  const waiting = view ? nothingPublishedLine(view) : null;
-
-  return (
-    <section
-      aria-labelledby="site-heading"
-      className="rounded-lg border border-border bg-card text-card-foreground"
-    >
-      <div className="flex flex-col p-4 pb-0">
-        <h2 id="site-heading" className="mb-1 text-sm font-medium">
-          Site
-        </h2>
-        <p className="mb-2 text-xs text-muted-foreground">
-          Weft serves the directory your{" "}
-          <code className="font-mono">{CONFIG_PATH}</code> names, straight out
-          of the repository. Pushing to the publishing branch publishes it —
-          there is nothing to upload and no build step here.
-        </p>
-      </div>
-      <div className="p-4 pt-1">
-        <Err message={error} />
-
-        {!view ? (
-          error ? null : (
-            <p className="text-sm text-ink-3" data-testid="site-loading">
-              …
-            </p>
-          )
-        ) : (
-          <>
-            {/* The refusal comes first, above the address, because it is
-                the answer to the question that brought most people
-                here. A site that is still serving is good news; a site
-                that has stopped accepting pushes is not, and the good
-                news must not be what the eye lands on. */}
-            {view.config.kind === "refused" && (
-              <div
-                role="alert"
-                data-testid="site-config-error"
-                className="mb-4 rounded-md border border-serious/40 bg-surface-0 p-3"
-              >
-                <p className="mb-2 text-sm font-medium text-serious">
-                  {CONFIG_PATH} was refused, so nothing new can publish.
-                </p>
-                {/* Verbatim, with its file and line. A paraphrase would
-                    be a second copy of the parser's rules, and the line
-                    number is most of the value of the sentence. It
-                    scrolls inside its own box: a long refusal must not
-                    widen the page, which `audit()` fails the build on. */}
-                <pre
-                  data-testid="site-config-refusal"
-                  className="overflow-x-auto rounded bg-surface-2 px-2 py-1.5 font-mono text-xs whitespace-pre-wrap text-ink-2"
-                >
-                  {view.config.error}
-                </pre>
-                <p className="mt-2 text-xs text-ink-3">
-                  {view.site.kind === "live"
-                    ? "The last deploy that did parse is still being served, so the site has not gone down."
-                    : "Nothing is being served."}
-                </p>
-              </div>
-            )}
-
-            {view.config.kind === "absent" && (
-              <div className="mb-4" data-testid="site-absent">
-                <p className="text-sm text-ink-2">
-                  This repository does not publish a site. Add{" "}
-                  <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs">
-                    {CONFIG_PATH}
-                  </code>{" "}
-                  naming the directory to serve, and every push to{" "}
-                  {/* `view.branch`, not the prop: a site that already
-                      exists keeps publishing from the ref it was set up
-                      with, and naming the default branch here would be
-                      wrong for exactly the repository whose config has
-                      just been deleted. */}
-                  <code className="rounded bg-surface-2 px-1.5 py-0.5 font-mono text-xs">
-                    {view.branch}
-                  </code>{" "}
-                  publishes it.
-                </p>
-                <pre
-                  data-testid="site-example"
-                  className="mt-2 overflow-x-auto rounded bg-surface-2 px-2 py-1.5 font-mono text-xs text-ink-2"
-                >
-                  {EXAMPLE_CONFIG}
-                </pre>
-              </div>
-            )}
-
-            {view.config.kind === "unknown" && (
-              <p className="mb-4 text-sm text-ink-3">
-                {unknownConfigLine(view.config.word)}
-              </p>
-            )}
-
-            {view.site.kind === "live" && (
-              <>
-                <dl className="mb-4 space-y-1 text-sm">
-                  <div className="flex flex-wrap items-baseline gap-2">
-                    <dt className="shrink-0 text-ink-3">Address</dt>
-                    <dd className="min-w-0">
-                      {view.site.url ? (
-                        // A real link, in a new tab, handing no
-                        // `window.opener` to a page whose HTML is
-                        // somebody else's.
-                        <a
-                          data-testid="site-url"
-                          className={`${STRUCTURAL_LINK} font-medium break-all`}
-                          href={view.site.url}
-                          target="_blank"
-                          rel="noopener noreferrer"
-                          aria-label={siteLinkLabel(view.site.url)}
-                        >
-                          {siteLabel(view.site.url)}
-                        </a>
-                      ) : (
-                        // Never synthesised from `host`: an address that
-                        // resolves nowhere is worse than none, because
-                        // somebody sends it to a colleague.
-                        <span className="text-ink-3">
-                          This deployment does not host sites, so there is no
-                          address for it.
-                        </span>
-                      )}
-                    </dd>
-                  </div>
-                  <div className="flex flex-wrap items-baseline gap-2">
-                    <dt className="shrink-0 text-ink-3">Publishes from</dt>
-                    <dd className="min-w-0">
-                      <code className="font-mono break-all text-ink">
-                        {view.branch}
-                      </code>
-                    </dd>
-                  </div>
-                  <div className="flex flex-wrap items-baseline gap-2">
-                    <dt className="shrink-0 text-ink-3">Published directory</dt>
-                    <dd className="min-w-0">
-                      {/* The **deploy's** directory, not the file's.
-                          The two differ for as long as an edit has not
-                          published, which is the interval somebody is
-                          reading this panel to understand. */}
-                      <code className="font-mono break-all text-ink">
-                        {view.publish}
-                      </code>
-                    </dd>
-                  </div>
-                </dl>
-
-                {/* Not a docs sentence and not a tooltip. A private
-                    repository whose site is world-readable is the one
-                    surprising thing about this feature, and the person
-                    who needs to know is the one who just published. */}
-                <p
-                  data-testid="site-public-warning"
-                  className="mb-4 flex flex-wrap items-center gap-2 rounded-md border border-warning/40 bg-warning/10 px-3 py-2 text-sm"
-                >
-                  <Badge variant="warning">Public</Badge>
-                  <span className="min-w-0 flex-1 text-ink-2">
-                    {PUBLIC_WARNING}
-                  </span>
-                </p>
-
-                <div className="overflow-x-auto" data-testid="site-deploys">
-                  <Table>
-                    <TableHeader>
-                      <TableHeadRow>
-                        <TableHead>Commit</TableHead>
-                        <TableHead>Directory</TableHead>
-                        <TableHead>Published</TableHead>
-                      </TableHeadRow>
-                    </TableHeader>
-                    <TableBody>
-                      {view.site.recent.map((d) => (
-                        <TableRow key={d.id}>
-                          <TableCell className="whitespace-nowrap">
-                            <span className="font-mono text-ink">
-                              {shortSha(d.commit)}
-                            </span>
-                            {isCurrent(view, d) && (
-                              <Badge variant="good" className="ml-2">
-                                Serving
-                              </Badge>
-                            )}
-                          </TableCell>
-                          <TableCell className="max-w-0 break-all font-mono text-xs text-ink-2">
-                            {d.publish}
-                          </TableCell>
-                          <TableCell className="whitespace-nowrap text-ink-2">
-                            <RelativeTime at={d.created_at} />
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                    </TableBody>
-                  </Table>
-                </div>
-              </>
-            )}
-
-            {/* A site whose config is fine and which has never published
-                — the window between the file landing and the next push.
-                Silent when a refusal or a missing file is already on
-                screen saying more than this could. */}
-            {waiting && (
-              <p className="text-sm text-ink-3" data-testid="site-waiting">
-                {waiting}
-              </p>
-            )}
-          </>
-        )}
-      </div>
-    </section>
-  );
-}

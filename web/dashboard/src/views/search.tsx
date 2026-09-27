@@ -93,7 +93,7 @@ export function Search(props: {
       <h1 className="text-xl font-semibold">Search</h1>
       <p className="mt-1 text-sm text-ink-2">
         Matches a repository&rsquo;s name, its namespace, or its description
-        &mdash; across every namespace you belong to, plus everything public.
+        &mdash; across every namespace you belong to.
       </p>
       <form
         className="mt-5 flex gap-2"
@@ -170,6 +170,10 @@ function Hit(props: {
   onOpenOrg: (org: string) => void;
 }) {
   const { hit } = props;
+  const notes = [
+    hit.kind === "mirror" ? "mirror" : null,
+    props.here ? null : "another namespace",
+  ].filter(Boolean);
   return (
     <li className="rounded-md border border-borderline bg-surface-1 p-3">
       <button
@@ -192,11 +196,11 @@ function Hit(props: {
         <span className="text-ink-3"> / </span>
         <span className="font-medium">{hit.name}</span>
       </button>
-      <span className="ml-2 align-middle text-xs text-ink-3">
-        {hit.public ? "public" : "private"}
-        {hit.kind === "mirror" ? " · mirror" : ""}
-        {props.here ? "" : " · another namespace"}
-      </span>
+      {notes.length > 0 && (
+        <span className="ml-2 align-middle text-xs text-ink-3">
+          {notes.join(" · ")}
+        </span>
+      )}
       {hit.description && (
         <p className="mt-1 truncate text-sm text-ink-2" title={hit.description}>
           {hit.description}

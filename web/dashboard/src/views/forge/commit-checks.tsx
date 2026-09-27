@@ -20,7 +20,7 @@ import {
   BLOCKED_PRESENTATION,
   runStatePresentation,
 } from "@/views/forge/checks";
-import { refusalsByRunId, rowRefusal } from "@/lib/hosted-runs";
+import { refusalsByRunId, rowRefusal } from "@/lib/workflow-runs";
 import { PROSE_LINK } from "@/lib/links";
 import { DetailLink } from "@/components/detail-link";
 
@@ -83,7 +83,7 @@ export const GLYPH: Record<CheckOutcome, { mark: string; tone: string }> = {
   neutral: { mark: "⊘", tone: "text-ink-3" },
 };
 
-/// How one row of the strip reads, once the hosted runs have been
+/// How one row of the strip reads, once the workflow runs have been
 /// joined back on.
 ///
 /// The refusal wins over the stored word, and that is the whole point:
@@ -126,7 +126,7 @@ function useCommitChecks(session: Session, repo: string, sha: string) {
   const [runs, setRuns] = useState<CheckRun[] | null>(null);
   // Depends on what is *inside* the session, not on the object.
   //
-  // `viewerSession`/`anon()` build a fresh `Session` on every call, so an
+  // `viewerSession()` builds a fresh `Session` on every call, so an
   // effect keyed on the object re-runs on every render, sets state, and
   // re-renders — a loop that freezes the tab rather than failing, and one
   // that has already frozen a forge page once. Callers are asked to hold
@@ -149,7 +149,7 @@ function useCommitChecks(session: Session, repo: string, sha: string) {
   return runs;
 }
 
-/// The refusals among this commit's hosted runs, by run id.
+/// The refusals among this commit's workflow runs, by run id.
 ///
 /// A second request, and garnish like the checks themselves: a repository
 /// whose runs cannot be read still gets its strip, minus the sentences.
@@ -215,7 +215,7 @@ export function CommitChecks(props: {
   repo: string;
   sha: string;
   /// How a row whose `detail_url` is one of our own pages navigates.
-  /// Every one of these used to be somebody else's site; a hosted run's
+  /// Every one of these used to be somebody else's site; a workflow run's
   /// is not. See `DetailLink`.
   navigate: (to: string, replace?: boolean) => void;
 }) {

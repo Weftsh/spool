@@ -7,7 +7,7 @@ import type { Runner, RunnerGroup } from "@/api";
 /// expression would be quietly wrong: a state word rendered as colour
 /// alone, a label list whose order changes between reads, a
 /// registration command that names a host the operator cannot reach,
-/// and a group whose access is described by a boolean nobody can read.
+/// and a group whose access is described by a word nobody can read.
 
 /// How a runner's state reads, as a word and as a tone.
 ///
@@ -16,7 +16,7 @@ import type { Runner, RunnerGroup } from "@/api";
 /// different words rather than three shades of one.
 ///
 /// A state this bundle has never heard of prints the server's own word
-/// in neutral ink, the same honesty rule `hostedStatePresentation`
+/// in neutral ink, the same honesty rule `workflowStatePresentation`
 /// follows: a runner quietly shown "Online" because we did not
 /// recognise what the server said is a runner an operator will keep
 /// sending work to.
@@ -97,24 +97,16 @@ export function registrationCommands(origin: string, token: string): string {
 
 /// What a group admits, in one line.
 ///
-/// `repo_access` and `allow_public` are two booleans-in-a-trenchcoat
-/// that together decide whether a job may run, and a table that printed
-/// them as "selected" and a tick left the reader to compose the rule
-/// themselves. The sentence composes it for them.
+/// A table that printed `repo_access` as "selected" left the reader to
+/// work out how many repositories that was. The line says it.
 export function groupAccessLine(
-  group: Pick<RunnerGroup, "repo_access" | "allow_public" | "repos">,
+  group: Pick<RunnerGroup, "repo_access" | "repos">,
 ): string {
-  const which =
-    group.repo_access === "all"
-      ? "Every repository"
-      : group.repos.length === 1
-        ? "1 repository"
-        : `${group.repos.length} repositories`;
-  return `${which} · ${
-    group.allow_public
-      ? "public repositories allowed"
-      : "private repositories only"
-  }`;
+  return group.repo_access === "all"
+    ? "Every repository"
+    : group.repos.length === 1
+      ? "1 repository"
+      : `${group.repos.length} repositories`;
 }
 
 /// The job a busy runner is holding, as a link — when there is one to

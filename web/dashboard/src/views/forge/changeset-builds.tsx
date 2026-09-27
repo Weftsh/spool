@@ -4,7 +4,7 @@ import { RelativeTime } from "@/components/relative-time";
 import { STRUCTURAL_LINK } from "@/lib/links";
 import { cn } from "@/lib/utils";
 import { dash, href } from "@/router";
-import { hostedStatePresentation } from "@/views/forge/workflow-run";
+import { workflowStatePresentation } from "@/views/forge/workflow-run";
 
 /// How many composed runs the panel shows. The panel is a pointer, not a
 /// history: the changeset's own page has the whole story.
@@ -29,8 +29,8 @@ export const CHANGESET_BUILDS_LIMIT = 10;
 /// apart. Each row leads to its run page here and to the changeset that
 /// owns the verdict.
 ///
-/// Never allowed to disturb the tab: a deployment with no hosted runner,
-/// an older server, or a refusal leaves the panel absent.
+/// Never allowed to disturb the tab: a repository with no workflows, an
+/// older server, or a refusal leaves the panel absent.
 export function ChangesetBuilds(props: {
   owner: string;
   repo: string;
@@ -90,7 +90,7 @@ function ChangesetBuildRow(props: {
   repo: string;
 }) {
   const { run, owner, repo } = props;
-  const pres = hostedStatePresentation(run.state);
+  const pres = workflowStatePresentation(run.state);
   const Icon = pres.icon;
   return (
     <li className="flex items-start gap-3 border-b border-borderline bg-surface-1 px-4 py-3 last:border-b-0">

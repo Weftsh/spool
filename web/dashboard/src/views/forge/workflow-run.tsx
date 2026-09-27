@@ -25,10 +25,10 @@ import {
   shortSha,
 } from "@/views/forge/checks";
 
-/// One run of a workflow on **our own** runners: what it was, what each
-/// job did, and the log.
+/// One run of a `.weft/*.yml` workflow: what it was, what each job did,
+/// and the log.
 ///
-/// This page is the other end of a link. A hosted job mirrors itself
+/// This page is the other end of a link. A workflow job mirrors itself
 /// into a check row like any other CI verdict, and that row's
 /// `detail_url` is this address — so for a third-party provider "Details"
 /// leaves for their site, and for us it lands here. Before this existed
@@ -67,7 +67,7 @@ const AS_CHECK_STATE: Record<string, RunState> = {
   cancelled: "cancelled",
 };
 
-/// How a hosted run or job state reads, as a word and as a shape.
+/// How a workflow run or job state reads, as a word and as a shape.
 ///
 /// Never colour alone — `web/DESIGN.md`. Every state differs in glyph as
 /// well as tone, and the word is rendered beside the glyph.
@@ -77,7 +77,7 @@ const AS_CHECK_STATE: Record<string, RunState> = {
 /// literal word in neutral ink. That is the only honest rendering: a
 /// verdict quietly shown green ships broken code and one quietly shown
 /// red blocks good code.
-export function hostedStatePresentation(state: string) {
+export function workflowStatePresentation(state: string) {
   // The one shared with the Checks tab and the change panel, so a
   // blocked run looks the same wherever a reader meets it.
   if (state === "blocked") return BLOCKED_PRESENTATION;
@@ -350,7 +350,7 @@ export function WorkflowRunView(props: {
   if (error) return <ErrorBox message={error} />;
   if (!run) return <Loading />;
 
-  const pres = hostedStatePresentation(run.state);
+  const pres = workflowStatePresentation(run.state);
   const Icon = pres.icon;
   const took = runDuration(
     { started_at: run.created_at, completed_at: run.completed_at },
@@ -526,13 +526,10 @@ export function WorkflowRunView(props: {
               {selected ? jobLabel(selected) : "Log"}
             </h2>
             {/* What this job asked for, beside the log it produced.
-                Only for a self-hosted job: a hosted job's `labels` is
-                its one hosted label, which is already said by the pool
-                it ran in, and a chip reading `ubuntu-latest` on every
-                job is noise. In file order, which is the order the
-                server's "no runner with labels […]" refusal quotes
-                them in — so the two lists can be compared by eye. */}
-            {selected?.pool === "self_hosted" &&
+                In file order, which is the order the server's "no
+                runner with labels […]" refusal quotes them in — so the
+                two lists can be compared by eye. */}
+            {selected &&
               (selected.labels?.length ?? 0) > 0 && (
                 <RunnerLabels
                   className="mb-2"
@@ -563,7 +560,7 @@ function JobRow(props: {
   onSelect: () => void;
 }) {
   const { job } = props;
-  const pres = hostedStatePresentation(job.state);
+  const pres = workflowStatePresentation(job.state);
   const Icon = pres.icon;
   const took = runDuration(job, Date.now());
   return (
@@ -602,9 +599,7 @@ function JobRow(props: {
             {/* A retry is worth saying out loud: a green job that took
                 three goes is not the same fact as a green job. */}
             {job.attempts > 1 && <span>attempt {job.attempts}</span>}
-            {/* Which machine took it. Only a self-hosted job ever names
-                one — hosted capacity is ours and has no name anybody
-                could act on — and it is the first thing an operator
+            {/* Which machine took it. The first thing an operator
                 looking at a job that behaved oddly needs, because the
                 next question is always "which box". */}
             {job.runner && (

@@ -3,9 +3,7 @@ import { type Me, type Session } from "@/api";
 import { settingsSections } from "@/lib/settings-sections";
 import { ActivityPanel } from "@/views/settings/activity";
 import { EmailsPanel } from "@/views/settings/emails";
-import { BillingPanel } from "@/views/settings/billing";
 import { MembersPanel } from "@/views/settings/members";
-import { PackagesPanel } from "@/views/settings/packages";
 import { PasswordPanel } from "@/views/settings/password";
 import { RunnersPanel } from "@/views/settings/runners";
 import { SshKeysPanel } from "@/views/settings/ssh-keys";
@@ -39,12 +37,8 @@ export function SettingsView(props: {
   switch (current.slug) {
     case "members":
       return <MembersPanel session={session} me={me} />;
-    case "billing":
-      return <BillingPanel session={session} navigate={navigate} />;
     case "runners":
       return <RunnersPanel session={session} />;
-    case "packages":
-      return <PackagesPanel session={session} isAdmin={admin} />;
     case "teams":
       return <TeamsPanel session={session} isAdmin={admin} />;
     case "activity":

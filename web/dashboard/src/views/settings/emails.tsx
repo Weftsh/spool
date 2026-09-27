@@ -19,20 +19,18 @@ import { formatAgo } from "@/format";
 
 /// The addresses on your account, and which of them are proved.
 ///
-/// **This exists because the contribution graph is otherwise
-/// unreachable.** A commit counts for you only when its author line
-/// carries an address you have proved — anybody can put anybody's
-/// address in `git config user.email`, so an unproved match must count
-/// for nothing. Everything needed to prove one already existed on the
+/// A commit is attributed to you only when its author line carries an
+/// address you have proved — anybody can put anybody's address in
+/// `git config user.email`, so an unproved match must count for
+/// nothing. Everything needed to prove one already existed on the
 /// server; there was simply no way to ask for it, so somebody arriving
-/// from another forge saw an empty graph and had no way to fix it. An
-/// empty graph and no explanation is the worst possible answer to
-/// "where did my decade of work go".
+/// from another forge was missing from every contributor list with no
+/// way to fix it.
 ///
 /// Proving an address is **retroactive**: the server re-walks the
 /// repositories you can reach, so commits you authored under it years
-/// ago start counting. That is said on the page, because a person who
-/// does not know it will not bother.
+/// ago are attributed to you too. That is said on the page, because a
+/// person who does not know it will not bother.
 export function EmailsPanel(props: { session: Session; me: Me | null }) {
   const handle = props.me?.handle ?? null;
   const { session } = props;
@@ -121,7 +119,7 @@ export function EmailsPanel(props: { session: Session; me: Me | null }) {
     <div className="flex flex-col gap-6">
       <Panel
         title="Email addresses"
-        hint="Your commits count towards your contribution graph only when the address on the commit is one you have proved. Proving an address applies to work you have already pushed, not just to new commits."
+        hint="Your commits are attributed to you only when the address on the commit is one you have proved. Proving an address applies to work you have already pushed, not just to new commits."
       >
         {error && <Err message={error} />}
         {!error && !rows && <Loading />}

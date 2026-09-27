@@ -19,7 +19,6 @@ import {
   TableHeadRow,
   TableRow,
 } from "@/components/ui/table";
-import { SeatLine } from "@/views/settings/billing";
 import { formatAgo, formatIn } from "@/format";
 import {
   Select,
@@ -110,7 +109,6 @@ export function MembersPanel(props: { session: Session; me: Me | null }) {
         hint="A role applies across the org. A per-repo grant replaces it on that repo alone."
       >
         <Err message={error} />
-        <SeatLine session={session} members={members?.length ?? 0} />
         {!members ? (
           <Loading />
         ) : (

@@ -9,8 +9,6 @@ import {
   ACCESS,
   AUDIT,
   AUDIT_TOTAL,
-  BILLING,
-  FREE_BILLING,
   INVITES,
   KEYS,
   ME,
@@ -152,57 +150,6 @@ test("the repo table says whose history a fork is carrying", async ({
   );
 });
 
-test("the repo table says which repositories are private, and which of those are read-only", async ({
-  page,
-}) => {
-  // Found on an organization whose subscription had just been cancelled:
-  // its private repositories were read-only and its table showed Repo,
-  // Kind, Status, Last sync — nothing to tell them from the public ones,
-  // on the page whose job is deciding which to open and flip.
-  const LAPSED =
-    "quota: this repository is private and the organization's subscription has ended — everything here is still readable; subscribe from Billing, or make the repository public, to write to it again";
-  await signIn(page);
-  await page.route("**/v1/orgs/acme/repos?limit=200", (r) =>
-    r.fulfill({
-      json: {
-        repos: [
-          {
-            ...REPOS.repos[2],
-            name: "vault",
-            public: false,
-            write_blocked: LAPSED,
-          },
-          {
-            ...REPOS.repos[2],
-            name: "open",
-            public: true,
-            write_blocked: null,
-          },
-          { ...REPOS.repos[2], name: "older", public: false },
-        ],
-      },
-    }),
-  );
-  await page.goto("/dashboard/");
-  await expect(
-    page.getByRole("columnheader", { name: "Visibility" }),
-  ).toBeVisible();
-  const row = (name: string) =>
-    page.getByRole("row").filter({ hasText: new RegExp(`^${name}`) });
-  await expect(row("vault")).toContainText("Private · read-only");
-  // The push's own refusal, for whoever hovers.
-  await expect(row("vault").getByText("Private · read-only")).toHaveAttribute(
-    "title",
-    LAPSED.replace(/^quota:\s*/, ""),
-  );
-  await expect(row("open")).toContainText("Public");
-  await expect(row("open")).not.toContainText("read-only");
-  // A server older than the field says nothing about writes, and the
-  // table must not invent an answer either way.
-  await expect(row("older")).toContainText("Private");
-  await expect(row("older")).not.toContainText("read-only");
-});
-
 /// The complaint this whole change answers: you look at a repository and
 /// cannot share the link.
 ///
@@ -212,7 +159,7 @@ test("the repo table says which repositories are private, and which of those are
 /// point: a click handler alone would pass a "does clicking work" test
 /// and still leave the row uncopyable, unmiddle-clickable and invisible
 /// to anything that reads links.
-test("a repository in the list is a link to its public address", async ({
+test("a repository in the list is a link to its one address", async ({
   page,
 }) => {
   await signIn(page);
@@ -220,7 +167,7 @@ test("a repository in the list is a link to its public address", async ({
   await expect(row).toHaveAttribute("href", "/acme/widget");
   await row.click();
   await expect(page).toHaveURL(/\/acme\/widget$/);
-  // And it is the public page, not a dashboard rendering of one: the
+  // And it is the forge page, not a dashboard rendering of one: the
   // repository's own tab strip is what says so.
   await expect(
     page.getByRole("navigation", { name: "Repository" }),
@@ -330,9 +277,8 @@ test("the repo page offers both clone URLs; ssh hidden when unconfigured", async
   page,
 }) => {
   await signIn(page);
-  // Behind the Code button, where a hand goes looking for it and where
-  // a stranger reading a public repository can reach it too. It used to
-  // be on the dashboard's repo screen, behind the sign-in.
+  // Behind the Code button, where a hand goes looking for it. It used to
+  // be on the dashboard's repo screen, at no address of its own.
   await openRepo(page, "widget");
   await page.getByRole("button", { name: "Code" }).click();
   // By role, not `getByLabel`: the copy button beside each box is
@@ -1118,7 +1064,6 @@ test("branch policy protects trunk and moves the default branch", async ({
         org_id: "01org1",
         name: "session-1",
         kind: "native",
-        public: false,
         default_branch: defaultBranch,
         origin_url: null,
         last_sync_at: null,
@@ -1756,400 +1701,7 @@ test("an invitation and a reset link also work without a reload", async ({
   ).toBeVisible();
 });
 
-// `BILLING` and `FREE_BILLING` live in `./fixtures` now: the usage-meter
-// suite reads the same organization, and a billing view copied into a
-// second spec is one that drifts from the first.
-
-/// Just created, and nobody has been to the provider yet.
-test("billing shows both seat numbers and opens the provider's portal", async ({
-  page,
-}) => {
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", async (route) => {
-    if (route.request().method() === "POST") {
-      return route.fulfill({
-        json: { url: "https://billing.example.test/p/1", kind: "portal" },
-      });
-    }
-    return route.fulfill({ json: BILLING });
-  });
-  await page.getByRole("link", { name: "Billing" }).click();
-
-  // Both numbers, because the difference between them is the thing
-  // worth seeing.
-  await expect(page.getByText("Subscribed")).toBeVisible();
-  await expect(
-    page.getByRole("term").filter({ hasText: "Seats in use" }),
-  ).toBeVisible();
-  // Anchored, not substring. `hasText` matches anywhere in the element,
-  // and the period-end date sits in a <dd> of its own: BILLING ends the
-  // period at Date.UTC(2026, 11, 1), which renders as 12/1/2026 in UTC
-  // but as 11/30/2026 anywhere behind it — and "11/30/2026" contains a
-  // "3". So a bare "3" matched two definitions in EDT and one in CI,
-  // which is a test that passes or fails by the reader's timezone.
-  await expect(
-    page.getByRole("definition").filter({ hasText: /^3$/ }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("definition").filter({ hasText: /^4$/ }),
-  ).toBeVisible();
-  // And the amount, which is what the person is actually paying: four
-  // seats billed at $4 is $16, with the multiplication shown so the
-  // number is not a surprise.
-  await expect(
-    page.getByRole("definition").filter({ hasText: /^\$16\s*\$4 × 4$/ }),
-  ).toBeVisible();
-  // Billed for a seat nobody uses: say so, and say it is not lost.
-  await expect(
-    page.getByText(/billed for seats nobody is using/),
-  ).toBeVisible();
-  await expect(
-    page.getByText(/yours until the end of the period/),
-  ).toBeVisible();
-  // Nothing about a card is claimed to live here.
-  await expect(
-    page.getByText(/nothing about your card is stored here/),
-  ).toBeVisible();
-
-  // The button goes wherever the server says. The provider is not part
-  // of this suite, so its page is answered here rather than fetched.
-  await page.route("https://billing.example.test/**", (r) =>
-    r.fulfill({ contentType: "text/html", body: "<h1>Provider portal</h1>" }),
-  );
-  await page.getByRole("button", { name: "Manage billing" }).click();
-  await expect(page).toHaveURL("https://billing.example.test/p/1");
-});
-
-test("a free organization is told the price, and is sent to the provider's subscription page", async ({
-  page,
-}) => {
-  await signInAsPerson(page);
-  let subscribed = 0;
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: FREE_BILLING }),
-  );
-  await page.route("**/v1/orgs/acme/billing/subscribe", (r) => {
-    subscribed += 1;
-    return r.fulfill({
-      json: {
-        url: "https://checkout.example.test/pay/cs_sub_1",
-        kind: "checkout",
-      },
-    });
-  });
-  await page.route("https://checkout.example.test/**", (r) =>
-    r.fulfill({ contentType: "text/html", body: "<h1>Provider checkout</h1>" }),
-  );
-  await page.getByRole("link", { name: "Billing" }).click();
-  await expect(
-    page.getByRole("definition").filter({ hasText: /^Free$/ }),
-  ).toBeVisible();
-  // No card tile: nothing was asked for. What a private repository
-  // costs is the server's number, in dollars, times the seats in use.
-  await expect(page.getByText(/^(On file|None)$/)).toHaveCount(0);
-  await expect(page.getByText(/\$4 per seat per month/)).toBeVisible();
-  await expect(page.getByText(/\$4\/month for the 1 seat/)).toBeVisible();
-  // The minutes panel says what subscribing changes the budget to.
-  await expect(
-    page.getByText(
-      /500 minutes a month while free; 2,000 per seat once subscribed/,
-    ),
-  ).toBeVisible();
-
-  // Not "Subscribe": the subscription is opened on the provider's page,
-  // where the saved card is already on it and a promotion code can be
-  // typed, and the button says it is leaving.
-  await expect(page.getByRole("button", { name: "Subscribe" })).toHaveCount(0);
-  await page.getByRole("button", { name: "Continue to checkout" }).click();
-  await expect(page).toHaveURL("https://checkout.example.test/pay/cs_sub_1");
-  expect(subscribed).toBe(1);
-});
-
-test("an organization that already pays is not sent anywhere", async ({
-  page,
-}) => {
-  // The webhook landed between the page loading as free and the click:
-  // the server answers with the billing view instead of a page, and
-  // the panel re-renders as subscribed on the spot.
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: FREE_BILLING }),
-  );
-  await page.route("**/v1/orgs/acme/billing/subscribe", (r) =>
-    r.fulfill({ json: BILLING }),
-  );
-  await page.getByRole("link", { name: "Billing" }).click();
-  await page.getByRole("button", { name: "Continue to checkout" }).click();
-  await expect(page.getByText("Subscribed")).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Manage billing" }),
-  ).toBeVisible();
-  await expect(page).toHaveURL(/\/dashboard\/settings\/billing$/);
-});
-
-test("a lapsed organization is told what it is still holding, not what a first private repository costs", async ({
-  page,
-}) => {
-  // `free` is where a cancelled subscription lands as well as a new
-  // organization. Found on a real one: the page offered "the first
-  // private repository starts a subscription" while its private
-  // repository sat there read-only, and the only tile that said the
-  // words "Private repositories" was showing a price.
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: { ...FREE_BILLING, private_repos: 3 } }),
-  );
-  await page.getByRole("link", { name: "Billing" }).click();
-  await expect(
-    page.getByText(/3 private repositories are read-only until it subscribes/),
-  ).toBeVisible();
-  await expect(page.getByText(/Subscribing at \$4 per seat/)).toBeVisible();
-  await expect(page.getByText(/first private repository/)).toHaveCount(0);
-  // The count is a tile of its own, and the price is labelled as one.
-  await expect(
-    page.getByRole("term").filter({ hasText: /^Private repositories$/ }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("definition").filter({ hasText: /^3$/ }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("term").filter({ hasText: /^Price$/ }),
-  ).toBeVisible();
-
-  // An organization that holds none keeps the sentence that is true
-  // for it.
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: { ...FREE_BILLING, private_repos: 0 } }),
-  );
-  // Away and back rather than a reload: the session lives in the page.
-  await page.getByRole("link", { name: "Members" }).click();
-  await page.getByRole("link", { name: "Billing" }).click();
-  await expect(
-    page.getByText(/The first private repository starts a subscription/),
-  ).toBeVisible();
-  await expect(page.getByText(/read-only until it subscribes/)).toHaveCount(0);
-});
-
-test("a provider that cannot open the subscription page says so, and the org stays free", async ({
-  page,
-}) => {
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: FREE_BILLING }),
-  );
-  await page.route("**/v1/orgs/acme/billing/subscribe", (r) =>
-    r.fulfill({
-      status: 502,
-      json: {
-        error:
-          "payment provider: stripe /v1/checkout/sessions: 503: Stripe is temporarily unavailable.",
-      },
-    }),
-  );
-  await page.getByRole("link", { name: "Billing" }).click();
-  await page.getByRole("button", { name: "Continue to checkout" }).click();
-  await expect(page.getByRole("alert")).toContainText("payment provider");
-  await expect(
-    page.getByRole("definition").filter({ hasText: /^Free$/ }),
-  ).toBeVisible();
-  // Still offered — try again is there.
-  await expect(
-    page.getByRole("button", { name: "Continue to checkout" }),
-  ).toBeEnabled();
-});
-
-test("coming back from the subscription page waits for the provider, then says so", async ({
-  page,
-}) => {
-  await mockApi(page);
-  // The webhook that pays is on the provider's schedule: the first two
-  // reads still say free, the third says paid. The page keeps asking
-  // rather than telling a person who just paid that they have not.
-  let reads = 0;
-  await page.route("**/v1/orgs/acme/billing", (r) => {
-    reads += 1;
-    return r.fulfill({ json: reads < 3 ? FREE_BILLING : BILLING });
-  });
-  await page.goto("/dashboard/settings/billing?subscribed=done");
-  await expect(
-    page
-      .getByRole("status")
-      .filter({ hasText: /Confirming with the payment provider/ }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("status").filter({ hasText: /^Subscribed\./ }),
-  ).toBeVisible({ timeout: 10000 });
-  await expect(
-    page.getByRole("definition").filter({ hasText: /^Subscribed$/ }),
-  ).toBeVisible();
-  expect(reads).toBe(3);
-
-  // Cancelled on the provider's page: nothing charged, still free, and
-  // the button to try again is the same one.
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: FREE_BILLING }),
-  );
-  await page.goto("/dashboard/settings/billing?subscribed=cancelled");
-  await expect(
-    page.getByRole("status").filter({ hasText: /nothing was charged/ }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Continue to checkout" }),
-  ).toBeVisible();
-});
-
-test("coming back subscribed offers to finish the private repository that was refused", async ({
-  page,
-}) => {
-  // What the paywall wrote down before leaving is finished from here:
-  // one button, the same create, and then the repository. Nobody
-  // types the name twice.
-  await mockApi(page);
-  const creates: Array<Record<string, unknown>> = [];
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: BILLING }),
-  );
-  await page.route("**/v1/orgs/acme/repos", (r) => {
-    creates.push(r.request().postDataJSON());
-    return r.fulfill({
-      status: 201,
-      json: { ...REPOS[0], name: "vault", kind: "native", public: false },
-    });
-  });
-  await page.route("**/v1/orgs/acme/repos/vault", (r) =>
-    r.fulfill({
-      json: {
-        ...REPOS[0],
-        name: "vault",
-        kind: "native",
-        public: false,
-        clone_url: "https://stratum.test/acme/vault.git",
-      },
-    }),
-  );
-  await page.goto("/dashboard/settings/billing");
-  await page.evaluate(() =>
-    sessionStorage.setItem(
-      "weft.billing.intent",
-      JSON.stringify({
-        org: "acme",
-        kind: "create",
-        name: "vault",
-        description: "the vault",
-      }),
-    ),
-  );
-  await page.goto("/dashboard/settings/billing?subscribed=done");
-  const resume = page.getByRole("region", {
-    name: "Pick up where you left off",
-  });
-  await expect(resume).toContainText(
-    "You were creating a private repository, vault.",
-  );
-  await resume.getByRole("button", { name: "Create vault (private)" }).click();
-  // Landed the way the new-repository form lands: the clone command,
-  // not an empty repository's page with nothing to show yet.
-  await expect(page.getByText(/git clone/)).toBeVisible();
-  await expect(resume).toHaveCount(0);
-  expect(creates).toEqual([
-    { name: "vault", public: false, description: "the vault" },
-  ]);
-  // Finished is finished: the errand is gone from storage.
-  expect(
-    await page.evaluate(() => sessionStorage.getItem("weft.billing.intent")),
-  ).toBeNull();
-
-  // Another organization's errand is not this page's, and a cancelled
-  // trip drops the errand rather than offering it.
-  await page.evaluate(() =>
-    sessionStorage.setItem(
-      "weft.billing.intent",
-      JSON.stringify({ org: "other", kind: "create", name: "vault" }),
-    ),
-  );
-  await page.goto("/dashboard/settings/billing?subscribed=done");
-  await expect(
-    page.getByRole("region", { name: "Pick up where you left off" }),
-  ).toHaveCount(0);
-  await page.evaluate(() =>
-    sessionStorage.setItem(
-      "weft.billing.intent",
-      JSON.stringify({ org: "acme", kind: "private", name: "widget" }),
-    ),
-  );
-  await page.goto("/dashboard/settings/billing?subscribed=cancelled");
-  await expect(
-    page.getByRole("region", { name: "Pick up where you left off" }),
-  ).toHaveCount(0);
-  expect(
-    await page.evaluate(() => sessionStorage.getItem("weft.billing.intent")),
-  ).toBeNull();
-});
-
-test("a failed payment says what still works, not just what broke", async ({
-  page,
-}) => {
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", async (route) => {
-    if (route.request().method() === "POST") {
-      return route.fulfill({
-        json: { url: "https://billing.example.test/p/1", kind: "portal" },
-      });
-    }
-    return route.fulfill({
-      json: { ...BILLING, plan: "past_due", may_create_private: false },
-    });
-  });
-  await page.getByRole("link", { name: "Billing" }).click();
-  await expect(page.getByText("Payment failed")).toBeVisible();
-  // The reassurance is the point: somebody seeing this needs to know
-  // their repositories are still there — and what has actually stopped.
-  await expect(page.getByText(/still readable/)).toBeVisible();
-  await expect(page.getByText(/nothing has been deleted/)).toBeVisible();
-  await expect(
-    page.getByText(/hosted workflows on private repositories are paused/),
-  ).toBeVisible();
-  // ...and what has not: the server still admits public repositories
-  // and pushes to everything it holds, and the page used to say
-  // "creating repositories" had stopped.
-  await expect(
-    page.getByText(/Public repositories are unaffected/),
-  ).toBeVisible();
-  // The button is the portal, named for what it is for.
-  await page.route("https://billing.example.test/**", (r) =>
-    r.fulfill({ contentType: "text/html", body: "<h1>Provider portal</h1>" }),
-  );
-  await page.getByRole("button", { name: "Settle the payment" }).click();
-  await expect(page).toHaveURL("https://billing.example.test/p/1");
-});
-
-test("the members screen says what the next person costs", async ({ page }) => {
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: { ...BILLING, billable_seats: 4, paid_seats: 4 } }),
-  );
-  await page.getByRole("link", { name: "Members" }).click();
-  await expect(page.getByText(/4 seats in use, 4 billed/)).toBeVisible();
-  await expect(
-    page.getByText(/Adding somebody adds a seat to your next invoice/),
-  ).toBeVisible();
-});
-
-test("a free namespace is not told about seats it does not have", async ({
-  page,
-}) => {
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: FREE_BILLING }),
-  );
-  await page.getByRole("link", { name: "Members" }).click();
-  await expect(page.getByText("dev@acme.test")).toBeVisible();
-  // Silent rather than "0 seats billed", which is noise dressed as
-  // information.
-  await expect(page.getByText(/seats in use/)).toHaveCount(0);
-});
-
-test("an organization is created from the switcher, free, and opens at once", async ({
+test("an organization is created from the switcher and opens at once", async ({
   page,
 }) => {
   await signInAsPerson(page);
@@ -2161,10 +1713,7 @@ test("an organization is created from the switcher, free, and opens at once", as
       json: {
         id: "01neworg",
         name: "newco",
-        plan: "free",
-        billable_seats: 1,
-        detail:
-          "Ready. Public repositories and members are free; the first private repository starts the per-seat subscription.",
+        detail: "Ready. Invite people, then create or mirror a repository.",
       },
     });
   });
@@ -2178,17 +1727,18 @@ test("an organization is created from the switcher, free, and opens at once", as
   );
   await page.route("**/v1/orgs/newco/repos", (r) => r.fulfill({ json: [] }));
   await page.route("**/v1/orgs/newco/usage", (r) =>
-    r.fulfill({ json: { plan: "free", days: [] } }),
+    r.fulfill({ json: { days: [] } }),
   );
 
   await page.getByLabel("Organization").click();
   await page.getByRole("option", { name: "+ New organization…" }).click();
-  // It says up front what is free, that a free namespace already
-  // exists, and that no card is needed — the card-first form used to
-  // announce a trip to the provider here; there is none now.
-  await expect(page.getByText(/Your own namespace is free/)).toBeVisible();
-  await expect(page.getByText(/No card is needed/)).toBeVisible();
-  await expect(page.getByText(/A card is required/)).toHaveCount(0);
+  // It says up front that a personal namespace already exists, before
+  // anybody names a company to hold one repository.
+  await expect(
+    page.getByText(/Your own namespace already exists/),
+  ).toBeVisible();
+  // Nothing here is for sale, and the form must not suggest otherwise.
+  await expect(page.getByText(/card|billed|subscription/i)).toHaveCount(0);
   await page.getByLabel("Organization name").fill("newco");
   await page
     .getByRole("button", { name: "Create organization", exact: true })
@@ -2201,49 +1751,9 @@ test("an organization is created from the switcher, free, and opens at once", as
     page.getByRole("combobox", { name: "Organization" }),
   ).toContainText("newco");
   await expect(
-    page.getByText(/Ready\. Public repositories and members are free/),
+    page.getByText("Ready. Invite people, then create or mirror a repository."),
   ).toBeVisible();
   await expect(page).toHaveURL(/\/dashboard\/?$/);
-});
-
-test("an organization created where nothing is for sale says so", async ({
-  page,
-}) => {
-  await signInAsPerson(page);
-  await page.route("**/v1/orgs", (r) =>
-    r.fulfill({
-      status: 201,
-      json: {
-        id: "01neworg",
-        name: "newco",
-        plan: "free",
-        billable_seats: 1,
-        detail: "Ready. Billing is not configured on this deployment.",
-      },
-    }),
-  );
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({
-      json: {
-        ...ME,
-        orgs: [...ME.orgs, { id: "01neworg", name: "newco", role: "owner" }],
-      },
-    }),
-  );
-  await page.route("**/v1/orgs/newco/repos", (r) => r.fulfill({ json: [] }));
-  await page.route("**/v1/orgs/newco/usage", (r) =>
-    r.fulfill({ json: { plan: "free", days: [] } }),
-  );
-  await page.getByLabel("Organization").click();
-  await page.getByRole("option", { name: "+ New organization…" }).click();
-  await page.getByLabel("Organization name").fill("newco");
-  await page
-    .getByRole("button", { name: "Create organization", exact: true })
-    .click();
-  // The server's own sentence, not a guess.
-  await expect(
-    page.getByText("Ready. Billing is not configured on this deployment."),
-  ).toBeVisible();
 });
 
 test("a refused organization name is reported where it was typed", async ({
@@ -2921,10 +2431,7 @@ test("the picker says which installation cannot push yet", async ({ page }) => {
         detail: {
           account: "prepush-inc",
           target_type: "Organization",
-          administration_write: true,
-          actions_write: true,
           contents_write: false,
-          runners_ready: true,
           push_ready: false,
           approve_url:
             "https://github.com/organizations/prepush-inc/settings/installations/4007",
@@ -2960,7 +2467,6 @@ test("a mirror's page says where its pushes go, and offers the way to fix it", a
           ...REPOS.repos[0],
           viewer_admin: true,
           viewer_write: true,
-          write_blocked: null,
           push,
         },
       }),
@@ -3007,10 +2513,7 @@ test("a mirror's page says where its pushes go, and offers the way to fix it", a
             detail: {
               account: "acme-inc",
               target_type: "Organization",
-              administration_write: true,
-              actions_write: true,
               contents_write: true,
-              runners_ready: true,
               push_ready: true,
               approve_url:
                 "https://github.com/organizations/acme-inc/settings/installations/4001",
@@ -3031,7 +2534,6 @@ test("a mirror's page says where its pushes go, and offers the way to fix it", a
           origin_installation: "4001",
           viewer_admin: true,
           viewer_write: true,
-          write_blocked: null,
           push: {
             forwarding: true,
             blocked: null,
@@ -3046,7 +2548,6 @@ test("a mirror's page says where its pushes go, and offers the way to fix it", a
         ...REPOS.repos[0],
         viewer_admin: true,
         viewer_write: true,
-        write_blocked: null,
         push: {
           forwarding: false,
           blocked:
@@ -3235,177 +2736,6 @@ test("an empty repository is two fields and a clone command", async ({
   await expect(page.getByText(/git clone/)).toBeVisible();
 });
 
-test("a private repository on a free organization is a price and a button, not a dead end", async ({
-  page,
-}) => {
-  await mockApi(page);
-  await mockCreate(page);
-  let plan = "free";
-  const creates: Array<Record<string, unknown>> = [];
-  await page.route("**/v1/orgs/*/repos", (r) => {
-    creates.push(r.request().postDataJSON());
-    if (plan !== "paid") {
-      return r.fulfill({
-        status: 402,
-        json: {
-          error:
-            "this organization needs a paid plan to hold a private repository",
-        },
-      });
-    }
-    return r.fulfill({
-      status: 201,
-      json: { ...REPOS[0], name: "vault", kind: "native", public: false },
-    });
-  });
-  await page.route("**/v1/orgs/*/repos/vault", (r) =>
-    r.fulfill({
-      json: {
-        ...REPOS[0],
-        name: "vault",
-        kind: "native",
-        public: false,
-        clone_url: "https://stratum.test/acme/vault.git",
-      },
-    }),
-  );
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: { ...FREE_BILLING, billable_seats: 3 } }),
-  );
-  await page.route("**/v1/orgs/acme/billing/subscribe", (r) => {
-    plan = "paid";
-    return r.fulfill({
-      json: {
-        url: "https://checkout.example.test/pay/cs_sub_1",
-        kind: "checkout",
-      },
-    });
-  });
-  await page.route("https://checkout.example.test/**", (r) =>
-    r.fulfill({ contentType: "text/html", body: "<h1>Provider checkout</h1>" }),
-  );
-
-  await page.goto("/dashboard/new");
-  await page.getByRole("tab", { name: "Empty repository" }).click();
-  await page.getByLabel("Repository name").fill("vault");
-  // The box is unticked by default: private is what this creates.
-  await page.getByRole("button", { name: "Create repository" }).click();
-
-  // Not the red sentence: the price, in the server's numbers, and the
-  // one button that makes the refused thing go through.
-  const wall = page.getByRole("region", { name: "Subscription needed" });
-  await expect(wall).toBeVisible();
-  await expect(wall).toContainText("A private repository needs a subscription");
-  await expect(wall).toContainText("$12/month");
-  await expect(wall).toContainText("$4 per seat for the 3 seats");
-  await expect(wall).toContainText("2,000 hosted CI minutes");
-  await expect(page.getByRole("alert")).toHaveCount(0);
-
-  await expect(wall).toContainText("a promotion code can be entered");
-  await wall.getByRole("button", { name: "Continue to checkout" }).click();
-  // Off to the provider — and the exact create that was refused is
-  // written down first, so the billing screen can finish it when the
-  // person comes back. Nobody retypes the form.
-  await expect(page).toHaveURL("https://checkout.example.test/pay/cs_sub_1");
-  expect(creates).toHaveLength(1);
-  expect(creates[0]).toMatchObject({ name: "vault", public: false });
-  // Session storage is the dashboard origin's, not the provider's:
-  // read it from where it was written.
-  await page.goBack();
-  expect(
-    JSON.parse(
-      (await page.evaluate(() =>
-        sessionStorage.getItem("weft.billing.intent"),
-      )) ?? "null",
-    ),
-  ).toEqual({ org: "acme", kind: "create", name: "vault" });
-});
-
-test("a paywall on an organization that already pays finishes on the spot", async ({
-  page,
-}) => {
-  // The subscription landed between the refusal and the click: the
-  // server answers the billing view rather than a page, and the
-  // refused create is replayed here, as it always was.
-  await mockApi(page);
-  await mockCreate(page);
-  let plan = "free";
-  const creates: Array<Record<string, unknown>> = [];
-  await page.route("**/v1/orgs/*/repos", (r) => {
-    creates.push(r.request().postDataJSON());
-    if (plan !== "paid") {
-      return r.fulfill({
-        status: 402,
-        json: {
-          error:
-            "this organization needs a paid plan to hold a private repository",
-        },
-      });
-    }
-    return r.fulfill({
-      status: 201,
-      json: { ...REPOS[0], name: "vault", kind: "native", public: false },
-    });
-  });
-  await page.route("**/v1/orgs/*/repos/vault", (r) =>
-    r.fulfill({
-      json: {
-        ...REPOS[0],
-        name: "vault",
-        kind: "native",
-        public: false,
-        clone_url: "https://stratum.test/acme/vault.git",
-      },
-    }),
-  );
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: FREE_BILLING }),
-  );
-  await page.route("**/v1/orgs/acme/billing/subscribe", (r) => {
-    plan = "paid";
-    return r.fulfill({ json: BILLING });
-  });
-  await page.goto("/dashboard/new");
-  await page.getByRole("tab", { name: "Empty repository" }).click();
-  await page.getByLabel("Repository name").fill("vault");
-  await page.getByRole("button", { name: "Create repository" }).click();
-  const wall = page.getByRole("region", { name: "Subscription needed" });
-  await wall.getByRole("button", { name: "Continue to checkout" }).click();
-  await expect(page.getByText(/git clone/)).toBeVisible();
-  expect(creates).toHaveLength(2);
-  expect(creates[1]).toEqual(creates[0]);
-});
-
-test("declining the paywall keeps the form and makes the repository public", async ({
-  page,
-}) => {
-  await mockApi(page);
-  await mockCreate(page);
-  await page.route("**/v1/orgs/*/repos", (r) =>
-    r.fulfill({
-      status: 402,
-      json: {
-        error:
-          "this organization needs a paid plan to hold a private repository",
-      },
-    }),
-  );
-  await page.route("**/v1/orgs/acme/billing", (r) =>
-    r.fulfill({ json: FREE_BILLING }),
-  );
-  await page.goto("/dashboard/new");
-  await page.getByRole("tab", { name: "Empty repository" }).click();
-  await page.getByLabel("Repository name").fill("vault");
-  await page.getByRole("button", { name: "Create repository" }).click();
-  const wall = page.getByRole("region", { name: "Subscription needed" });
-  await wall.getByRole("button", { name: "Keep it public" }).click();
-  await expect(wall).toHaveCount(0);
-  await expect(page.getByLabel("Repository name")).toHaveValue("vault");
-  await expect(
-    page.getByRole("checkbox", { name: "Anyone can read this repository" }),
-  ).toBeChecked();
-});
-
 test("the button that leaves for GitHub says so, and is not a second Connect", async ({
   page,
 }) => {
@@ -3447,7 +2777,6 @@ const HITS = {
       org: "acme",
       name: "widget",
       description: "the fast one",
-      public: true,
       kind: "mirror",
       created_at: Date.now(),
     },
@@ -3457,7 +2786,6 @@ const HITS = {
       org: "zeta",
       name: "atlas",
       description: null,
-      public: true,
       kind: "native",
       created_at: Date.now(),
     },
@@ -3566,15 +2894,12 @@ test("a search that matches nothing says so rather than looking broken", async (
   await expect(page.getByText(/Nothing you can see matches/)).toBeVisible();
 });
 
-// "a description is edited in place, and publishing is a separate act"
-// used to live here, against the dashboard's own repo screen. That
-// screen is gone — a repository has one page now — and both halves of
-// what it asserted are already held, harder, where the controls
-// actually live: `repo-settings.spec.ts` pins the description PATCH to
-// its exact body (so it still cannot smuggle `public` alongside) and
-// pins publishing to its own request behind the type-the-name
-// confirmation. Porting it here would have been a second, weaker copy
-// of a test that already exists.
+// "a description is edited in place" used to live here, against the
+// dashboard's own repo screen. That screen is gone — a repository has
+// one page now — and what it asserted is already held, harder, where
+// the control actually lives: `repo-settings.spec.ts` pins the
+// description PATCH to its exact body. Porting it here would have been
+// a second, weaker copy of a test that already exists.
 
 test("a file page shows who last touched it, and only its own history", async ({
   page,

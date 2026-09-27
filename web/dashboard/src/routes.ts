@@ -2,14 +2,14 @@
 ///
 /// Dispatch used to be a chain of ternaries reading `segments(...)[0]`
 /// inline, which was fine while there was one address space. There are
-/// now two — the signed-in dashboard under `/dashboard`, and the public
-/// forge at the root, where `/{owner}/{repo}` is a repository somebody
-/// can read without an account — and a chain of ternaries that has to
-/// decide *which space* before it decides which page is a chain that
-/// gets one case wrong quietly.
+/// two — the dashboard under `/dashboard`, and the forge at the root,
+/// where `/{owner}/{repo}` is a repository's one address — and a chain
+/// of ternaries that has to decide *which space* before it decides which
+/// page is a chain that gets one case wrong quietly. Both spaces are
+/// signed-in only; `App.tsx` sends anybody else to `/login`.
 ///
 /// The other reason this is a file rather than a function: [`TOP_LEVEL`]
-/// is a contract with the server. A namespace named `explore` would be a
+/// is a contract with the server. A namespace named `search` would be a
 /// namespace nobody could ever reach, so every entry here has to be in
 /// the reserved-name denylist in `crates/stratum-control/src/registry.rs`
 /// — and a test in `crates/stratum-server/tests/docs_e2e.rs` reads this
@@ -30,10 +30,6 @@ export type RepoTab =
   | "insights"
   | "settings";
 
-/// The tabs a profile has, user or organization alike.
-export type OwnerTab =
-  "overview" | "repositories" | "stars" | "followers" | "following";
-
 /// Every first path segment the SPA claims for itself.
 ///
 /// Keep this sorted and keep it honest: adding a route here without
@@ -41,15 +37,11 @@ export type OwnerTab =
 /// they can never clone from.
 export const TOP_LEVEL = [
   "dashboard",
-  "explore",
-  "feed",
   "issues",
   "login",
   "notifications",
   "orgs",
   "search",
-  "stars",
-  "topics",
 ] as const;
 
 /// Where to return after signing in — but only somewhere on this site.
@@ -105,22 +97,21 @@ export type Match =
   /// `TOP_LEVEL`, which is a server-side reservation *and* an entry in
   /// `webassets.rs`'s `SPA_SEGMENTS` — three files for one link.
   | { kind: "login"; next: string; mode: LoginMode }
-  /// `/explore`, optionally narrowed to one topic by `?topic=`.
+  /// `/`, which has no page of its own: it is the way in, and the way in
+  /// is the dashboard. `App.tsx` moves the browser there rather than
+  /// rendering the overview under a second address.
+  | { kind: "home" }
+  /// `/search`, by text (`?q=`) or narrowed to exactly one topic
+  /// (`?topic=`), which is what the About rail's pills link to.
   ///
-  /// A query parameter rather than `/topics/{name}` because that is the
-  /// address the About rail's pills have always pointed at and the one
-  /// `topics::normalize` documents ("a topic ends up in
-  /// `/explore?topic=…`"). Adding a second live URL for the same listing
-  /// would be two things to share, two to keep in the header's active
-  /// logic and two for a crawler to index — the same argument that keeps
-  /// `/actions` a redirect rather than a second name for Checks.
-  | { kind: "explore"; topic: string }
-  | { kind: "search"; q: string }
-  | { kind: "feed" }
-  | { kind: "owner"; owner: string; tab: OwnerTab }
+  /// A query parameter rather than `/topics/{name}`: one listing, one
+  /// address, the same argument that keeps `/actions` a redirect rather
+  /// than a second name for Checks.
+  | { kind: "search"; q: string; topic: string }
+  | { kind: "owner"; owner: string }
   /// One changeset, at `/{owner}/changesets/{key}` — the same object the
-  /// dashboard shows at `/dashboard/changesets/{key}`, at an address a
-  /// stranger can open.
+  /// dashboard shows at `/dashboard/changesets/{key}`, at the address a
+  /// review request carries.
   ///
   /// Safe as a second path segment because `changesets` is already a
   /// reserved repository name in
@@ -157,12 +148,12 @@ const REPO_TABS: RepoTab[] = [
   "issues",
   "changes",
   // CI verdicts from whatever actually ran them, ours included: a
-  // repository's `.weft/*.yml` workflows run on Weft's own
+  // repository's `.weft/*.yml` workflows run on the organization's
   // runners and each run has a page under this tab —
   // `/{owner}/{repo}/checks/runs/{id}`, dispatched from `rest`. Named
   // "checks" and not "actions" deliberately: the tab carries a
   // Buildkite or GitLab CI project's runs beside a GitHub Actions one
-  // and beside a hosted one, and a tab named after a competitor's
+  // and beside a `.weft` one, and a tab named after a competitor's
   // product would imply the wrong thing about them and about the rest
   // of what is in it. `/actions` still answers — see `REPO_ALIASES` —
   // because it is the address muscle memory types, and it carries its
@@ -178,25 +169,12 @@ const REPO_TABS: RepoTab[] = [
 /// types, and 404ing them to prove a naming point helps nobody. It
 /// redirects rather than being a second name for the tab, so there is
 /// one address for the page: two live URLs for one thing is two things
-/// to keep in the tab strip's `active` logic, two to share, and two for
-/// a crawler to index.
+/// to keep in the tab strip's `active` logic, and two to share.
 ///
 /// Not in `TOP_LEVEL`: this is a third path segment, so it can never
 /// collide with a namespace and needs no server-side reservation.
 const REPO_ALIASES: Record<string, RepoTab> = { actions: "checks" };
 
-const OWNER_TABS: OwnerTab[] = [
-  "overview",
-  "repositories",
-  "stars",
-  "followers",
-  "following",
-];
-
-/// A profile's tab rides in `?tab=`, exactly as GitHub's does, and for
-/// the same reason: if it were a path segment then `/ada/stars` would be
-/// ambiguous with a repository of that name, and the disambiguation
-/// would have to be a lookup rather than a parse.
 /// A query string as it goes back into an address, or nothing.
 ///
 /// `""` rather than `"?"` for an empty query: a bare trailing `?` is a
@@ -207,11 +185,6 @@ function suffix(query: URLSearchParams): string {
   return q ? `?${q}` : "";
 }
 
-function ownerTab(query: URLSearchParams): OwnerTab {
-  const t = query.get("tab");
-  return OWNER_TABS.find((x) => x === t) ?? "overview";
-}
-
 /// Which page a browser address means.
 ///
 /// `path` is the address bar's own path — not a dashboard-relative one —
@@ -220,8 +193,7 @@ export function match(path: string, query: URLSearchParams): Match {
   const parts = segments(path);
   const [first, second, third] = parts;
 
-  if (first === undefined)
-    return { kind: "explore", topic: query.get("topic") ?? "" };
+  if (first === undefined) return { kind: "home" };
   if (first === "dashboard") return { kind: "dash" };
   if (first === "login") {
     // Where to return after signing in. Only a path from this origin is
@@ -234,14 +206,14 @@ export function match(path: string, query: URLSearchParams): Match {
       mode: loginMode(query.get("mode")),
     };
   }
-  if (first === "explore")
-    return { kind: "explore", topic: query.get("topic") ?? "" };
-  // The header's search box has to land somewhere, and `/explore` is a
-  // set of curated lists rather than a result page — sending a query
-  // there would either be ignored or quietly redefine what explore
-  // means. `search` was already a reserved name for exactly this.
-  if (first === "search") return { kind: "search", q: query.get("q") ?? "" };
-  if (first === "feed") return { kind: "feed" };
+  // The header's search box has to land somewhere. `search` was already
+  // a reserved name for exactly this.
+  if (first === "search")
+    return {
+      kind: "search",
+      q: query.get("q") ?? "",
+      topic: query.get("topic") ?? "",
+    };
   // The remaining claimed segments have no page yet. They are reserved
   // rather than routed, so they must not fall through and be read as
   // somebody's namespace.
@@ -249,8 +221,7 @@ export function match(path: string, query: URLSearchParams): Match {
     return { kind: "not-found" };
   }
 
-  if (second === undefined)
-    return { kind: "owner", owner: first, tab: ownerTab(query) };
+  if (second === undefined) return { kind: "owner", owner: first };
 
   // A changeset, before the repository arm and not inside it: it is
   // owned by an organization rather than by any one repository, and
@@ -258,11 +229,9 @@ export function match(path: string, query: URLSearchParams): Match {
   // somebody's repo.
   //
   // `/{owner}/changesets` with no key is deliberately not-found rather
-  // than an org-wide list. That list's rows are filtered per caller —
-  // you see the sets whose members you can read — so a public one would
-  // silently hide half of itself, and a list that lies about its own
-  // completeness is worse than no list. The signed-in list stays at
-  // `/dashboard/changesets`, where the caller is known.
+  // than a second org-wide list: that list lives at
+  // `/dashboard/changesets`, and one list with one address is the rule
+  // this file keeps everywhere else.
   if (second === "changesets") {
     if (third === undefined || parts.length > 3) return { kind: "not-found" };
     return { kind: "changeset", owner: first, key: third };
@@ -286,7 +255,7 @@ export function match(path: string, query: URLSearchParams): Match {
   }
 
   // `/{owner}/{repo}` with nothing after it is the Code tab: that
-  // address is what every README badge and every search result points
+  // address is what every search result and every shared link points
   // at, so it answers rather than 404s.
   if (third === undefined) {
     return { kind: "repo", owner: first, repo: second, tab: "code", rest: [] };

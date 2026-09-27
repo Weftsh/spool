@@ -1,7 +1,7 @@
 /// The "Details" link on a check row, which now points to two different
 /// kinds of place.
 ///
-/// Every check row carries a `detail_url` and until hosted runs existed
+/// Every check row carries a `detail_url` and until workflow runs existed
 /// that URL was always somebody else's site — a GitHub Actions run, a
 /// Buildkite build — so both places that render one opened it in a new
 /// tab with `rel="nofollow ugc noopener noreferrer"`. That is exactly
@@ -31,7 +31,7 @@
 /// points somewhere else, which is a configuration mistake we would
 /// rather degrade from than break on.
 
-import { HOSTED_PROVIDER } from "@/lib/hosted-runs";
+import { WORKFLOW_PROVIDER } from "@/lib/workflow-runs";
 
 /// The path part of a URL that is on this origin, or `null`.
 ///
@@ -45,7 +45,7 @@ import { HOSTED_PROVIDER } from "@/lib/hosted-runs";
 /// intake by a third party decide that a link navigates inside the app.
 /// Nothing behind that is more dangerous than a wrong page, but "the
 /// remote party chooses" is not a rule worth having: the server writes
-/// hosted `detail_url`s absolute, so requiring it costs nothing.
+/// workflow runs' `detail_url`s absolute, so requiring it costs nothing.
 export function sameOriginPath(url: string, origin: string): string | null {
   let parsed: URL;
   try {
@@ -67,7 +67,7 @@ export function inAppPath(
   url: string,
   origin: string,
 ): string | null {
-  if (provider !== HOSTED_PROVIDER) return null;
+  if (provider !== WORKFLOW_PROVIDER) return null;
   return sameOriginPath(url, origin);
 }
 

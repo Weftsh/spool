@@ -37,8 +37,8 @@ import { CodeBoundary, LazyHighlightedFile, LazyRepoTree } from "@/code/lazy";
 import { useIsMobile } from "@/lib/use-mobile";
 // Structural links are ink and reveal on hover; only prose links carry
 // the brand colour. See `web/FORGE-UX.md` §9.2 — the reason is that this
-// browser now renders on a public repository page too, where GitHub
-// would paint forty elements blue, and emerald spent that widely stops
+// browser renders on the forge's repository page, where GitHub would
+// paint forty elements blue, and emerald spent that widely stops
 // meaning "action" at all.
 import { STRUCTURAL_LINK, STRUCTURAL_LINK_2 } from "@/lib/links";
 import { formatAgo, formatBytes, formatDay } from "@/format";
@@ -47,7 +47,6 @@ import { Markdown, type MarkdownBase } from "@/components/markdown";
 import { Table, TableBody, TableCell, TableRow } from "@/components/ui/table";
 import { Alert } from "@/components/ui/alert";
 import { MirrorPushNotice } from "@/components/mirror-push-notice";
-import { RepoWalls } from "@/components/repo-walls";
 import { Button } from "@/components/ui/button";
 import {
   Select,
@@ -65,16 +64,11 @@ export function Browser(props: {
   path: string[];
   at: string | undefined;
   navigate: (to: string) => void;
-  /// Whether this browser draws the spend-limit walls itself. The repo
-  /// screen draws them over every tab and hands `false`, or the Code
-  /// tab would carry the same wall twice; a browser mounted anywhere
-  /// with nothing above the tree wants `true`.
-  walls: boolean;
   /// How this mount spells a path inside the repository.
   ///
   /// The browser used to build `/repos/{repo}/…` itself, which was true
-  /// of the only place it was mounted and false the moment a public
-  /// repository at `/{owner}/{repo}/tree/…` reused it. Every URL this
+  /// of the only place it was mounted and false the moment the forge's
+  /// `/{owner}/{repo}/tree/…` reused it. Every URL this
   /// component makes goes through one helper, so making that helper the
   /// caller's business is the whole of the change — and it is better
   /// than an adapter that reverse-engineers the URLs on the way out,
@@ -208,8 +202,8 @@ export function Browser(props: {
     // this repository" earns nothing: retrying spends a second request
     // to be refused again, and it turns the honest 401 the server gave
     // into a 404 further down the log, which reads as a missing file
-    // rather than a private repo. The manual browser pass caught this on
-    // a stranger opening a private repository's address.
+    // rather than a repository they may not read. The manual browser
+    // pass caught this on somebody opening another team's repository.
     const wrongGuess = (e: unknown) =>
       e instanceof ApiError && e.status === 404;
     const orElse = (other: () => Promise<void>) => (e: unknown) =>
@@ -291,22 +285,9 @@ export function Browser(props: {
 
   return (
     <div className="space-y-4">
-      {/* The spend-limit walls, over the tree: this is where a link to
-          a private repository lands, and the browser has no row of its
-          own, so the component reads visibility itself. */}
-      {props.walls && (
-        <RepoWalls session={props.session} repo={props.repo} />
-      )}
       {/* Where a push to a mirror goes, over the tree: this is where a
           link to the repository lands, and the person about to add a
-          remote is reading it.
-
-          Not gated on `walls`. It was, and `walls={false}` is exactly
-          what the forge's `RepoScreen` passes — it draws the walls over
-          every tab itself — so on a repository's *only* real address
-          the notice rendered nowhere at all. Whether somebody else
-          already drew the spend-limit walls says nothing about whether
-          this mirror's pushes are forwarded. */}
+          remote is reading it. */}
       <MirrorPushNotice session={props.session} repo={props.repo} />
       <div className="flex flex-wrap items-center gap-2">
         <Breadcrumbs

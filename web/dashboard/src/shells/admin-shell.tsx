@@ -12,7 +12,7 @@ import { Toaster } from "@/components/ui/sonner";
 /// The chrome the signed-in dashboard wears: a collapsible rail on the
 /// left, a breadcrumb, and a deliberately narrow content column.
 ///
-/// Lifted out of `App.tsx` unchanged when the public forge arrived. The
+/// Lifted out of `App.tsx` unchanged when the forge arrived. The
 /// two shells are split by *address space* rather than by page, and that
 /// is the point: `AppSidebar` mounts only under `/dashboard`, so every
 /// contract encoded in it — the DOM order that keeps its search input

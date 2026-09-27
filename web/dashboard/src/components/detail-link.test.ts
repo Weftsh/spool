@@ -47,7 +47,7 @@ describe("sameOriginPath", () => {
     // A relative `detail_url` would resolve to our origin and so would
     // look internal by construction — which would let a value a third
     // party posted to the intake decide that a link navigates inside the
-    // app. The server writes hosted URLs absolute, so requiring it costs
+    // app. The server writes workflow-run URLs absolute, so requiring it costs
     // nothing.
     expect(sameOriginPath("/acme/widget/checks/runs/r1", HERE)).toBeNull();
     expect(sameOriginPath("//evil.test/a", HERE)).toBeNull();
@@ -69,7 +69,7 @@ describe("sameOriginPath", () => {
 describe("inAppPath", () => {
   const ours = `${HERE}/acme/widget/checks/runs/wr1`;
 
-  it("takes a hosted row on this origin in-app", () => {
+  it("takes a workflow run's row on this origin in-app", () => {
     expect(inAppPath("weft", ours, HERE)).toBe(
       "/acme/widget/checks/runs/wr1",
     );
@@ -85,7 +85,7 @@ describe("inAppPath", () => {
     expect(inAppPath("github", ours, HERE)).toBeNull();
   });
 
-  it("refuses a hosted row pointing somewhere else", () => {
+  it("refuses a workflow run's row pointing somewhere else", () => {
     // A deployment whose STRATUM_PUBLIC_URL is wrong. Degrading to a
     // plain outbound link is a page a reader can still reach; an in-app
     // navigation to another origin's path is a 404 wearing our chrome.
@@ -124,7 +124,7 @@ describe("DetailLink attributes", () => {
     }
   };
 
-  it("renders a hosted row as a plain in-app link", () => {
+  it("renders a workflow run's row as a plain in-app link", () => {
     const html = render("weft", `${HERE}/acme/widget/checks/runs/wr1`, true);
     expect(html).toContain('href="/acme/widget/checks/runs/wr1"');
     // Both of these are wrong on a first-party URL: `ugc` is a claim

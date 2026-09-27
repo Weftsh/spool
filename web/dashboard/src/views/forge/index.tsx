@@ -1,10 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
 import { api, viewerSession, type Me, type Repo } from "@/api";
 import { NotFound } from "@/components/not-found";
-import { RepoWalls } from "@/components/repo-walls";
 import { TabStrip } from "@/components/tab-strip";
 import { ForgeContainer, ForgeShell } from "@/shells/forge-shell";
-import { PROSE_LINK, STRUCTURAL_LINK, STRUCTURAL_LINK_2 } from "@/lib/links";
+import { STRUCTURAL_LINK, STRUCTURAL_LINK_2 } from "@/lib/links";
 import { Browser, CommitLog } from "@/views/browse";
 import { ChangesPanel } from "@/views/changes";
 import { ChangesetView } from "@/views/changesets";
@@ -13,14 +12,12 @@ import { CommitView } from "@/views/forge/commit";
 import { CodeButton } from "@/components/code-button";
 import { OwnerAvatar } from "@/components/owner-avatar";
 import { Alert } from "@/components/ui/alert";
-import { Badge } from "@/components/ui/badge";
 import { Markdown } from "@/components/markdown";
 import { WatchButton } from "@/components/watch-button";
-import { StarButton } from "@/components/star-button";
 import { ForkButton } from "@/components/fork-button";
 import { SyncBadge } from "@/components/sync-badge";
 import { ProfileView } from "@/views/forge/profile";
-import { ExploreView } from "@/views/forge/explore";
+import { SearchView } from "@/views/forge/search";
 import { IssuesView } from "@/views/forge/issues";
 import { ChecksView } from "@/views/forge/checks";
 import { ChangesetBuilds } from "@/views/forge/changeset-builds";
@@ -28,18 +25,12 @@ import { WorkflowRunView } from "@/views/forge/workflow-run";
 import { RepoInsightsView } from "@/views/forge/insights";
 import { RepoSettingsView } from "@/views/forge/settings";
 import { About } from "@/views/forge/about";
-import { dash, href, useQuery } from "@/router";
+import { href, useQuery } from "@/router";
 import type { Match, RepoTab } from "@/routes";
 
-/// The public forge: what a stranger sees, and what a member sees when
-/// they follow the same link.
-///
-/// There is deliberately one rendering rather than two. A repository page
-/// that looked different depending on whether you were signed in would
-/// make "is this public?" a question you answer by signing out — and the
-/// first thing a maintainer does after publishing is check the page a
-/// stranger gets. Signing in adds *actions* (star, fork, open an issue)
-/// and never changes what the page says.
+/// The forge: every address at the root — a namespace, a repository, a
+/// changeset, a search. Only ever rendered for somebody signed in;
+/// `App.tsx` sends anybody else to `/login` first.
 ///
 /// The session handed to the data calls is `viewerSession(owner, token)`:
 /// the namespace the request is about, plus the credential of whoever is
@@ -50,11 +41,10 @@ import type { Match, RepoTab } from "@/routes";
 /// of their own work rather than being told anything.
 /// Name the page in the browser's own chrome.
 ///
-/// Every forge page reported "Weft Dashboard", which is the title of
-/// a product a visitor to a public repository has not signed in to and
-/// may never. It is what they bookmark, what a shared tab says, and what
-/// a crawler indexes — three places where "acme/forge-demo" is the whole
-/// answer and the product's name is noise.
+/// Every forge page reported "Weft Dashboard". The title is what
+/// somebody bookmarks and what a shared tab says — two places where
+/// "acme/forge-demo" is the whole answer and the product's name is
+/// noise.
 /// `null` means "somebody below me is naming this page".
 ///
 /// React runs a child's effects before its parent's, so a parent that
@@ -78,18 +68,14 @@ export function ForgeView(props: {
   match: Match;
   me: Me | null;
   /// The caller's API token, when they signed in with one rather than
-  /// with a password. Empty for a stranger.
+  /// with a password; empty for a cookie session.
   ///
-  /// The forge used to build every session as `anon(owner)`, which is
-  /// right for the reads — a public repository answers everybody — and
-  /// silently wrong for the writes beside them. A person signed in with
-  /// a service token was shown Fork and Star, and pressing either sent
-  /// an unauthenticated request and bounced them to a login page they
-  /// were already past. The org in the path is the repository's owner;
-  /// the token is the caller's. They are different things and the
-  /// session carries both.
+  /// The org in the path is the repository's owner; the token is the
+  /// caller's. They are different things and the session carries both —
+  /// a session built with an empty token went out unauthenticated for a
+  /// person signed in with a service token, and every write bounced
+  /// them to a login page they were already past.
   token: string | null;
-  currentPath: string;
   navigate: (to: string, replace?: boolean) => void;
   onSignOut: () => void;
 }) {
@@ -104,11 +90,9 @@ export function ForgeView(props: {
             // — and the namespace with it, because two organizations may
             // both have a `rename-payments`.
             `${m.owner}/${m.key} — Weft`
-          : m.kind === "search" && m.q
-            ? `${m.q} — Weft`
-            : m.kind === "explore" && m.topic
-              ? `${m.topic} — Weft`
-              : "Weft",
+          : m.kind === "search" && (m.q || m.topic)
+            ? `${m.q || m.topic} — Weft`
+            : "Weft",
   );
   // A repository owns its whole screen — masthead included — because
   // whether that screen exists at all depends on an answer only it
@@ -119,38 +103,29 @@ export function ForgeView(props: {
   return (
     <ForgeShell
       me={props.me}
-      currentPath={props.currentPath}
       navigate={props.navigate}
       onSignOut={props.onSignOut}
     >
-      {m.kind === "explore" ? (
-        <ExploreView q="" topic={m.topic} navigate={props.navigate} />
-      ) : m.kind === "search" ? (
-        <ExploreView q={m.q} navigate={props.navigate} />
+      {m.kind === "search" ? (
+        <SearchView
+          q={m.q}
+          topic={m.topic}
+          token={props.token}
+          navigate={props.navigate}
+        />
       ) : m.kind === "owner" ? (
         <ProfileView
           owner={m.owner}
-          tab={m.tab}
           navigate={props.navigate}
           token={props.token ?? undefined}
         />
       ) : m.kind === "changeset" ? (
         // The same view the dashboard draws, inside this shell's column
-        // rather than a `<main>` of its own. Not a second rendering: a
-        // changeset page that said different things to a stranger would
-        // make "is this readable?" a question you answer by signing out,
-        // and the reads behind it already admit an anonymous caller over
-        // public repositories.
+        // rather than a `<main>` of its own — one rendering, not two.
         <ChangesetView
           session={viewerSession(m.owner, props.token)}
           changesetKey={m.key}
           links={forgeChangesetLinks(m.owner, props.navigate)}
-          // Either credential counts. A person working through a pasted
-          // API token has no browser session at all, and gating on `me`
-          // alone would tell them to sign in while they hold a token
-          // that works.
-          signedIn={props.me !== null || props.token !== null}
-          loginHref={href(["login"], { next: props.currentPath })}
           as="div"
         />
       ) : (
@@ -165,7 +140,6 @@ function RepoScreen(props: {
   m: Extract<Match, { kind: "repo" }>;
   me: Me | null;
   token: string | null;
-  currentPath: string;
   navigate: (to: string, replace?: boolean) => void;
   onSignOut: () => void;
 }) {
@@ -196,7 +170,6 @@ function RepoScreen(props: {
   return (
     <ForgeShell
       me={props.me}
-      currentPath={props.currentPath}
       navigate={props.navigate}
       onSignOut={props.onSignOut}
       // The tab strip is the shell's masthead, not page content, so its
@@ -210,9 +183,7 @@ function RepoScreen(props: {
           <RepoTabs
             m={props.m}
             navigate={props.navigate}
-            me={props.me}
             token={props.token}
-            currentPath={props.currentPath}
             row={row}
             admin={admin}
             member={member}
@@ -223,71 +194,17 @@ function RepoScreen(props: {
       {hidden ? (
         <NotFound onNavigate={props.navigate} what={`${owner}/${repo}`} />
       ) : (
-        <>
-          {/* The spend-limit walls, over every tab, from the row this
-              screen already holds: `null` while it is in flight, so
-              nothing is drawn on a guess. A stranger's billing read is
-              a masked refusal and is swallowed inside. */}
-          <RepoWalls
-            session={viewerSession(owner, props.token)}
-            repo={repo}
-            isPrivate={row ? !row.public : null}
-          />
-          {row?.write_blocked && (
-            <ReadOnlyNotice reason={row.write_blocked} admin={admin === true} />
-          )}
-          <RepoBody
-            m={props.m}
-            navigate={props.navigate}
-            row={row}
-            token={props.token}
-            me={props.me}
-            currentPath={props.currentPath}
-            admin={admin}
-            member={member}
-          />
-        </>
+        <RepoBody
+          m={props.m}
+          navigate={props.navigate}
+          row={row}
+          token={props.token}
+          me={props.me}
+          admin={admin}
+          member={member}
+        />
       )}
     </ForgeShell>
-  );
-}
-
-/// The banner over a repository nobody may write to.
-///
-/// A private repository on an organization whose subscription had ended
-/// looked exactly like every other repository — Code, Changes, the clone
-/// button, all present — right up to `git push`, which answered 402 with
-/// a sentence nobody on the page had seen. The server's `write_blocked`
-/// is that sentence, shown here to every reader on every tab, because
-/// "read-only" is a fact about the repository and not about the viewer:
-/// a member deciding where to push a fix wants to know before cloning.
-/// The `quota:` tag the refusal carries is for `git`, not for a person,
-/// so it is dropped. An admin gets the way out; everybody else gets the
-/// fact and who to ask.
-function ReadOnlyNotice(props: { reason: string; admin: boolean }) {
-  const sentence = props.reason.replace(/^quota:\s*/, "");
-  return (
-    <Alert
-      variant="warning"
-      role="status"
-      data-testid="read-only-notice"
-      className="mt-4"
-    >
-      <span className="font-medium text-ink">
-        This repository is read-only.
-      </span>{" "}
-      {sentence[0]?.toUpperCase()}
-      {sentence.slice(1)}.{" "}
-      {props.admin ? (
-        // A full load, not `navigate`: Billing lives on the dashboard
-        // mount, which this router does not know about.
-        <a className={PROSE_LINK} href={dash(["settings", "billing"])}>
-          Open Billing
-        </a>
-      ) : (
-        "An owner of the organization can do either from Billing."
-      )}
-    </Alert>
   );
 }
 
@@ -296,11 +213,8 @@ function ReadOnlyNotice(props: { reason: string; admin: boolean }) {
 ///
 /// `FORGE-UX.md` says a tab that leads nowhere is worse than an absent
 /// one, and then this file shipped five of them, four of which answered
-/// 404. Worse than useless: the not-found copy offers to sign you in,
-/// because the ordinary reason a page is missing here is that it is
-/// private — so a visitor was invited to authenticate for a feature that
-/// does not exist and never would appear. A surface that is honest about
-/// being small beats one that gestures at a product it does not have.
+/// 404. A surface that is honest about being small beats one that
+/// gestures at a product it does not have.
 ///
 /// Add a tab here when its body exists, not when its name is decided.
 const TABS: { key: RepoTab; label: string }[] = [
@@ -309,7 +223,7 @@ const TABS: { key: RepoTab; label: string }[] = [
   { key: "changes", label: "Changes" },
   // Named Checks and not Actions, deliberately (FORGE-UX §7). The tab
   // carries every verdict about a commit whoever reached it: a
-  // repository's `.weft/*.yml` workflows, which run on our own
+  // repository's `.weft/*.yml` workflows, which run on the organization's
   // runners and have their own run page at `checks/runs/{id}`, beside a
   // Buildkite project's runs and a GitHub Actions one. Naming it after
   // one competitor's product would say the wrong thing about them and
@@ -340,25 +254,22 @@ function activeTab(tab: RepoTab): RepoTab {
 function RepoTabs(props: {
   m: Extract<Match, { kind: "repo" }>;
   navigate: (to: string, replace?: boolean) => void;
-  me: Me | null;
   token: string | null;
-  currentPath: string;
   row: Repo | null;
   /// Whether this viewer may administer this repository, `null` until
   /// the row that says so has arrived. A viewer who may not is shown no
   /// Settings tab at all — not a disabled one, which would still tell
   /// them the surface is there to come back for.
   admin: boolean | null;
-  /// Whether this viewer holds a role here at all, rather than reading a
-  /// public repository as a stranger. The Insights tab's gate, and the
-  /// same `null`-until-known rule.
+  /// Whether this viewer holds a role here at all. The Insights tab's
+  /// gate, and the same `null`-until-known rule.
   member: boolean | null;
 }) {
   const { owner, repo, tab } = props.m;
   // One object per owner, not one per render.
   //
-  // `anon()` builds a fresh `Session` every time it is called, and a
-  // child whose effect depends on that object re-runs it on every
+  // `viewerSession()` builds a fresh `Session` every time it is called,
+  // and a child whose effect depends on that object re-runs it on every
   // render, sets state, and re-renders — a loop that freezes the tab
   // rather than failing. It froze this page the first time these
   // controls were mounted. `WatchButton` defends itself by depending on
@@ -368,10 +279,6 @@ function RepoTabs(props: {
     () => viewerSession(owner, props.token),
     [owner, props.token],
   );
-  // Signed in is signed in, however you did it. `me` is null on a token
-  // session — the password flow is what fills it — so testing it alone
-  // told a service caller they were a stranger.
-  const signedIn = props.me !== null || (props.token ?? "") !== "";
   return (
     <>
       <ForgeContainer>
@@ -403,22 +310,11 @@ function RepoTabs(props: {
                   {repo}
                 </a>
               </span>
-              {/* Only once the row has arrived. Guessing "Public" while
-                  the read is in flight would mean a private repository
-                  briefly announcing itself as public, which is the one
-                  direction this pill must never be wrong in. */}
-              {props.row && (
-                <Badge variant="neutral">
-                  {props.row.public ? "Public" : "Private"}
-                </Badge>
-              )}
               {/* Whether a mirror is keeping up with its origin, beside
                   the name rather than on Insights: it is the repository's
                   *state*, and a reader who is about to clone a stale
                   mirror needs to be told so on the page they landed on,
-                  not on a tab only an admin is offered. It lived on the
-                  dashboard's repo screen, which is to say nowhere a
-                  stranger — or a member without admin — ever saw it. */}
+                  not on a tab only an admin is offered. */}
               {props.row?.kind === "mirror" && (
                 <SyncBadge
                   error={props.row.sync_error}
@@ -438,41 +334,20 @@ function RepoTabs(props: {
               </span>
             )}
           </div>
-          {/* Watch · Fork · Star, GitHub's order (FORGE-UX §1.2), and
-              all three drawn by one component so they cannot drift
-              apart in height again. Every one of them shows its count
-              to a stranger and sends a press to sign-in: the counts are
-              public information, and hiding them from the people most
-              likely to be deciding whether to trust the project would be
-              exactly the wrong way round. */}
+          {/* Watch · Fork, GitHub's order (FORGE-UX §1.2), both drawn
+              by one component so they cannot drift apart in height. */}
           <span className="flex shrink-0 items-center gap-2 sm:ml-auto">
             <WatchButton
               session={session}
               repo={repo}
               count={props.row?.watcher_count ?? 0}
-              signedIn={signedIn}
-              onSignIn={() =>
-                props.navigate(href(["login"], { next: props.currentPath }))
-              }
             />
             <ForkButton
               session={session}
               repo={repo}
               count={props.row?.fork_count ?? 0}
-              signedIn={signedIn}
-              onSignIn={() =>
-                props.navigate(href(["login"], { next: props.currentPath }))
-              }
               onForked={(made) =>
                 props.navigate(href([made.org ?? owner, made.name]))
-              }
-            />
-            <StarButton
-              session={session}
-              repo={repo}
-              signedIn={signedIn}
-              onSignIn={() =>
-                props.navigate(href(["login"], { next: props.currentPath }))
               }
             />
           </span>
@@ -503,10 +378,9 @@ function RepoTabs(props: {
           // answers — on two different questions, which is the point.
           //
           // Insights is for **members**: a repository's traffic belongs
-          // to the people who own it, and publishing the code does not
-          // publish how the code is used. That is a weaker bar than
-          // Settings, deliberately — somebody with the `viewer` role may
-          // read the numbers and change nothing.
+          // to the people who own it. That is a weaker bar than Settings,
+          // deliberately — somebody with the `viewer` role may read the
+          // numbers and change nothing.
           //
           // Insights before Settings, which is GitHub's order and the
           // useful one: the tab you read comes before the tab you change
@@ -528,13 +402,6 @@ function RepoTabs(props: {
   );
 }
 
-/// What the repository says about itself, beside the files.
-///
-/// The clone commands are the reason this panel exists at all. A public
-/// repository page whose visitor cannot find out how to clone it has
-/// failed at the one job it has — and that is what shipped: the address
-/// was in the dashboard's own repo screen, behind a sign-in, and nowhere
-/// a stranger could reach.
 /// The repository row, fetched once for whoever on the page needs it.
 ///
 /// The About panel and the Code button both want it, and asking twice
@@ -542,13 +409,13 @@ function RepoTabs(props: {
 /// `loading` until the server answers, then the row or `"hidden"`.
 ///
 /// "Hidden" covers refused and missing alike, and deliberately does not
-/// distinguish them: a stranger asking about a private repository and a
-/// stranger asking about one that never existed must get the same
-/// answer, or the URL bar becomes an oracle for which private
-/// repositories a namespace has. That masking is enforced server-side
-/// and was then undone by the page, which drew the repository's name,
-/// its tab strip and its document title before showing a red box with
-/// the four characters `401` in it.
+/// distinguish them: somebody asking about a repository they may not
+/// read and somebody asking about one that never existed must get the
+/// same answer, or the URL bar becomes an oracle for which repositories
+/// a namespace has. That masking is enforced server-side and was then
+/// undone by the page, which drew the repository's name, its tab strip
+/// and its document title before showing a red box with the four
+/// characters `401` in it.
 type RepoState = { status: "loading" } | { status: "hidden" } | Repo;
 
 function useRepoRow(
@@ -722,10 +589,9 @@ function RepoBody(props: {
   navigate: (to: string, replace?: boolean) => void;
   row: Repo | null;
   token: string | null;
-  /// Both only for the Issues tab, which has to know whether the
-  /// visitor can file one and where to send them back to if not.
+  /// Who is looking, when a browser session says: the Issues and
+  /// Changes tabs compare it with an author.
   me: Me | null;
-  currentPath: string;
   /// Whether this viewer may administer the repository, decided once in
   /// `RepoScreen` so the tab and the page it leads to cannot disagree.
   admin: boolean | null;
@@ -807,18 +673,12 @@ function RepoBody(props: {
           session={session}
           repo={repo}
           // The server's own answer, not a guess from the row's presence:
-          // a stranger reading a public repository gets the row too, and
-          // was shown a write form because of it.
+          // a reader with the `viewer` role gets the row too, and must
+          // not be shown a write form because of it.
           canWrite={row?.viewer_write ?? false}
-          // Either credential counts. `me` is the browser session, and a
-          // person working through a pasted API token has no session at
-          // all — gating on `me` alone would tell them to sign in while
-          // they were holding a token that works.
-          signedIn={props.me !== null || props.token !== null}
           me={props.me}
           defaultBranch={row?.default_branch}
-          loginHref={href(["login"], { next: props.currentPath })}
-          // A hosted run's check row links to its run page, which is a
+          // A workflow run's check row links to its run page, which is a
           // route on this mount. See `DetailLink`.
           navigate={props.navigate}
           selectedKey={rest[0] ?? null}
@@ -834,10 +694,10 @@ function RepoBody(props: {
     );
   }
   if (tab === "checks") {
-    // `/{owner}/{repo}/checks/runs/{id}` — one run on our own runners.
+    // `/{owner}/{repo}/checks/runs/{id}` — one `.weft` workflow run.
     //
     // Under the Checks tab and not beside it, because that is what it
-    // is: a hosted run mirrors itself into a check row like any other
+    // is: a workflow run mirrors itself into a check row like any other
     // provider's verdict, and this is that row's own page. It also keeps
     // the tab strip lit correctly with no extra case, and the `/actions`
     // alias carries its deep links here for free.
@@ -881,7 +741,6 @@ function RepoBody(props: {
         canWrite={row?.viewer_write ?? false}
         token={props.token}
         me={props.me}
-        currentPath={props.currentPath}
         navigate={props.navigate}
       />
     );
@@ -939,8 +798,6 @@ function RepoBody(props: {
               path={rest}
               at={at}
               navigate={props.navigate}
-              // `RepoScreen` draws the walls over every tab already.
-              walls={false}
               // A file path rides behind `tree` here, where `/dashboard` spells
               // the same thing `/repos/{repo}/…`. One helper, handed in, is why
               // the same component serves both mounts.

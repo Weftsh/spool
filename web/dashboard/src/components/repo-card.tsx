@@ -1,31 +1,24 @@
-import { Book, GitFork, Star } from "lucide-react";
+import { Book, GitFork } from "lucide-react";
 import { formatCount } from "@/format";
 import { LanguageDot } from "@/components/language-dot";
-import { Badge } from "@/components/ui/badge";
 import { STRUCTURAL_LINK } from "@/lib/links";
 import { cn } from "@/lib/utils";
 
-/// A repository as a card: the pinned grid on a profile, and the
-/// results on discovery pages.
+/// A repository as a card: the grid on an owner's page, and search
+/// results.
 ///
-/// The counts are always rendered and always mono, including zero.
-/// That is a trust rule rather than a layout one — a mirrored project's
-/// honest `☆ 0` beside its imported "60.3k on GitHub" is the whole
-/// argument that this forge does not inflate a counter on day one
-/// (FORGE-UX §6) — and a row of counts that appears and disappears is
-/// also a row nobody can scan.
+/// A count is always mono, including zero, and a row of counts that
+/// appears and disappears is a row nobody can scan.
 export function RepoCard(props: {
-  /// Rendered only when it is not the page's own owner: on a profile's
-  /// pinned grid the owner is the profile.
+  /// Rendered only when it is not the page's own owner: on an owner's
+  /// grid the owner is the page.
   owner?: string | null;
   name: string;
   href: string;
   description?: string | null;
-  visibility?: "public" | "private";
   /// The repository's dominant language and its rank in the language
   /// list — the rank is what picks the dot's series colour.
   language?: { name: string; rank: number } | null;
-  stars?: number;
   forks?: number;
   onNavigate: (to: string) => void;
   className?: string;
@@ -54,12 +47,7 @@ export function RepoCard(props: {
             </>
           )}
           {props.name}
-        </a>{" "}
-        {props.visibility && (
-          <Badge variant="neutral" className="shrink-0 capitalize">
-            {props.visibility}
-          </Badge>
-        )}
+        </a>
       </div>
 
       {props.description && (
@@ -70,17 +58,9 @@ export function RepoCard(props: {
         {props.language && (
           <LanguageDot name={props.language.name} rank={props.language.rank} />
         )}
-        {/* Omitted, not zeroed, when the caller has no count to give.
-            A star icon reading 0 on every card is a promise of a feature
-            that does not exist, and "nobody has starred this" and "there
-            is no such thing as starring here" are different sentences. */}
-        {props.stars !== undefined && (
-          <span className="inline-flex items-center gap-1.5">
-            <Star aria-hidden className="size-3.5" />
-            <span className="font-mono">{formatCount(props.stars)}</span>
-            <span className="sr-only">stars</span>
-          </span>
-        )}
+        {/* Omitted, not zeroed, when the caller has no count to give:
+            "nobody has forked this" and "nobody told us" are different
+            sentences. */}
         {props.forks !== undefined && (
           <span className="inline-flex items-center gap-1.5">
             <GitFork aria-hidden className="size-3.5" />

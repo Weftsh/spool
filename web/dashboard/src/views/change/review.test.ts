@@ -172,7 +172,7 @@ describe("readBlocks", () => {
   });
 
   it("claims nothing for a reader the page has no identity for", () => {
-    // A signed-out reader, or a mount that never threaded `me`. Offering
+    // A token session, or a mount that never threaded `me`. Offering
     // Withdraw there would be a control that answers 404 on a block
     // somebody else raised.
     const read = readBlocks(verdict([block({ user_id: ME.id })]), null);

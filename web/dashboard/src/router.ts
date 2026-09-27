@@ -7,18 +7,17 @@
 /// a file browser people use once.
 ///
 /// It used to be mounted at `/dashboard` and strip that prefix on the
-/// way in and add it back on the way out. It no longer can: a public
+/// way in and add it back on the way out. It no longer can: a
 /// repository lives at `/{owner}/{repo}` with no prefix at all, and a
 /// router that assumed one would have had to be told to stop assuming
 /// it on every second page. So this reads and writes the address bar
-/// verbatim, and the two *address spaces* — the signed-in dashboard
-/// under `/dashboard`, the public forge at the root — are expressed by
-/// the shell that mounts them, with [`mountedAt`].
+/// verbatim, and the two *address spaces* — the dashboard under
+/// `/dashboard`, the forge at the root — are expressed by the shell
+/// that mounts them, with [`mountedAt`].
 
 import { useEffect, useMemo, useState } from "react";
 
-/// Where the signed-in dashboard is mounted. The public forge has no
-/// such prefix, which is the whole reason this is a value rather than a
+/// Where the dashboard is mounted. The forge has no such prefix, which is the whole reason this is a value rather than a
 /// constant baked into `read` and `navigate`.
 export const DASH = "/dashboard";
 

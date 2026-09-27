@@ -24,7 +24,7 @@ describe("countLabel", () => {
 
   it("admits it does not know rather than printing NaN", () => {
     // A non-count reaching here is a bug upstream, and `NaN` beside a
-    // star glyph is the one rendering worse than saying nothing. It is
+    // glyph is the one rendering worse than saying nothing. It is
     // also the case an `?? 0` in the caller would silently turn into a
     // confident, wrong zero.
     expect(countLabel(Number.NaN)).toBe("–");

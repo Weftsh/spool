@@ -49,7 +49,7 @@ for (const colorScheme of ["dark", "light"] as const) {
 test("the rail files each setting under whose it is, each with its own icon", async ({
   page,
 }) => {
-  // One "Settings" label over nine rows put Billing two rows above
+  // One "Settings" label over every row put Runners two rows above
   // Password with nothing to say that one changes the organization for
   // everybody and the other changes only you. And Runners and Email
   // addresses fell through to the Members icon, so the collapsed rail
@@ -63,7 +63,7 @@ test("the rail files each setting under whose it is, each with its own icon", as
 
   const org = group("Organization");
   const account = group("Your account");
-  for (const name of ["Members", "Billing", "Runners", "Teams", "Packages", "Activity"]) {
+  for (const name of ["Members", "Runners", "Teams", "Activity"]) {
     await expect(org.getByRole("link", { name, exact: true })).toBeVisible();
     await expect(account.getByRole("link", { name, exact: true })).toHaveCount(0);
   }
