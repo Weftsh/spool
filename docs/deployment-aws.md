@@ -90,8 +90,22 @@ docker compose down
 
 That is the real image against PostgreSQL and MinIO, with the real git
 client cloning (and `fsck --full --strict`ing), pushing and reading back
-over both transports. `deploy/smoke.sh`'s header lists the optional legs;
-`SMOKE_SELF_HOSTED=1` adds a self-hosted runner taking a job.
+over both transports. `deploy/smoke.sh`'s header lists the optional legs.
+To add a self-hosted runner taking a job, build the runner image and run
+it on the host's network, so it reaches the server at the same loopback
+address the server gives out:
+
+```sh
+docker build -f Dockerfile.runner -t weft-runner:local .
+SMOKE_SELF_HOSTED=1 SMOKE_RUNNER_NETWORK=host \
+BASE_URL=http://127.0.0.1:8080 SSH_ENDPOINT=ssh://git@127.0.0.1:2222 \
+BOOTSTRAP_CMD="docker compose exec -T spool stratum-server admin bootstrap" \
+  ./deploy/smoke.sh
+```
+
+The leg that probes a public GitHub origin needs the server container to
+reach the internet; `SMOKE_ORIGIN_PROBE=0` skips it on a machine that
+cannot.
 
 ## Before you start
 
@@ -105,7 +119,7 @@ over both transports. `deploy/smoke.sh`'s header lists the optional legs;
   from that domain. A new account's SES only delivers to addresses it has
   verified until you request production access in the SES console. Do
   that early; it can take a day. (Or send through your own SMTP relay
-  instead: [Mail](#mail).)
+  instead: [step 9](#9-mail).)
 - **Region.** Everything goes in `aws_region` except the CloudFront
   certificate, which is always issued in us-east-1.
 
@@ -224,9 +238,9 @@ scripts/tf.sh prod apply
 scripts/tf.sh prod output
 ```
 
-About fifteen minutes, most of it CloudFront and Aurora. The outputs are
-the base URL (your domain, or CloudFront's hostname), the SSH endpoint,
-and the direct ALB URL.
+This takes a while; CloudFront and Aurora are the slow parts. The
+outputs are the base URL (your domain, or CloudFront's hostname), the SSH
+endpoint, and the direct ALB URL.
 
 ### 6. The first organisation and the first person
 

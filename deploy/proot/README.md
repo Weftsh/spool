@@ -47,9 +47,9 @@ remove) as a pid file, a log file and a session to signal.
 default is still docker.
 
 **ci.sh** runs it all as a checklist: sandbox probes, PRoot, the stack,
-the `admin-ecs.sh` test against a fake `aws`, the two image builds, the
-server under PRoot, and the smoke with the self-hosted leg on. Every
-step prints PASS or FAIL.
+the tests of `admin-ecs.sh` and `roll.sh` against a fake `aws`, the two
+image builds, the server under PRoot, and the smoke with the self-hosted
+leg on. Every step prints PASS or FAIL.
 
 ## What this does and does not prove
 

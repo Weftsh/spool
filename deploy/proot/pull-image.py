@@ -3,7 +3,6 @@
 
     pull-image.py IMAGE[:TAG] DEST
     pull-image.py --archive IMAGE.tar DEST     # a docker-archive, e.g. kaniko's --tar-path
-    pull-image.py --push IMAGE.tar IMAGE[:TAG] # upload a docker-archive to a registry
 
 Talks the registry HTTP API directly — anonymous token auth for Docker
 Hub, ghcr.io and quay.io, manifest lists resolved to this machine's
@@ -13,25 +12,20 @@ flattens the layers into DEST the way a runtime would: in order, with
 DEST/.image.json so `run.sh` can apply its Env, Entrypoint, Cmd, User
 and WorkingDir.
 
-Why this exists rather than `docker pull`: the fleet's runners have no
-daemon and no socket on purpose (see Dockerfile.runner), so anything a
-job wants from a registry has to arrive the way `scripts/fetch-minio.sh`
-already brings MinIO — off the wire, into a directory. This is that
-script generalised to any image.
+Why this exists rather than `docker pull`: the sandboxes deploy/proot is
+for have no daemon and cannot have one, so an image has to arrive the
+way `scripts/fetch-minio.sh` already brings MinIO — off the wire, into a
+directory. This is that script generalised to any image.
 
 Credentials come from the docker client's own file — $DOCKER_CONFIG/
-config.json, else ~/.docker/config.json — so a registry the runner wrote
-an entry for (its loopback registry proxy) or one a step `docker login`ed
-to is answered with that entry, Basic or through a Bearer token exchange,
-whichever the registry's challenge asks for. A loopback registry is
-spoken to over plain HTTP: it is the runner's proxy, on the task's own
-network namespace, and there is no certificate to present.
+config.json, else ~/.docker/config.json — so a private registry you
+`docker login`ed to is answered with that entry, Basic or through a
+Bearer token exchange, whichever the registry's challenge asks for. A
+loopback registry is spoken to over plain HTTP.
 
-Standard library only: python3 is what the runner image has.
+Standard library only.
 """
-import base64
 import gzip
-import hashlib
 import http.client
 import io
 import json
@@ -46,7 +40,7 @@ import urllib.parse
 import urllib.request
 
 # The layers for the machine running this, unless PULL_ARCH says otherwise:
-# the fleet is amd64, and local-model.sh on Apple Silicon is arm64.
+# CI is usually amd64, and local-model.sh on Apple Silicon is arm64.
 ARCH = os.environ.get("PULL_ARCH") or {"x86_64": "amd64", "amd64": "amd64", "aarch64": "arm64", "arm64": "arm64"}[platform.machine()]
 
 ACCEPT = ", ".join([
@@ -327,81 +321,8 @@ def import_archive(path, dest):
         json.dump({"ref": manifest.get("RepoTags", [path])[0], "config": config.get("config", {})}, f)
 
 
-LAYER_GZIP = "application/vnd.docker.image.rootfs.diff.tar.gzip"
-LAYER_TAR = "application/vnd.docker.image.rootfs.diff.tar"
-CONFIG = "application/vnd.docker.container.image.v1+json"
-MANIFEST = "application/vnd.docker.distribution.manifest.v2+json"
-
-
-def member_digest(outer, name):
-    h, size = hashlib.sha256(), 0
-    with outer.extractfile(name) as f:
-        for chunk in iter(lambda: f.read(1 << 20), b""):
-            h.update(chunk)
-            size += len(chunk)
-    return "sha256:" + h.hexdigest(), size
-
-
-def upload_blob(reg, outer, name, digest, size):
-    """HEAD, and when the registry lacks it: open a session, stream the
-    member into it, close it with the digest. Returns True if bytes moved."""
-    try:
-        reg.request("HEAD", reg.url(f"blobs/{digest}")).close()
-        return False
-    except urllib.error.HTTPError as e:
-        if e.code != 404:
-            raise
-    with reg.request("POST", reg.url("blobs/uploads/"), data=b"") as r:
-        loc = r.headers.get("Location") or ""
-    loc = urllib.parse.urljoin(f"{reg.scheme}://{reg.host}/", loc)
-    sep = "&" if "?" in loc else "?"
-    # One PUT carrying the whole blob: the "monolithic" upload every
-    # registry takes. urllib streams a file object given a Content-Length.
-    reg.request("PUT", f"{loc}{sep}digest={urllib.parse.quote(digest)}",
-                data=lambda: outer.extractfile(name),
-                headers={"Content-Type": "application/octet-stream", "Content-Length": str(size)}).close()
-    return True
-
-
-def push(archive, ref):
-    """Upload a docker-archive (kaniko's --tar-path) as REF: every layer
-    and the config as blobs, then a schema-2 manifest under the tag."""
-    host, repo, tag = parse(ref)
-    reg = Registry(host, repo)
-    print(f"The push refers to repository [{host}/{repo}]")
-    with tarfile.open(archive) as outer:
-        entry = json.load(outer.extractfile("manifest.json"))[0]
-        layers = []
-        for name in entry["Layers"]:
-            digest, size = member_digest(outer, name)
-            with outer.extractfile(name) as f:
-                gz = f.read(2) == b"\x1f\x8b"
-            moved = upload_blob(reg, outer, name, digest, size)
-            print(f"{digest[7:19]}: {'Pushed' if moved else 'Layer already exists'}")
-            layers.append({"mediaType": LAYER_GZIP if gz else LAYER_TAR, "size": size, "digest": digest})
-        cdigest, csize = member_digest(outer, entry["Config"])
-        upload_blob(reg, outer, entry["Config"], cdigest, csize)
-    manifest = json.dumps({
-        "schemaVersion": 2, "mediaType": MANIFEST,
-        "config": {"mediaType": CONFIG, "size": csize, "digest": cdigest},
-        "layers": layers,
-    }, separators=(",", ":")).encode()
-    with reg.request("PUT", reg.url(f"manifests/{tag}"), data=manifest,
-                     headers={"Content-Type": MANIFEST}) as r:
-        mdigest = r.headers.get("Docker-Content-Digest") or "sha256:" + hashlib.sha256(manifest).hexdigest()
-    print(f"{tag}: digest: {mdigest} size: {len(manifest)}")
-
-
 if __name__ == "__main__":
-    if len(sys.argv) == 4 and sys.argv[1] == "--push":
-        try:
-            push(sys.argv[2], sys.argv[3])
-        except urllib.error.HTTPError as e:
-            body = e.read(600).decode(errors="replace").strip()
-            sys.exit(f"push {sys.argv[3]}: {e.code} from {urllib.parse.urlparse(e.url).netloc}: {body[:400]}")
-        except urllib.error.URLError as e:
-            sys.exit(f"push {sys.argv[3]}: {e.reason}")
-    elif len(sys.argv) == 4 and sys.argv[1] == "--archive":
+    if len(sys.argv) == 4 and sys.argv[1] == "--archive":
         import_archive(sys.argv[2], sys.argv[3])
     elif len(sys.argv) == 3:
         pull(sys.argv[1], sys.argv[2])

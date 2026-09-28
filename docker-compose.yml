@@ -12,11 +12,12 @@
 # Only the server's two ports are published — HTTP on 8080, git over SSH
 # on 2222 — and only on loopback. Postgres and MinIO sit on an internal
 # network nothing else can reach. To serve other machines, put a TLS
-# terminator in front of 8080, publish 2222, and set SPOOL_PUBLIC_URL and
-# SPOOL_SSH_PUBLIC_URL to the addresses people will use (a `.env` file
-# beside this one is the easy place). docs/operations.md is the
-# configuration reference; every STRATUM_* variable it lists can be added
-# under `spool.environment` below.
+# terminator in front of 8080, publish SSH more widely
+# (SPOOL_SSH_PUBLISH=0.0.0.0:22, say), and set SPOOL_PUBLIC_URL and
+# SPOOL_SSH_PUBLIC_URL to the addresses people will use — a `.env` file
+# beside this one is the easy place for all of these. docs/operations.md
+# is the configuration reference; every STRATUM_* variable it lists can
+# be added under `spool.environment` below.
 #
 # The SSH host key is the server's identity to every git client, so it
 # must survive restarts and upgrades: `deploy/dev-host-key.sh` writes one
@@ -24,14 +25,26 @@
 # SPOOL_SSH_HOST_KEY_FILE to its path; the container reads it as uid
 # 10001, so it must be readable by that uid.
 #
-# Change the database and object-store passwords (SPOOL_DB_PASSWORD,
-# SPOOL_S3_SECRET_KEY) before this holds anything you care about, and
-# back up the three volumes: docs/operations.md, "Backup and restore".
+# Set the database and object-store passwords (SPOOL_DB_PASSWORD,
+# SPOOL_S3_SECRET_KEY) before the first `up`. Postgres takes its password
+# only when its volume is first created; changing SPOOL_DB_PASSWORD later
+# also means `ALTER USER spool PASSWORD …` inside it. Back up the
+# volumes: docs/operations.md, "Backup and restore".
 #
 # For development against a server run from source (`cargo run -p
-# stratum-server`), start only the dependencies — `docker compose up -d
-# postgres minio minio-init` — and publish their ports with an override
-# file; the test suite needs neither (it starts its own).
+# stratum-server`), publish the dependencies on loopback with a
+# docker-compose.override.yml beside this file (compose reads it on its
+# own; keep it out of git):
+#
+#   services:
+#     postgres: { ports: ["127.0.0.1:5432:5432"], networks: [backend, default] }
+#     minio:    { ports: ["127.0.0.1:9000:9000"], networks: [backend, default] }
+#
+# then `docker compose up -d postgres minio minio-init` and point the
+# server at STRATUM_DB_URL=postgres://spool:spool-change-me@127.0.0.1:5432/spool,
+# STRATUM_STORE_URL=http://127.0.0.1:9000/spool, AWS_ACCESS_KEY_ID=spool,
+# AWS_SECRET_ACCESS_KEY=spool-change-me, AWS_REGION=us-east-1. The test
+# suite needs none of this: it starts its own.
 
 name: spool
 
@@ -66,6 +79,9 @@ services:
       # Mail. `null` drops it (the dashboard says so where it matters);
       # see docs/operations.md, "Mail", for smtp and ses.
       STRATUM_MAIL_TRANSPORT: ${SPOOL_MAIL_TRANSPORT:-null}
+      # Garbage collection: reclaims superseded storage epochs and the
+      # objects of deleted repositories. 0 turns it off.
+      STRATUM_GC_SECS: ${SPOOL_GC_SECS:-3600}
       # Where self-hosted runners fetch a job's repository from. Empty
       # means STRATUM_PUBLIC_URL; set it when runners reach this machine
       # at another address.

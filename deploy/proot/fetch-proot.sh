@@ -7,9 +7,9 @@
 # every nested directory through the first and chmods it through the
 # second, and a PRoot that knows neither (udocker's 4.8.0, which used to
 # be vendored here; upstream 5.4.1) fails every second-level entry of a
-# tarball extracted into a WORKDIR (README, "Things that bit"). ghcr.io
-# is reachable from the fleet and is where kaniko, MinIO and Postgres
-# already come from; the checksum is the image digest.
+# tarball extracted into a WORKDIR (README, "Things that bit"). It comes
+# from the same registry as the stack's kaniko, MinIO and Postgres, and
+# the checksum is the image digest. PROOT_IMAGE points elsewhere.
 #
 # A binary already at $1 is kept only if it came from this pin: the stamp
 # beside it names the image it was pulled from, so a bumped digest is

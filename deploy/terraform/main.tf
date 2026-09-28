@@ -112,6 +112,7 @@ module "app" {
   cdn_key_secret_arn                = module.data.cdn_key_secret_arn
   cdn_public_key_pem                = module.data.cdn_public_key_pem
   cdn_url_ttl_secs                  = var.cdn_url_ttl_secs
+  gc_interval_secs                  = var.gc_interval_secs
 
   github_app_slug       = var.github_app_slug
   github_app_secret_arn = module.data.github_app_secret_arn

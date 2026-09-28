@@ -14,7 +14,7 @@ test that fails without it.**
 
 ## The gates
 
-Nine things stand between a change and `main`. Four are CI jobs; five
+Ten things stand between a change and `main`. Five are CI jobs; five
 are a person, with real credentials, against something we do not control.
 None of them is optional, and none of them is "usually fine".
 
@@ -23,6 +23,7 @@ None of them is optional, and none of them is "usually fine".
 | **correctness** | `cargo fmt --all --check`, `clippy -D warnings`, `cargo test --workspace --release` | CI job `correctness-gate` |
 | **chaos** | the server survives a SIGKILL at every compaction boundary, and a seeded fault storm loses no acknowledged write | CI job `chaos` |
 | **web** | dashboard unit tests, the production build, Playwright e2e | CI job `web` |
+| **deploy** | the server and runner images build, the one-box compose stack comes up, and `deploy/smoke.sh` drives it with the **real `git` CLI** — clone, `fsck`, push over HTTP *and* SSH — and a self-hosted runner taking a job | CI job `deploy-validation` |
 | **terraform** | `fmt -check` and `validate` on the AWS reference deployment, credential-free | CI job `terraform-validation` |
 | **manual browser pass** | a person's-eye view of every screen the change touches, reporting **0 problems** | `web/dashboard/tools/walkthrough.mjs` |
 | **manual S3 contract** | the conditional-PUT semantics I9 rests on hold on the backend a deployment actually uses, under the role it actually uses | `scripts/manual-s3.sh check --both-addressing-styles` |
@@ -97,13 +98,14 @@ commands:
 
 ```sh
 scripts/ci-local.sh            # everything this machine can run
-scripts/ci-local.sh --fast     # skip chaos
+scripts/ci-local.sh --fast     # skip chaos and deploy-validation
 scripts/ci-local.sh --only web # one job
 ```
 
 It exports `CI=true` for Playwright so that step is a reproduction and
 not an approximation. Anything it cannot run — a missing toolchain, a
-browser that is not installed — is printed as a **SKIP**, and the summary
+browser that is not installed, no docker daemon for `deploy-validation` —
+is printed as a **SKIP**, and the summary
 refuses to say "good to push". A skip is not a pass.
 `docs_e2e::the_local_ci_script_covers_every_job_the_workflow_declares`
 fails if the workflow grows a job the script has not been taught, because
@@ -329,8 +331,8 @@ on the pinned Chromium. Pointing it at whichever Chrome a machine happens
 to have reintroduces exactly the "passes here, fails there" class that
 `workers: 1` is pinned to prevent.
 
-**Take the stack down before running `deploy/smoke.sh` locally.** Both
-bind `:8080` and `:2222`, so a running manual stack makes the deployment
+**Take the stack down before running `deploy-validation`.** Both bind
+`:8080` and `:2222`, so a running manual stack makes the deployment
 smoke test talk to the wrong server and fail at the first REST call with
 a bare 404 — a failure that says nothing about what is actually wrong.
 

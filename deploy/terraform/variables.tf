@@ -27,7 +27,7 @@ variable "vpc_cidr" {
 }
 
 variable "image_tag" {
-  description = "Image tag the service starts with. The first apply needs this tag already pushed to the ECR repository the stack creates (see docs/deployment-aws.md). Later deploys register new task-definition revisions outside terraform, which it ignores."
+  description = "Image tag the service is created with. The first apply needs this tag already pushed to the ECR repository the stack creates (docs/deployment-aws.md). After that, deploy/roll.sh rolls new versions; terraform does not move the service."
   type        = string
   default     = "bootstrap"
 }
@@ -94,6 +94,12 @@ variable "cdn_url_ttl_secs" {
   default     = 3600
 }
 
+variable "gc_interval_secs" {
+  description = "Seconds between garbage-collection passes, which reclaim superseded storage epochs and the objects of deleted repositories. 0 turns GC off, and nothing a repository no longer needs ever leaves the bucket."
+  type        = number
+  default     = 3600
+}
+
 variable "ci_log_retention_days" {
   description = "Days a workflow job's log survives under ci/logs/ in the store bucket before S3 expires it."
   type        = number
@@ -124,7 +130,7 @@ variable "ses_mail" {
 }
 
 variable "extra_environment" {
-  description = "Further STRATUM_* settings for the server container, as plain values: `{ STRATUM_GC_SECS = \"3600\" }`. docs/operations.md lists them. A name the stack already sets is refused rather than silently doubled."
+  description = "Further STRATUM_* settings for the server container, as plain values: `{ STRATUM_LAND_POLL_SECS = \"5\" }`. docs/operations.md lists them. A name the stack already sets is refused rather than silently doubled."
   type        = map(string)
   default     = {}
 }

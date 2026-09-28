@@ -196,6 +196,43 @@ jobs:
           npx playwright install --with-deps chromium
           npx playwright test
 
+  # The image a client runs, run: both images build, the one-box compose
+  # stack comes up, and deploy/smoke.sh drives it with the real git
+  # client over HTTP and SSH and a self-hosted runner taking a job — the
+  # same smoke docs/deployment-aws.md runs against a real deployment.
+  deploy-validation:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Build the server and runner images
+        run: |
+          docker build -t spool:local .
+          docker build -f Dockerfile.runner -t weft-runner:local .
+
+      - name: Bring the one-box stack up
+        run: |
+          ./deploy/dev-host-key.sh
+          SPOOL_IMAGE=spool:local docker compose up -d --wait
+
+      - name: Smoke the stack
+        env:
+          BASE_URL: http://127.0.0.1:8080
+          SSH_ENDPOINT: ssh://git@127.0.0.1:2222
+          BOOTSTRAP_CMD: docker compose exec -T spool stratum-server admin bootstrap
+          SMOKE_413: "1"
+          SMOKE_SELF_HOSTED: "1"
+          SMOKE_RUNNER_NETWORK: host
+        run: ./deploy/smoke.sh
+
+      - name: The stack's logs
+        if: failure()
+        run: docker compose logs --no-color --tail 300
+
   # Credential-free: fmt, validate, and the env-lock module's own test.
   terraform-validation:
     if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository

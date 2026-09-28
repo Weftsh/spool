@@ -183,7 +183,7 @@ instead of the server. The AWS deployment turns this on with CloudFront;
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `STRATUM_GC_SECS` | `0` (off) | Interval of epoch garbage collection and deleted-repository sweeps. **Off by default**: until you set it, superseded epochs and deleted repositories stay in the bucket. `3600` is a reasonable value. |
+| `STRATUM_GC_SECS` | `0` (off) | Interval of epoch garbage collection and deleted-repository sweeps. Off when unset, so superseded epochs and deleted repositories stay in the bucket; `docker-compose.yml` and the Terraform deployment set `3600` (`SPOOL_GC_SECS`, `gc_interval_secs`). |
 | `STRATUM_GC_GRACE_SECS` | `86400` | Age an unreferenced epoch must reach before it is deleted. Keep it longer than your longest clone and your longest compaction. |
 | `STRATUM_COMPACT_POLL_SECS` | `5` | How often the compactor looks for repositories over the WAL thresholds. |
 | `STRATUM_COMPACT_SWEEP_SECS` | `3600` | How often every repository is checked for a fold nothing asked for. |
@@ -348,7 +348,7 @@ STRATUM_GITHUB_INSTALL_URL=https://github.com/apps/acme-spool/installations/new
 
 On AWS, those five values go into the `<project>/<env>/github-app`
 secret and the slug into `github_app_slug`; see
-[deployment-aws.md](deployment-aws.md#the-github-app).
+[deployment-aws.md](deployment-aws.md#8-the-github-app-optional).
 
 Two mistakes are easy to make quietly:
 

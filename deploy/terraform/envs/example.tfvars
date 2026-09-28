@@ -32,7 +32,7 @@ deletion_protection = true
 # Anything else the server reads (docs/operations.md, "Configuration
 # reference"), as plain values or from Secrets Manager.
 # extra_environment = {
-#   STRATUM_GC_SECS = "3600"
+#   STRATUM_LAND_POLL_SECS = "5"
 # }
 # extra_secrets = {
 #   STRATUM_MAIL_SMTP_PASSWORD = "arn:aws:secretsmanager:us-east-1:111111111111:secret:smtp-password-AbCdEf"

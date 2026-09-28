@@ -36,13 +36,13 @@ up)
   mkdir -p "$S/pgdata" "$S/pgrun" "$S/minio-data"
   # docker-compose.yml: postgres, POSTGRES_USER/PASSWORD/DB spool.
   # Listens on loopback only: these processes share the host's network.
-  "$run" "$S/postgres" -u "$(id -u):$(id -g)" "${hosts[@]}" -b "$S/pgdata:/var/lib/postgresql/data" -b "$S/pgrun:/var/run/postgresql" \
+  setsid "$run" "$S/postgres" -u "$(id -u):$(id -g)" "${hosts[@]}" -b "$S/pgdata:/var/lib/postgresql/data" -b "$S/pgrun:/var/run/postgresql" \
     -e POSTGRES_USER=spool -e POSTGRES_PASSWORD=spool-change-me -e POSTGRES_DB=spool \
     -- docker-entrypoint.sh postgres -c listen_addresses=127.0.0.1 > "$S/postgres.log" 2>&1 &
   echo $! > "$S/postgres.pid"
   wait_for postgres 60 "$run" "$S/postgres" -u "$(id -u):$(id -g)" -- pg_isready -h 127.0.0.1 -U spool
   # docker-compose.yml: minio, server /data --address :9000, root user spool.
-  "$run" "$S/minio" "${hosts[@]}" -b "$S/minio-data:/data" \
+  setsid "$run" "$S/minio" "${hosts[@]}" -b "$S/minio-data:/data" \
     -e MINIO_ROOT_USER=spool -e MINIO_ROOT_PASSWORD=spool-change-me -e MINIO_BROWSER=off \
     -- minio server /data --address 127.0.0.1:9000 > "$S/minio.log" 2>&1 &
   echo $! > "$S/minio.pid"
@@ -76,7 +76,7 @@ app)
     [ -n "${!v:-}" ] && app_env+=(-e "$v=${!v}")
   done
   printf '%s\n' "$rootfs" > "$S/app.rootfs"; printf '%s\0' "${app_env[@]}" > "$S/app.env"
-  "$run" "$rootfs" "${hosts[@]}" -b "$S/appdata:/var/lib/stratum" ${EXTRA_CA:+-b "$EXTRA_CA:$EXTRA_CA"} "${app_env[@]}" \
+  setsid "$run" "$rootfs" "${hosts[@]}" -b "$S/appdata:/var/lib/stratum" ${EXTRA_CA:+-b "$EXTRA_CA:$EXTRA_CA"} "${app_env[@]}" \
     > "$S/app.log" 2>&1 &
   echo $! > "$S/app.pid"
   wait_for app 60 curl -sf http://127.0.0.1:8080/healthz
@@ -101,7 +101,19 @@ BS
   cd "$repo" && env BASE_URL=http://127.0.0.1:8080 SSH_ENDPOINT=ssh://git@127.0.0.1:2222 BOOTSTRAP_CMD="$S/bootstrap.sh" \
     SMOKE_RUN_ID="proot-$(date +%s)" PROOT="${PROOT:-$here/bin/proot}" ${legs[@]+"${legs[@]}"} bash ${SMOKE_TRACE:+-x} deploy/smoke.sh ;;
 down)
-  for p in app minio postgres; do [ -f "$S/$p.pid" ] && { pkill -P "$(cat "$S/$p.pid")" 2>/dev/null; kill "$(cat "$S/$p.pid")" 2>/dev/null; rm -f "$S/$p.pid"; }; done
-  pkill -x stratum-server 2>/dev/null; pkill -x minio 2>/dev/null; pkill -x postgres 2>/dev/null; pkill -x weft-runner 2>/dev/null; echo "stack down" ;;
+  # Each service was started under setsid, so its pid is the id of a
+  # process group holding PRoot and everything the image started. Only
+  # those groups are signalled. Never kill by process name here: on a
+  # shared machine `pkill -x postgres` (or minio, or stratum-server)
+  # also takes down every other test run's clusters and servers.
+  for p in app minio postgres; do
+    [ -f "$S/$p.pid" ] || continue
+    pid="$(cat "$S/$p.pid")"
+    kill -TERM -- "-$pid" 2>/dev/null || true
+    for _ in $(seq 1 10); do kill -0 -- "-$pid" 2>/dev/null || break; sleep 1; done
+    kill -KILL -- "-$pid" 2>/dev/null || true
+    rm -f "$S/$p.pid"
+  done
+  echo "stack down" ;;
 *) sed -n '2,8p' "$0"; exit 2 ;;
 esac

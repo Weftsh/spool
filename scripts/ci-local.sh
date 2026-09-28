@@ -8,7 +8,7 @@
 # gate: you trust it and it lies.
 #
 #   scripts/ci-local.sh            # everything available on this machine
-#   scripts/ci-local.sh --fast     # skip chaos (minutes of wall clock)
+#   scripts/ci-local.sh --fast     # skip chaos and deploy-validation
 #   scripts/ci-local.sh --only web # one job
 #   scripts/ci-local.sh --only none # the preconditions only, no job
 #
@@ -103,7 +103,7 @@ step() {
 # ran" and a summary with no failures, which reads exactly like a pass —
 # the same trap as a SKIP being mistaken for one, and worse, because
 # nothing ran at all.
-ALL_JOBS="correctness-gate chaos web terraform-validation s3-contract github-signin-contract"
+ALL_JOBS="correctness-gate chaos web deploy-validation terraform-validation s3-contract github-signin-contract"
 # `none` runs the preconditions — the disk check above — and no job at
 # all. It is spelled out rather than being any unmatched word, because
 # "any unmatched word means run nothing" is indistinguishable from a
@@ -250,6 +250,43 @@ cd web/dashboard && npx playwright install chromium")
       unset CI
     fi
     [ "$ok" = 1 ] && PASSED+=("web")
+  fi
+fi
+
+# ------------------------------------------------- job: deploy-validation
+# The image a client runs, run: CI's own commands — both images, the
+# one-box compose stack, deploy/smoke.sh with the real git client and a
+# self-hosted runner. Needs a docker daemon; without one it is a SKIP.
+# The stack binds :8080 and :2222, so a running manual stack, or another
+# compose project on those ports, is refused rather than smoked by
+# mistake.
+if wants deploy-validation; then
+  say "deploy-validation"
+  if [ "$FAST" = 1 ] && [ -z "$ONLY" ]; then
+    SKIPPED+=("deploy-validation: --fast")
+  elif ! docker info > /dev/null 2>&1; then
+    SKIPPED+=("deploy-validation: needs a docker daemon (docker info did not answer)")
+  elif lsof -nP -iTCP:8080 -sTCP:LISTEN > /dev/null 2>&1 \
+       || lsof -nP -iTCP:2222 -sTCP:LISTEN > /dev/null 2>&1; then
+    SKIPPED+=("deploy-validation: :8080 or :2222 is already in use — \
+scripts/manual-stack.sh down, or docker compose down")
+  else
+    deploy_smoke() {
+      docker build -t spool:local . &&
+      docker build -f Dockerfile.runner -t weft-runner:local . &&
+      ./deploy/dev-host-key.sh &&
+      SPOOL_IMAGE=spool:local docker compose up -d --wait &&
+      BASE_URL=http://127.0.0.1:8080 SSH_ENDPOINT=ssh://git@127.0.0.1:2222 \
+        BOOTSTRAP_CMD="docker compose exec -T spool stratum-server admin bootstrap" \
+        SMOKE_413=1 SMOKE_SELF_HOSTED=1 SMOKE_RUNNER_NETWORK=host \
+        ./deploy/smoke.sh
+      local rc=$?
+      [ "$rc" = 0 ] || docker compose logs --no-color --tail 100
+      docker compose down -v > /dev/null 2>&1
+      return "$rc"
+    }
+    step "build both images, compose up, deploy/smoke.sh" deploy_smoke \
+      && PASSED+=("deploy-validation")
   fi
 fi
 

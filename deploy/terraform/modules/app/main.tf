@@ -43,6 +43,12 @@ variable "cdn_url_ttl_secs" {
   default     = 3600
 }
 
+variable "gc_interval_secs" {
+  description = "STRATUM_GC_SECS: seconds between garbage-collection passes; 0 is off."
+  type        = number
+  default     = 3600
+}
+
 # The GitHub App: one secret, injected only when the App is named, and
 # the plan refuses a blank value. The slug is public — it is in the
 # install URL every dashboard visitor is sent to — so it is a variable,
@@ -409,6 +415,7 @@ locals {
     { name = "STRATUM_CDN_BASE", value = local.public_url },
     { name = "STRATUM_CDN_KEY_PAIR_ID", value = aws_cloudfront_public_key.cdn.id },
     { name = "STRATUM_CDN_URL_TTL_SECS", value = tostring(var.cdn_url_ttl_secs) },
+    { name = "STRATUM_GC_SECS", value = tostring(var.gc_interval_secs) },
   ]
   base_secrets = [
     { name = "STRATUM_DB_URL", valueFrom = var.db_url_secret_arn },

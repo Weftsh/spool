@@ -13,6 +13,9 @@ coverage.lcov
 deploy/.dev-ssh-host-key*
 .terraform/
 *.tfstate*
+# A deployment's own settings; envs/example.tfvars is the template.
+deploy/terraform/envs/*.tfvars
+!deploy/terraform/envs/example.tfvars
 .walkthrough/
 .walkthrough2/
 # Screenshots from a focused browser check of one flow, the same shape

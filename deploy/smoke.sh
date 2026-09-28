@@ -20,11 +20,18 @@
 #                   and imports need that egress anyway)
 #   SMOKE_413=1     optional — also verify the 64MB request cap answers 413
 #   SMOKE_SELF_HOSTED=1 optional — register a self-hosted runner (the
-#                   runner image, Dockerfile.runner, in a container on
-#                   SMOKE_RUNNER_NETWORK, reaching the server at
-#                   SMOKE_RUNNER_URL, default http://spool:8080), run a
-#                   workflow job on it, and prove removing it stops it.
-#                   Needs a docker daemon, or SMOKE_RUNNER_DRIVER
+#                   runner image, Dockerfile.runner, in a container), run
+#                   a workflow job on it, and prove removing it stops it.
+#                   Needs a docker daemon, or SMOKE_RUNNER_DRIVER, and the
+#                   image built first:
+#                     docker build -f Dockerfile.runner -t weft-runner:local .
+#                   The runner reaches the server at SMOKE_RUNNER_URL
+#                   (default BASE_URL) and fetches the job's repository
+#                   from the server's STRATUM_RUNNER_URL (default its
+#                   public URL), so both have to resolve from inside the
+#                   container. Against the compose stack on 127.0.0.1,
+#                   that means SMOKE_RUNNER_NETWORK=host
+#   SMOKE_RUNNER_NETWORK optional — `docker run --network` for the runner
 #   SMOKE_RUNNER_IMAGE optional — the runner image (default weft-runner:local)
 #   SMOKE_RUNNER_DRIVER optional — a file to source that redefines
 #                   runner_start/runner_logs/runner_exit/runner_rm, the
@@ -54,7 +61,7 @@ runner_start() {
 }
 runner_logs() { docker logs "$1" 2>&1; }
 runner_exit() { docker inspect --format '{{if .State.Running}}{{else}}{{.State.ExitCode}}{{end}}' "$1"; }
-runner_rm() { docker rm -f "$1" >/dev/null 2>&1 || true; }
+runner_rm() { docker rm -fv "$1" >/dev/null 2>&1 || true; }  # -v: the image's /work/runner volume
 if [ -n "${SMOKE_RUNNER_DRIVER:-}" ]; then
   # shellcheck source=/dev/null
   . "$SMOKE_RUNNER_DRIVER"
@@ -155,13 +162,12 @@ if [ "${SMOKE_SELF_HOSTED:-0}" = "1" ]; then
   # the runner from the organisation stops the process on its own — it
   # finds out on its next call, with nothing signalling it.
   #
-  # The machine is the runner image in a container on the stack's own
-  # network (SMOKE_RUNNER_NETWORK), reaching the server at
-  # SMOKE_RUNNER_URL, because that is the only "other machine" a CI box
-  # has. Against a deployed endpoint, point SMOKE_RUNNER_URL at it and
-  # the network is not needed.
+  # The machine is the runner image in a container, because that is the
+  # only "other machine" a CI box has. It reaches the server where the
+  # smoke does unless SMOKE_RUNNER_URL says otherwise; against the compose
+  # stack on loopback it needs SMOKE_RUNNER_NETWORK=host to do that.
   RUNNER_IMAGE="${SMOKE_RUNNER_IMAGE:-weft-runner:local}"
-  RUNNER_URL="${SMOKE_RUNNER_URL:-http://spool:8080}"
+  RUNNER_URL="${SMOKE_RUNNER_URL:-$BASE_URL}"
   RUNNER_NAME="smoke-runner-$RUN_ID"
   NET_ARGS=()
   if [ -n "${SMOKE_RUNNER_NETWORK:-}" ]; then
