@@ -34,7 +34,7 @@ pub async fn start(
         Ok(j) => j,
         Err(e) => return internal(e),
     };
-    let ctx = AuditCtx::of(&org.id, principal.as_ref());
+    let ctx = AuditCtx::of(&org.id, Some(&principal));
     crate::api::record_or_warn(
         &state.db,
         &ctx,

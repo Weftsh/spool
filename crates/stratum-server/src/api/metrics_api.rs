@@ -16,17 +16,18 @@ use stratum_control::metrics;
 
 /// GET /v1/orgs/:org/repos/:repo/metrics?from=&to=&format=csv
 ///
-/// **Members only, including on a public repository.** Publishing the
-/// code does not publish how the code is used: how often it is cloned,
-/// how many bytes it serves, how far behind its origin a mirror runs.
-/// Those are the owner's numbers, and on a public repository they would
-/// otherwise be world-readable by anyone who guessed the path.
+/// **Members only.** How the code is used — how often it is cloned, how
+/// many bytes it serves, how far behind its origin a mirror runs — is
+/// the owner's numbers, and only somebody holding a role on the
+/// repository reads them. Every repository is private to its
+/// organisation, so that is everybody who may read the code; it was not
+/// always, which is what the next paragraph is about.
 ///
 /// This used to take `Scope::RepoRead` through `rest_repo_auth`, which
-/// has a public-read fallback — so on a public repository it answered an
-/// anonymous caller in full. The UI never linked to it, which is
-/// precisely why it went unnoticed: an endpoint nothing points at is
-/// still an endpoint.
+/// then had a public-read fallback — so on a public repository it
+/// answered an anonymous caller in full. The UI never linked to it,
+/// which is precisely why it went unnoticed: an endpoint nothing points
+/// at is still an endpoint.
 ///
 /// Two calls rather than one, and the order matters. `repo_or_masked`
 /// first, so a repository that is private-and-not-yours goes on

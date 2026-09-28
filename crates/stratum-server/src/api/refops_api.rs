@@ -37,7 +37,7 @@ fn setup(state: &SharedState, headers: &HeaderMap, org: &str, repo: &str) -> Res
         crate::app::rest_repo_auth(state, headers, org, repo, Scope::RepoWrite)?;
     Ok(Ctx {
         prefix: repo_row.prefix().as_str().to_string(),
-        actx: AuditCtx::of(&org_row.id, principal.as_ref()),
+        actx: AuditCtx::of(&org_row.id, Some(&principal)),
         repo_id: repo_row.id.clone(),
         repo: repo_row,
     })

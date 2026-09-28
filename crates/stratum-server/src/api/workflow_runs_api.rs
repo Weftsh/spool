@@ -475,8 +475,8 @@ pub async fn cancel(
     // otherwise the credential is a service token and nobody's name
     // belongs on it.
     let who = principal
-        .as_ref()
-        .and_then(|p| p.user_id.as_deref())
+        .user_id
+        .as_deref()
         .and_then(|u| stratum_control::users::by_id(&state.db, u).ok().flatten())
         .map(|u| u.name)
         .unwrap_or_else(|| "a service token".to_string());

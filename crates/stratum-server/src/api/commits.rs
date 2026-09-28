@@ -100,7 +100,7 @@ pub async fn create(
     if body.operations.len() > 10_000 {
         return json_error(StatusCode::BAD_REQUEST, "too many operations (max 10000)");
     }
-    let author = acting_author(&state, principal.as_ref(), body.author.as_ref());
+    let author = acting_author(&state, Some(&principal), body.author.as_ref());
 
     let state2 = state.clone();
     let repo2 = repo.clone();
@@ -124,7 +124,7 @@ pub async fn create(
             if !forwarded {
                 crate::storage::refresh_after_write(&state, &repo).await;
             }
-            let ctx = AuditCtx::of(&org.id, principal.as_ref());
+            let ctx = AuditCtx::of(&org.id, Some(&principal));
             let audit_blob = serde_json::json!({
                 "commit": out.commit,
                 "branch": body.branch,

@@ -37,15 +37,12 @@ fn person(
 ) -> Result<(stratum_control::Repo, String), Response> {
     let (_, repo_row, _) = crate::app::rest_repo_auth(state, headers, org, repo, Scope::RepoRead)?;
     // Resolved separately from the principal `rest_repo_auth` returns.
-    // That principal answers "what authority has this caller *in this
-    // org*", and it is `None` for somebody signed in who simply does not
-    // belong here — correct for authorization and wrong for identity.
-    //
-    // Watching a public project you are not a member of is the most
-    // ordinary thing an outsider does, and reading the person off the
-    // repo-scoped principal refused exactly them. A repo-bound token is
-    // still nobody: it was minted to reach one repository, and a
-    // subscription is a person's.
+    // That principal answers "what authority has this caller on this
+    // repository", which is a different question from who they are: for
+    // a session or an unbound token the two name the same person, but a
+    // repo-bound token carries authority here and is still nobody — it
+    // was minted to reach one repository, and a subscription is a
+    // person's.
     let user_id = match authx::principal_opt(&state.db, headers, authx::Challenge::None)? {
         Some(p) if p.repo_id.is_none() => p.user_id,
         Some(_) => None,

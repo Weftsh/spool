@@ -22,9 +22,9 @@
 //!     what `changesets_api::load` enforces on the wire, and a mail is
 //!     the same read by another route: it names the member repositories,
 //!     so sending one to somebody who may not see one of them publishes
-//!     the existence of a private repository. An outside contributor who
-//!     commented on a change in a public repository is exactly that
-//!     person, and they are a participant by every other rule here.
+//!     the existence of a private repository. Somebody who commented on
+//!     a member's change and has since left the organization is exactly
+//!     that person, and they are a participant by every other rule here.
 
 use crate::app::SharedState;
 use std::collections::BTreeSet;

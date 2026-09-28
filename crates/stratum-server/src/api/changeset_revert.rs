@@ -253,7 +253,7 @@ pub async fn revert(
     }
     let by_change: HashMap<&str, &Loaded> =
         members.iter().map(|m| (m.change.id.as_str(), m)).collect();
-    let principal = members.last().and_then(|m| m.principal.clone());
+    let principal = members.last().map(|m| m.principal.clone());
     let author = commits::acting_author(&state, principal.as_ref(), None);
     let branch = format!("revert/{}", body.key);
     let branch_ref = format!("refs/heads/{branch}");

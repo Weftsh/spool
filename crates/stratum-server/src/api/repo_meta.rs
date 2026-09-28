@@ -1014,7 +1014,7 @@ pub async fn put_topics(
             Ok(x) => x,
             Err(r) => return r,
         };
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match topics::set(&state.db, &repo_row.id, &body.topics, &actx) {
         Ok(stored) => Json(serde_json::json!({ "topics": stored })).into_response(),
         // Every shape rule in `topics` is about the caller's input, and

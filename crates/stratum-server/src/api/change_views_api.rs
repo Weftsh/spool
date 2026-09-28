@@ -38,13 +38,12 @@ use stratum_engine::treediff;
 /// A viewed mark is a note one *person* wrote to themselves, so a service
 /// token is refused rather than quietly given an empty set: an org-level
 /// token has no reviewer whose marks these could be, and pretending
-/// otherwise would let two machines share one set of ticks. Nobody at
-/// all — an anonymous reader of a public repository — is told to sign
-/// in, which is a different sentence from the one a machine gets.
+/// otherwise would let two machines share one set of ticks.
 ///
-/// The person is whoever `rest_repo_auth` says is reading, which on a
-/// public repository includes somebody with no role in the org: the
-/// outside contributor, back to tick off the files of their own change.
+/// The person is whoever `rest_repo_auth` says is reading: somebody
+/// holding a role on this repository that allows `repo:read` — a signed-
+/// out caller never gets this far. That includes a viewer who may not
+/// push, back to tick off the files of a change they opened from a fork.
 fn person_and_change(
     state: &SharedState,
     headers: &HeaderMap,
@@ -59,19 +58,12 @@ fn person_and_change(
     Ok((repo_row, user, change))
 }
 
-fn acting_person(principal: &Option<Principal>) -> Result<String, Response> {
-    match principal {
-        Some(Principal {
-            user_id: Some(user),
-            ..
-        }) => Ok(user.clone()),
-        Some(_) => Err(json_error(
+fn acting_person(principal: &Principal) -> Result<String, Response> {
+    match &principal.user_id {
+        Some(user) => Ok(user.clone()),
+        None => Err(json_error(
             StatusCode::FORBIDDEN,
             "viewed state belongs to a person, not a service token",
-        )),
-        None => Err(json_error(
-            StatusCode::UNAUTHORIZED,
-            "sign in to mark files as viewed",
         )),
     }
 }

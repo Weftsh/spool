@@ -985,7 +985,11 @@ pub enum Viewer<'a> {
     /// `members::effective_role` grants, because a per-repo grant
     /// without membership is not access.
     User(&'a str),
-    /// A service token bound to one org, and not to a single repo.
+    /// A token not bound to a single repo — a service token *or a
+    /// personal one* — seeing the one org it was minted in. A personal
+    /// token is scoped to its org rather than read as its person: a token
+    /// belongs to one organization, and only a person's session spans
+    /// every org they are a member of.
     Org(&'a str),
 }
 

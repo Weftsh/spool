@@ -161,8 +161,9 @@ pub async fn create(
     // **`RepoRead`, not `RepoWrite`, and the difference is the feature.**
     //
     // A change proposes; it does not write. Requiring write access to
-    // propose one is what made this forge readable by everybody and
-    // contributable-to by nobody outside the org. The write check moves
+    // propose one meant somebody who may read a repository but not push
+    // to it — a viewer, or a member held down to viewer there — could
+    // never contribute to it at all. The write check moves
     // to where a write actually happens: opening a change against a
     // repository you cannot push to is allowed, and landing it is still
     // governed by OWNERS sufficiency and the land queue exactly as
@@ -273,7 +274,7 @@ pub async fn create(
         &state,
         &org_row,
         &repo_row,
-        principal.as_ref(),
+        Some(&principal),
         &target,
         &tip,
         parent.as_deref(),
@@ -545,8 +546,8 @@ enum Who {
     Someone(String),
     /// An address that names no account here. An empty page, not an
     /// unfiltered one — and deliberately not a refusal: answering "no
-    /// such user" would turn this list into an address oracle on a
-    /// repository a stranger can read anonymously.
+    /// such user" would turn this list into an address oracle for
+    /// anybody who can read one repository.
     Nobody,
 }
 
@@ -568,7 +569,7 @@ struct Filters {
 
 fn filters(
     params: &HashMap<String, String>,
-    principal: &Option<stratum_control::auth::Principal>,
+    principal: &stratum_control::auth::Principal,
     db: &stratum_control::db::ControlDb,
     default_limit: i64,
 ) -> Result<Filters, Response> {
@@ -608,7 +609,6 @@ fn filters(
         acting_user(
             principal,
             &format!("{what} is about a person, and a service token is nobody's reviewer"),
-            &format!("sign in to use {what}"),
         )
     };
     let author = match terms.author.as_deref() {
@@ -877,16 +877,21 @@ pub async fn list_in_org(
     // it is already signed in on.
     let principal =
         match crate::authx::principal_opt(&state.db, &headers, crate::authx::Challenge::None) {
-            Ok(Some(p)) => Some(p),
+            Ok(Some(p)) => p,
             Ok(None) => match crate::authx::session_principal(&state.db, &headers, &org.id, None) {
                 // Signed in, and not a member of this organisation. Still a
                 // person: `author:@me` asks who they are, not what they may
                 // do, and what they may see is decided per repository.
-                Ok(crate::authx::SessionAuth::NoAccess(user_id)) => Some(
-                    stratum_control::auth::Principal::for_user(&org.id, &user_id, Vec::new()),
-                ),
-                Ok(crate::authx::SessionAuth::Principal(p)) => Some(p),
-                Ok(crate::authx::SessionAuth::None) => None,
+                Ok(crate::authx::SessionAuth::NoAccess(user_id)) => {
+                    stratum_control::auth::Principal::for_user(&org.id, &user_id, Vec::new())
+                }
+                Ok(crate::authx::SessionAuth::Principal(p)) => p,
+                // The session authenticated a moment ago, in
+                // `require_authenticated`, and has expired or been revoked
+                // since. The answer that check gives a signed-out caller.
+                Ok(crate::authx::SessionAuth::None) => {
+                    return crate::authx::unauthorized(crate::authx::Challenge::None)
+                }
                 Err(r) => return r,
             },
             Err(r) => return r,
@@ -1070,10 +1075,11 @@ pub async fn get(
 
 /// The acting person, or the refusal that explains why there is none:
 /// an approval is a human judgement, and sufficiency counts people, so
-/// a service token is refused. An anonymous reader of a public
-/// repository is a different case and gets a different sentence — sign
-/// in — because "not a service token" told them to fix a thing they had
-/// not done.
+/// a service token is refused. Every caller that reaches here has
+/// authenticated — `rest_repo_auth`, or `require_authenticated` on the
+/// org-wide list, answers a signed-out one 401 first — so a principal
+/// with no person behind it can only be a token, and the one sentence
+/// says so.
 ///
 /// The two sentences are parameters rather than a fixed pair because a
 /// review verdict is the same judgement wearing a different noun, and
@@ -1082,42 +1088,31 @@ pub async fn get(
 /// opinion about whether code should land. One function, so a second
 /// door cannot be added with the rule left out.
 fn acting_user(
-    principal: &Option<stratum_control::auth::Principal>,
+    principal: &stratum_control::auth::Principal,
     not_a_token: &str,
-    sign_in: &str,
 ) -> Result<String, Response> {
-    match principal {
-        Some(stratum_control::auth::Principal {
-            user_id: Some(user),
-            ..
-        }) => Ok(user.clone()),
-        Some(_) => Err(json_error(StatusCode::FORBIDDEN, not_a_token)),
-        None => Err(json_error(StatusCode::UNAUTHORIZED, sign_in)),
+    match &principal.user_id {
+        Some(user) => Ok(user.clone()),
+        None => Err(json_error(StatusCode::FORBIDDEN, not_a_token)),
     }
 }
 
 /// The acting person for an approval, in the words the API has always
 /// answered with.
-fn approving_user(
-    principal: &Option<stratum_control::auth::Principal>,
-) -> Result<String, Response> {
+fn approving_user(principal: &stratum_control::auth::Principal) -> Result<String, Response> {
     acting_user(
         principal,
         "approvals must come from a person, not a service token",
-        "sign in to approve",
     )
 }
 
 /// The acting person for a review verdict. Same rule, same reason: a
 /// review says whether code should land, which is not a fact a machine
 /// can observe.
-fn reviewing_user(
-    principal: &Option<stratum_control::auth::Principal>,
-) -> Result<String, Response> {
+fn reviewing_user(principal: &stratum_control::auth::Principal) -> Result<String, Response> {
     acting_user(
         principal,
         "a review verdict must come from a person, not a service token",
-        "sign in to review",
     )
 }
 
@@ -1148,7 +1143,7 @@ pub async fn approve(
         Ok(None) => return json_error(StatusCode::NOT_FOUND, "change has no patchsets"),
         Err(e) => return internal(e),
     };
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match changes::approve(&state.db, &change.id, &latest.id, &user_id, &actx) {
         Ok(_) => {
             crate::workers::notifier::enqueue(
@@ -1188,7 +1183,7 @@ pub async fn unapprove(
         Ok(None) => return json_error(StatusCode::NOT_FOUND, "change has no patchsets"),
         Err(e) => return internal(e),
     };
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match changes::unapprove(&state.db, &change.id, &latest.id, &user_id, &actx) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => json_error(StatusCode::NOT_FOUND, "no active approval to revoke"),
@@ -1889,7 +1884,7 @@ pub async fn land(
         }
         Err(e) => return internal(e),
     }
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     crate::api::record_or_warn(
         &state.db,
         &actx,
@@ -2017,7 +2012,7 @@ pub async fn approve_workflows(
     // change run that was just started at this commit and admit the
     // member, where a moment ago it would have blocked it again.
     retrigger_changeset(&state, &change.id).await;
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     crate::api::record_or_warn(
         &state.db,
         &actx,
@@ -2090,7 +2085,7 @@ pub async fn abandon(
     ) {
         return r;
     }
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match changes::abandon(&state.db, &change.id, &actx) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => json_error(StatusCode::CONFLICT, format!("change is {}", change.state)),
@@ -2115,11 +2110,11 @@ fn own_change(
 ) -> Option<(
     stratum_control::registry::Org,
     stratum_control::registry::Repo,
-    Option<stratum_control::auth::Principal>,
+    stratum_control::auth::Principal,
     Change,
 )> {
     let (o, r, p) = crate::app::rest_repo_auth(state, headers, org, repo, Scope::RepoRead).ok()?;
-    let user = p.as_ref()?.user_id.clone()?;
+    let user = p.user_id.clone()?;
     let change = change_or_404(state, &r.id, key).ok()?;
     (change.created_by.as_deref() == Some(user.as_str())).then_some((o, r, p, change))
 }
@@ -2172,7 +2167,7 @@ pub struct AddComment {
     pub parent_id: Option<String>,
     /// Draft this into the caller's pending review instead of
     /// publishing it. Nobody else sees it — not the author, not an
-    /// admin, not an anonymous reader — until the review is submitted,
+    /// admin, not any other reader — until the review is submitted,
     /// and nobody is mailed about it at all.
     pub pending: Option<bool>,
 }
@@ -2191,10 +2186,6 @@ pub async fn add_comment(
             Ok(x) => x,
             Err(r) => return r,
         };
-    let Some(principal) = principal else {
-        // A public repo reads anonymously; a conversation does not.
-        return json_error(StatusCode::UNAUTHORIZED, "sign in to comment");
-    };
     if let Some(p) = &body.path {
         if !crate::review::owners::valid_repo_path(p) {
             return json_error(StatusCode::BAD_REQUEST, format!("invalid path {p:?}"));
@@ -2315,7 +2306,7 @@ pub async fn comments(
     // one `WHERE` clause down in `comments_for_viewer` and nowhere
     // else — see the warning on it. Nothing about this handler decides
     // visibility, and nothing about the next one should either.
-    let viewer = principal.as_ref().and_then(|p| p.user_id.as_deref());
+    let viewer = principal.user_id.as_deref();
     let rows = match changes::comments_for_viewer(&state.db, &change.id, viewer) {
         Ok(r) => r,
         Err(e) => return internal(e),
@@ -2360,7 +2351,6 @@ fn review_door(
     let (org_row, repo_row, principal) =
         crate::app::rest_repo_auth(state, headers, org, repo, Scope::RepoRead)?;
     let user_id = reviewing_user(&principal)?;
-    let principal = principal.expect("a user id came from a principal");
     let change = change_or_404(state, &repo_row.id, key)?;
     Ok((org_row, repo_row, principal, user_id, change))
 }
@@ -2680,9 +2670,6 @@ async fn set_comment_resolved(
             Ok(x) => x,
             Err(r) => return r,
         };
-    let Some(principal) = principal else {
-        return json_error(StatusCode::UNAUTHORIZED, "sign in to resolve a thread");
-    };
     // A service token has no standing here on purpose. Resolution is an
     // opinion about whether a remark has been addressed — the same kind
     // of judgement as an approval, which service tokens are already
@@ -2770,9 +2757,6 @@ pub async fn post_check(
             Ok(x) => x,
             Err(r) => return r,
         };
-    let Some(principal) = principal else {
-        return json_error(StatusCode::UNAUTHORIZED, "authenticate to report checks");
-    };
     let change = match change_or_404(&state, &repo_row.id, &key) {
         Ok(c) => c,
         Err(r) => return r,
@@ -2921,8 +2905,8 @@ const MAX_SUGGESTIONS: usize = 50;
 ///
 /// **Write access, and the refusal says who does have it.** The button
 /// makes a commit, so it needs the credential a commit needs. A reader
-/// looking at a public repository is told that the author applies it,
-/// rather than being handed a control that leads nowhere.
+/// who may not push here is told that the author applies it, rather
+/// than being handed a control that leads nowhere.
 pub async fn apply_suggestions(
     State(state): State<SharedState>,
     Path((org, repo, key)): Path<(String, String, String)>,
@@ -3105,7 +3089,7 @@ pub async fn apply_suggestions(
     // A machine may apply a suggestion — it is a mechanical act, not the
     // judgement an approval is — so a service token signs with its label
     // exactly as it does on the commit API.
-    let author = crate::api::commits::acting_author(&state, principal.as_ref(), None);
+    let author = crate::api::commits::acting_author(&state, Some(&principal), None);
     let message = latest.message.clone();
     let out = tokio::task::spawn_blocking({
         let parent = parent.clone();
@@ -3170,7 +3154,7 @@ pub async fn apply_suggestions(
         &state,
         &org_row,
         &repo_row,
-        principal.as_ref(),
+        Some(&principal),
         &change.target_branch,
         &made.commit,
         Some(&made.parent),
@@ -3180,7 +3164,7 @@ pub async fn apply_suggestions(
     .await
     {
         Ok((change, patchset, _)) => {
-            let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+            let actx = AuditCtx::of(&org_row.id, Some(&principal));
             crate::api::record_or_warn(
                 &state.db,
                 &actx,

@@ -191,13 +191,11 @@ fn dead_job_token(state: &SharedState, token: &str, job_id: &str) -> Response {
     // composed job's member tokens are `ci:<job>:<repo>` and a token
     // for another job is somebody else's business entirely.
     match auth::label_of(&state.db, &token_id) {
-        Ok(Some(label)) if label == format!("ci:{}", job.id) => {
-            gone(if job.state == "running" {
-                "reassigned"
-            } else {
-                &job.state
-            })
-        }
+        Ok(Some(label)) if label == format!("ci:{}", job.id) => gone(if job.state == "running" {
+            "reassigned"
+        } else {
+            &job.state
+        }),
         _ => refused(),
     }
 }

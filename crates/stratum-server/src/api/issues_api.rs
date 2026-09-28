@@ -13,11 +13,11 @@
 //! backlog, and a stranger relabelling it is precisely the
 //! attention-theft this product exists to refuse.
 //!
-//! Reads are public on a public repository and masked otherwise, via
-//! `app::rest_repo_auth`, which already short-circuits `RepoRead` on a
-//! public repo for an anonymous caller. Nothing here reimplements
-//! masking; a surface that decides for itself who may see a repository
-//! is a surface that will disagree with the rest of them.
+//! Reads take `RepoRead` through `app::rest_repo_auth`, which answers a
+//! signed-out caller 401 and one with no role on the repository the
+//! masked 404 a missing one gets. Nothing here reimplements masking; a
+//! surface that decides for itself who may see a repository is a
+//! surface that will disagree with the rest of them.
 
 use crate::api::{caller_person, internal, json_error};
 use crate::app::{self, SharedState};
@@ -41,11 +41,10 @@ use stratum_control::issues::{self, Comment, Counts, Filter, Issue, Label};
 /// **The verification check is the second half and it is not optional.**
 /// Every other create path in this API calls `authx::require_verified`
 /// before letting a caller make something that costs storage. Filing an
-/// issue is a create path reachable by any signed-in stranger on any
-/// public repository, which makes it the most spammable endpoint on the
-/// server by a wide margin — and it would have been the only one of them
-/// not to check. It costs a legitimate contributor a click they have
-/// already made.
+/// issue is a create path that needs nothing stronger than `RepoRead` —
+/// a viewer may file — which makes it the widest create door on the
+/// server, and it would have been the only one of them not to check. It
+/// costs a legitimate contributor a click they have already made.
 ///
 /// It is checked on the resolved **person** rather than through
 /// `authx::require_verified`, and the reason is not that the latter is
@@ -56,13 +55,14 @@ use stratum_control::issues::{self, Comment, Counts, Filter, Issue, Label};
 /// that would have sent somebody to add redundant checks at five sites
 /// that already work.)
 ///
-/// The reason is that on *this* path there is no `Principal` to pass
-/// it. `authx::principal_opt` reads a token and nothing else, and the
-/// callers issues exist for — a signed-in stranger with no role in the
-/// org — arrive with a cookie and no token, so it answers `None` and
-/// `caller_person` falls through to `app::session_user`. Handing
-/// `require_verified` a principal we do not have is not an option; the
-/// resolved person is the one thing every door here produces.
+/// The reason is that this helper is about a *person*, and resolves one
+/// through `caller_person` rather than reading it off the principal
+/// `rest_repo_auth` returned: a token's person, or else the browser
+/// session's, and nobody for a repo-bound token. For a session or an
+/// unbound token that is the person the principal names; for a
+/// repo-bound token it is deliberately nobody, because filing is a
+/// person's act. The resolved person is the one thing every door here
+/// produces, so it is what the check is made on.
 fn person(state: &SharedState, headers: &HeaderMap) -> Result<String, Response> {
     let who = caller_person(state, headers)?.ok_or_else(|| {
         json_error(

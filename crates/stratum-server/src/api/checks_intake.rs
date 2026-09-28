@@ -326,7 +326,7 @@ pub async fn rotate_secret(
     // so it belongs in the trail exactly like a webhook subscription.
     crate::api::record_or_warn(
         &state.db,
-        &AuditCtx::of(&org.id, principal.as_ref()),
+        &AuditCtx::of(&org.id, Some(&principal)),
         Some(&repo.id),
         "ci.secret.rotate",
         None,
@@ -392,7 +392,7 @@ pub async fn revoke_secret(
     }
     crate::api::record_or_warn(
         &state.db,
-        &AuditCtx::of(&org.id, principal.as_ref()),
+        &AuditCtx::of(&org.id, Some(&principal)),
         Some(&repo.id),
         "ci.secret.revoke",
         None,
@@ -930,22 +930,23 @@ pub async fn poll_now(
 /// that we may not look at it. With this, the tab can say so and offer
 /// the re-approve link.
 ///
-/// **Two audiences, and they get different answers.** `RepoRead` on a
-/// public mirror is *anybody at all*, so what a stranger may have is the
+/// **Two audiences, and they get different answers.** `RepoRead` is
+/// every role that may see the mirror, not only the people who run it —
+/// a viewer, a `repo:read` token — so what a reader may have is the
 /// shape of the problem — `connected`, `polled`, `denied` — and nothing
 /// else. That is the whole point of keeping those three states apart,
-/// and none of them says anything a visitor could not infer from the
+/// and none of them says anything a reader could not infer from the
 /// empty tab in front of them.
 ///
 /// `error` and `resuming_from` need `RepoWrite`. They are operator text:
 /// `error` is GitHub's raw response body or a `GET {url}: {e}` carrying
 /// the full `api.github.com` URL, which names the origin `owner/repo`
 /// this mirror pulls from, and `resuming_from` is a raw upstream page
-/// URL. A private repository mirrored from a private upstream would have
-/// been publishing that upstream's name to every anonymous reader of its
-/// public fork. No credential is in either — the installation token is a
-/// header and never appears in a URL — but the origin's identity is not
-/// ours to give away.
+/// URL. Shown to every reader, they would hand a private upstream's name
+/// to people who may read the mirror but were never given the origin.
+/// No credential is in either — the installation token is a header and
+/// never appears in a URL — but the origin's identity is not ours to
+/// give away.
 ///
 /// Gated **here and not in the client**: a page that merely declines to
 /// render the field still shipped it, and anybody who opens devtools

@@ -85,7 +85,7 @@ pub async fn protect(
         }
         Err(e) => return reads::err_to_response(e),
     }
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match protections::protect(&state.db, &repo_row.id, &body.branch, &actx) {
         Ok(new) => {
             let status = if new {
@@ -117,7 +117,7 @@ pub async fn unprotect(
             Err(r) => return r,
         };
     let branch = branch.trim_start_matches('/');
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match protections::unprotect(&state.db, &repo_row.id, branch, &actx) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         Ok(false) => json_error(
@@ -267,7 +267,7 @@ pub async fn require_check(
         }
         Err(e) => return internal(e),
     }
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match protections::require_check(&state.db, &repo_row.id, &branch, &body.name, &actx) {
         Ok(new) => {
             let status = if new {
@@ -315,7 +315,7 @@ pub async fn unrequire_check(
             Err(r) => return r,
         };
     let branch = wildcard_branch(&branch);
-    let actx = AuditCtx::of(&org_row.id, principal.as_ref());
+    let actx = AuditCtx::of(&org_row.id, Some(&principal));
     match protections::unrequire_check(&state.db, &repo_row.id, branch, &q.name, &actx) {
         Ok(true) => StatusCode::NO_CONTENT.into_response(),
         // An unstorable shape can never be present, so it lands here as

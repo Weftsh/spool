@@ -226,12 +226,13 @@ pub fn session_principal(
 /// same masked answer a foreign API token gets: whether an org exists
 /// must not depend on which kind of credential asked.
 ///
-/// `NoAccess` still names the person. On a public repository they are
-/// not nobody: they read it as themselves, and what they do there — open
-/// a change from their fork, comment on it, tick the files they have
-/// read — is attributed to them. Without the id, every seam that wanted
-/// to say who had to resolve the cookie a second time, and the ones that
-/// did not left the outside contributor anonymous.
+/// `NoAccess` still names the person: somebody signed in who is not a
+/// member of this org. A door that authorizes answers it with the masked
+/// 404 all the same, but a question about *who* is asking rather than
+/// what they may do still has an answer — the org-wide change list
+/// resolves `author:@me` from it and answers with what they may read
+/// there, which is nothing, rather than telling a signed-in person to
+/// sign in.
 pub enum SessionAuth {
     None,
     NoAccess(String),

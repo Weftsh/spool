@@ -48,12 +48,13 @@ use axum::response::{IntoResponse, Response};
 /// Which **person** is asking, with no namespace in the question.
 ///
 /// Deliberately *not* the principal `rest_repo_auth` returns. That one
-/// answers "what authority does this caller have in this org", and for
-/// somebody signed in who is not a member it is `None` even though they
-/// are plainly a person — correct for authorization, wrong for
-/// identity. Starring a public project, filing an issue on one: the
-/// most ordinary things a non-member does. Resolving the caller from
-/// the org's membership would have meant only insiders could do them.
+/// answers "what authority does this caller have on this repository",
+/// which is a different question from who they are: a profile has no
+/// repository to ask about, forking authorizes against the source while
+/// the fork lands in the person's own namespace, and a repo-bound token
+/// carries authority while being nobody (below). Resolving the person from
+/// authority is how a route ends up counting, or refusing, the wrong
+/// callers.
 ///
 /// Getting this wrong does not announce itself, which is why it is
 /// worth a paragraph rather than a line. The failure is not a refusal

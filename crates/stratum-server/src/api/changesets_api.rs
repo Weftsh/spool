@@ -69,7 +69,7 @@ pub(crate) struct Loaded {
     pub(crate) repo: Repo,
     pub(crate) change: Change,
     pub(crate) latest: Option<Patchset>,
-    pub(crate) principal: Option<Principal>,
+    pub(crate) principal: Principal,
 }
 
 impl Loaded {
@@ -267,11 +267,9 @@ pub(crate) fn changeset_json(
     // "Revert…" and "Land all members", and answered each press with the
     // masked `no changeset` the write routes give somebody who may not
     // write — about a changeset they were looking at.
-    let viewer_write = members.iter().all(|m| {
-        m.principal
-            .as_ref()
-            .is_some_and(|p| p.allows(Scope::RepoWrite, Some(&m.repo.id)))
-    });
+    let viewer_write = members
+        .iter()
+        .all(|m| m.principal.allows(Scope::RepoWrite, Some(&m.repo.id)));
     Ok(serde_json::json!({
         "key": cs.key,
         "title": cs.title,
@@ -548,7 +546,7 @@ pub async fn create(
             Err(r) => return r,
         }
     }
-    let principal = members.last().and_then(|m| m.principal.clone());
+    let principal = members.last().map(|m| m.principal.clone());
     let labels: Vec<String> = members.iter().map(Loaded::label).collect();
     let cands: Vec<Candidate> = members
         .iter()
@@ -843,7 +841,7 @@ pub async fn diffstat(
 /// The principal behind a mutation whose authority was established per
 /// member: the one every member admitted.
 fn acting(members: &[Loaded]) -> Option<Principal> {
-    members.first().and_then(|m| m.principal.clone())
+    members.first().map(|m| m.principal.clone())
 }
 
 /// POST /v1/orgs/:org/changesets/:key/members — add one change.
@@ -866,7 +864,7 @@ pub async fn add_member(
         Ok(l) => l,
         Err(r) => return r,
     };
-    let actx = AuditCtx::of(&org.id, added.principal.as_ref());
+    let actx = AuditCtx::of(&org.id, Some(&added.principal));
     let label = added.label();
     if let Err(e) = changesets::add_member(
         &state.db,

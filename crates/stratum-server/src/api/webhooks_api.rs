@@ -38,7 +38,7 @@ pub async fn create(
             // is an egress path somebody added.
             crate::api::record_or_warn(
                 &state.db,
-                &AuditCtx::of(&org.id, principal.as_ref()),
+                &AuditCtx::of(&org.id, Some(&principal)),
                 Some(&repo.id),
                 "webhook.create",
                 Some(&serde_json::json!({ "id": sub.id, "url": sub.url })),
@@ -94,7 +94,7 @@ pub async fn delete(
         Ok(true) => {
             crate::api::record_or_warn(
                 &state.db,
-                &AuditCtx::of(&org.id, principal.as_ref()),
+                &AuditCtx::of(&org.id, Some(&principal)),
                 Some(&repo.id),
                 "webhook.delete",
                 Some(&serde_json::json!({ "id": id })),

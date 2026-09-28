@@ -1015,6 +1015,12 @@ pub fn repo_or_masked(
 /// signing in — and a caller with no role on this repository gets the
 /// masked 404 a missing one gets, so a status code is never an
 /// existence oracle.
+///
+/// So `Ok` always carries a principal: the caller's, refined to this
+/// repository, and one that allows `need`. A handler has no signed-out
+/// caller to account for, and whether a person stands behind the
+/// principal (`user_id`) is the only question left — a service token
+/// has none.
 pub fn rest_repo_auth(
     state: &AppState,
     headers: &HeaderMap,
