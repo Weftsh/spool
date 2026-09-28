@@ -1951,8 +1951,8 @@ fn signing_in_replaces_any_session_the_browser_was_carrying() {
 /// from the client. `repos::patch` and the protections routes call
 /// `authx::require(.., Some(&repo.id), ..)`, which **refines** a
 /// principal against `repo_grants` — so a member holding `admin` on one
-/// repository may change that repository's visibility and its branch
-/// policy. But the only question the dashboard could ask was
+/// repository may move that repository's default branch and change its
+/// branch policy. But the only question the dashboard could ask was
 /// `GET …/access`, which requires **org-wide** admin, so it answered no
 /// and the settings surface was hidden from somebody entitled to it.
 ///
@@ -1975,11 +1975,23 @@ fn a_per_repo_admin_is_told_they_may_administer_that_repo_and_no_other() {
                     "POST",
                     "/v1/orgs/acme/repos",
                     &admin_token,
-                    Some(serde_json::json!({ "name": name, "public": true })),
+                    Some(serde_json::json!({ "name": name })),
                 )
                 .0,
             201
         );
+        // A trunk to point the default branch at: moving it is the
+        // write only an administrator of the repository may make.
+        let (st, out) = server.req(
+            "POST",
+            &format!("/v1/orgs/acme/repos/{name}/commits"),
+            &admin_token,
+            Some(serde_json::json!({
+                "message": "seed",
+                "operations": [{"op": "put", "path": "README", "content": "x"}],
+            })),
+        );
+        assert_eq!(st, 201, "{out}");
     }
     server
         .admin(&[
@@ -2041,32 +2053,33 @@ fn a_per_repo_admin_is_told_they_may_administer_that_repo_and_no_other() {
         "a grant on one repository claimed authority over another: {other}"
     );
 
-    // And the flag is not decoration: the write it predicts is allowed
-    // on `app` and refused on `other`.
-    assert_eq!(
-        vic.req(
-            "PATCH",
-            "/v1/orgs/acme/repos/app",
-            Some(serde_json::json!({ "public": false })),
-        )
-        .0,
-        200,
-        "viewer_admin said yes and the write was refused"
+    // And the flag is not decoration: the write it predicts — moving
+    // the default branch, which takes an administrator — is allowed on
+    // `app` and refused on `other`, masked as every refusal of a
+    // repository's administration is.
+    let (st, out) = vic.req(
+        "PATCH",
+        "/v1/orgs/acme/repos/app",
+        Some(serde_json::json!({ "default_branch": "main" })),
     );
-    let (st, _) = vic.req(
+    assert_eq!(
+        st, 200,
+        "viewer_admin said yes and the write was refused: {out}"
+    );
+    let (st, out) = vic.req(
         "PATCH",
         "/v1/orgs/acme/repos/other",
-        Some(serde_json::json!({ "public": false })),
+        Some(serde_json::json!({ "default_branch": "main" })),
     );
-    assert!(
-        st == 403 || st == 404,
-        "viewer_admin said no and the write was allowed: {st}"
+    assert_eq!(
+        st, 404,
+        "viewer_admin said no and the write was allowed: {out}"
     );
 
-    // A stranger with no account is told `false` rather than nothing.
+    // Nobody signed out is told anything at all — not `false`, not the
+    // repository — because there is nothing here they may read.
     let (st, anon) = server.req("GET", "/v1/orgs/acme/repos/other", "", None);
-    assert_eq!(st, 200, "{anon}");
-    assert_eq!(anon["viewer_admin"], false, "{anon}");
+    assert_eq!(st, 401, "{anon}");
 
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
