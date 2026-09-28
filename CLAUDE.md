@@ -291,8 +291,9 @@ walkthrough of a different product.
 
 **It runs Postgres and MinIO in Docker, and that is the supported way.**
 Start Docker (Docker Desktop, OrbStack, colima — anything that answers
-`docker info`) and the script pulls `postgres:16` and `minio/minio` and
-wires them up; nothing has to be installed on the host. That is not a
+`docker info`) and the script pulls `postgres:16` and the MinIO release
+`.minio-version` pins, and wires them up; nothing has to be installed on
+the host. That is not a
 convenience, it is the only path that works off the CI image: the host
 version needed Debian's `/usr/lib/postgresql/*/bin` layout, a `postgres`
 system user, and root to `su` to it. On a development machine the stack
@@ -301,9 +302,9 @@ kept getting reconstructed by hand and reconstructed wrongly.
 
 The host path is still there for the CI image and is selected
 automatically when there is no docker daemon; `STRATUM_STACK_NO_DOCKER=1`
-forces it. `.nvmrc` pins the Node the site and dashboard build with —
-`nvm use` before `npm run build`, or Astro refuses and it reads as the
-site being broken.
+forces it. `.nvmrc` pins the Node the dashboard builds with —
+`nvm use` before `npm run build`, or the build refuses and it reads as
+the dashboard being broken.
 
 You also need the browser the walkthrough drives, once per machine:
 
