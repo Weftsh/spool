@@ -1162,6 +1162,9 @@
           },
           "401": {
             "description": "invalid email or password"
+          },
+          "403": {
+            "description": "SSO is the only way in on this server (`STRATUM_SSO_ONLY`)"
           }
         }
       }
@@ -1204,6 +1207,9 @@
           },
           "409": {
             "description": "the handle asked for is already somebody's namespace; the invitation is untouched"
+          },
+          "403": {
+            "description": "SSO is the only way in, and the caller is not signed in as the account the invitation was sent to: sign in with SSO first — which makes a newcomer's account — then accept. Accepted that way, no new session is made."
           }
         }
       }
@@ -1223,7 +1229,7 @@
     },
     "/v1/auth/github/start": {
       "get": {
-        "summary": "Begin signing in with GitHub. Answers a 303 to GitHub's authorization screen and parks a single-use anti-CSRF state in an HttpOnly `weft_ghauth` cookie; the callback refuses unless the `state` it is handed matches that cookie, which is what proves the browser finishing the flow is the one that started it. Takes no credentials — the caller is by definition not signed in yet. A deployment whose App has no OAuth client configured redirects to the dashboard with `github=unavailable` rather than leaving for a URL that cannot work.",
+        "summary": "Begin signing in with GitHub. Answers a 303 to GitHub's authorization screen and parks a single-use anti-CSRF state in an HttpOnly `weft_ghauth` cookie; the callback refuses unless the `state` it is handed matches that cookie, which is what proves the browser finishing the flow is the one that started it. Takes no credentials — the caller is by definition not signed in yet. A deployment whose App has no OAuth client configured, or where SSO is the only way in, redirects to the dashboard with `github=unavailable` rather than leaving for a URL that cannot work.",
         "responses": {
           "303": {
             "description": "redirect to GitHub's authorization screen, or to the dashboard with `github=unavailable`"
@@ -1276,6 +1282,9 @@
         "responses": {
           "202": {
             "description": "{ status, detail }"
+          },
+          "403": {
+            "description": "SSO is the only way in on this server (`STRATUM_SSO_ONLY`)"
           }
         }
       }
@@ -1295,6 +1304,9 @@
           },
           "404": {
             "description": "malformed, unknown, spent, expired, or a token of another kind"
+          },
+          "403": {
+            "description": "SSO is the only way in on this server (`STRATUM_SSO_ONLY`)"
           }
         }
       }
@@ -1334,6 +1346,9 @@
           },
           "401": {
             "description": "not signed in, or the current password is wrong"
+          },
+          "403": {
+            "description": "SSO is the only way in on this server (`STRATUM_SSO_ONLY`)"
           }
         }
       }
@@ -5303,6 +5318,65 @@
           },
           "410": {
             "description": "{ error, state } — the job is no longer running; stop and exit"
+          }
+        }
+      }
+    },
+    "/v1/auth/methods": {
+      "get": {
+        "summary": "What the sign-in screen may offer. Public: it describes this server's configuration and nobody's account. `password` is whether email-and-password sign-in (and its reset) may be used; `github` whether \"Continue with GitHub\" may; `sso` the company identity provider, when one is configured. With SSO configured, SSO is the only way in unless the operator says otherwise (`STRATUM_SSO_ONLY=false`), and then `password` and `github` are both false.",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "{ password: bool, github: bool, sso: null | { name, start } }"
+          }
+        }
+      }
+    },
+    "/v1/auth/sso/start": {
+      "get": {
+        "summary": "Begin signing in with the company's OpenID Connect provider. Answers a 303 to the provider's authorization endpoint — the authorization-code flow with PKCE (S256), a `state` and a `nonce` — and parks all three in an HttpOnly `weft_sso` cookie for ten minutes. Takes no credentials. With SSO not configured, or the provider's discovery document unreachable or unacceptable, redirects to the dashboard with `sso=unavailable` or `sso=error`.",
+        "security": [],
+        "responses": {
+          "303": {
+            "description": "redirect to the provider, or to the dashboard with `sso=unavailable|error`"
+          }
+        }
+      }
+    },
+    "/v1/auth/sso/callback": {
+      "get": {
+        "summary": "The provider sends a browser here. The `state` must match this browser's `weft_sso` cookie; the code is exchanged (with the PKCE verifier and the client's secret) for an ID token, which must be RS256 under a key the provider publishes, from exactly the configured issuer, for this client, unexpired, carrying this browser's nonce. The account is the one already linked to the provider's `sub`; else the one whose address the provider vouches for (marked verified, or in `STRATUM_OIDC_ALLOWED_DOMAINS`), which is then linked; else a new account in `STRATUM_OIDC_ORG` at `STRATUM_OIDC_ROLE`. Answers a redirect into the dashboard carrying `sso=ok|denied|expired|noemail|domain|disabled|unavailable|error`; only `ok` sets a session cookie, which lasts `STRATUM_OIDC_SESSION_HOURS` (twelve by default). Every answer clears `weft_sso`.",
+        "security": [],
+        "parameters": [
+          {
+            "name": "code",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "state",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          },
+          {
+            "name": "error",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "303": {
+            "description": "redirect to the dashboard with the outcome in `sso=`"
           }
         }
       }

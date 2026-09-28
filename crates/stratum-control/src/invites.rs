@@ -241,25 +241,15 @@ fn handle_for(db: &ControlDb, email: &str, asked: Option<&str>) -> Result<String
             Err(e) => Err(AcceptError::Failed(e)),
         };
     }
-    let base = crate::registry::handle_from(email.split('@').next().unwrap_or(email));
-    let free = |name: &str| -> Result<bool, AcceptError> {
-        Ok(
-            crate::registry::valid_namespace_name("handle", name).is_ok()
-                && crate::registry::org_by_name(db, name)
-                    .map_err(AcceptError::Failed)?
-                    .is_none(),
-        )
-    };
-    if free(&base)? {
-        return Ok(base);
-    }
-    let alt = format!("{base}-{}", &token_secret()[..6].to_lowercase());
-    if free(&alt)? {
-        return Ok(alt);
-    }
-    Err(AcceptError::Failed(format!(
-        "no free handle near {base:?} — accept again, or choose one"
-    )))
+    let seed = email.split('@').next().unwrap_or(email);
+    crate::registry::free_handle_near(db, seed)
+        .map_err(AcceptError::Failed)?
+        .ok_or_else(|| {
+            AcceptError::Failed(format!(
+                "no free handle near {:?} — accept again, or choose one",
+                crate::registry::handle_from(seed)
+            ))
+        })
 }
 
 /// Accept an invite, creating the account if this is a new person.

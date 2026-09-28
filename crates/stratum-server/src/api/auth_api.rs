@@ -133,6 +133,9 @@ fn clear_cookie(state: &SharedState) -> String {
 }
 
 pub async fn login(State(state): State<SharedState>, Json(body): Json<LoginBody>) -> Response {
+    if let Some(r) = crate::api::sso_api::sso_only_refusal(&state) {
+        return r;
+    }
     let user = match users::authenticate(&state.db, &body.email, &body.password) {
         Ok(Some(u)) => u,
         // One answer for every failure — unknown address, wrong password,
@@ -243,11 +246,60 @@ pub async fn preview_invite(
 /// Accept an invitation, creating the account if this is a new person,
 /// and sign them straight in — an invite that leaves you at a login form
 /// is a worse experience for no security gain.
+///
+/// Except when SSO is the only way in. Then an invitation link must not
+/// be a way in that goes around the company's provider — it would be how
+/// somebody switched off there got back in — so the person must already
+/// be signed in, as the account the invitation was sent to, and no new
+/// session is made. Somebody new signs in with SSO first, which makes
+/// their account, and then follows the link.
 pub async fn accept_invite(
     State(state): State<SharedState>,
+    headers: HeaderMap,
     Json(body): Json<AcceptInviteBody>,
 ) -> Response {
     use stratum_control::invites::AcceptError;
+    if state.sso_only {
+        let invite = match stratum_control::invites::verify(&state.db, &body.invite) {
+            Ok(Some(i)) => i,
+            Ok(None) => return json_error(StatusCode::BAD_REQUEST, "this invitation is not valid"),
+            Err(e) => return internal(e),
+        };
+        let signed_in = match crate::app::session_user(&state, &headers) {
+            Ok(u) => u,
+            Err(r) => return r,
+        };
+        let holder = match signed_in.as_deref().map(|u| users::by_id(&state.db, u)) {
+            Some(Ok(Some(u))) if u.email == invite.email => u,
+            Some(Err(e)) => return internal(e),
+            _ => {
+                let name = state
+                    .sso
+                    .as_ref()
+                    .map(|s| s.cfg.name.clone())
+                    .unwrap_or_else(|| "SSO".into());
+                return json_error(
+                    StatusCode::FORBIDDEN,
+                    format!(
+                        "sign in with {name} as {} first, then open this invitation again",
+                        invite.email
+                    ),
+                );
+            }
+        };
+        if let Err(e) = stratum_control::invites::accept(&state.db, &body.invite, "", None, None) {
+            return match e {
+                AcceptError::Refused(e) => json_error(StatusCode::BAD_REQUEST, e),
+                AcceptError::HandleTaken(e) => json_error(StatusCode::CONFLICT, e),
+                AcceptError::Failed(e) => internal(e),
+            };
+        }
+        let orgs = match memberships(&state, &holder.id) {
+            Ok(o) => o,
+            Err(e) => return internal(e),
+        };
+        return (StatusCode::CREATED, Json(user_json(&holder, &orgs))).into_response();
+    }
     let accepted = match stratum_control::invites::accept(
         &state.db,
         &body.invite,
@@ -293,6 +345,9 @@ pub async fn change_password(
     headers: HeaderMap,
     Json(body): Json<ChangePasswordBody>,
 ) -> Response {
+    if let Some(r) = crate::api::sso_api::sso_only_refusal(&state) {
+        return r;
+    }
     let Some(cookie) = authx::session_from_headers(&headers) else {
         return json_error(StatusCode::UNAUTHORIZED, "not signed in");
     };
@@ -423,6 +478,9 @@ pub async fn forgot_password(
     State(state): State<SharedState>,
     Json(body): Json<EmailBody>,
 ) -> Response {
+    if let Some(r) = crate::api::sso_api::sso_only_refusal(&state) {
+        return r;
+    }
     let email = users::normalize_email(&body.email);
     if !users::valid_email(&email) || !allow_mail_to(&email) {
         return mailed_if_it_applies();
@@ -459,6 +517,9 @@ pub async fn reset_password(
     State(state): State<SharedState>,
     Json(body): Json<ResetBody>,
 ) -> Response {
+    if let Some(r) = crate::api::sso_api::sso_only_refusal(&state) {
+        return r;
+    }
     // Strength first: a refused password must not spend the link, or a
     // typo costs somebody another round through their inbox.
     if let Err(e) = users::check_password_strength(&body.new_password) {

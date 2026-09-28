@@ -35,6 +35,7 @@ pub mod runner_api;
 pub mod runners_api;
 pub mod search;
 pub mod sshkeys_api;
+pub mod sso_api;
 pub mod teams_api;
 pub mod tokens;
 pub mod watch_api;

@@ -2569,6 +2569,7 @@ dependencies = [
  "hmac 0.12.1",
  "libc",
  "postgres",
+ "rsa 0.9.10",
  "serde_json",
  "sha1 0.10.7",
  "sha2 0.10.9",

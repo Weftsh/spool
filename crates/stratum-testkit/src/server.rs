@@ -273,6 +273,8 @@ pub struct GithubSignin {
     /// The session the callback issued, if it signed anybody in. `None`
     /// on every refusal, which is the assertion most of them make.
     pub session: Option<String>,
+    /// Whether the callback cleared the state cookie it spent.
+    pub state_cleared: bool,
 }
 
 /// The value of one named cookie out of a list of `Set-Cookie` headers,
@@ -424,6 +426,22 @@ impl Server {
             }
         }
         self.reaped = true;
+    }
+
+    /// Run `stratum-server <args>` with this server's whole environment,
+    /// the way an operator's `docker compose exec` does — for commands
+    /// that read the server's own configuration, not just its database.
+    pub fn admin_in_server_env(&self, args: &[&str]) -> std::process::Output {
+        admin_command(&self.bin)
+            .env("STRATUM_STORE_URL", &self.store_url)
+            .env("STRATUM_DB_URL", &self.db_url)
+            // Chosen at spawn rather than kept in `env`, and part of the
+            // configuration: the public URL defaults to it.
+            .env("STRATUM_BIND", self.base.trim_start_matches("http://"))
+            .envs(self.env.iter().map(|(k, v)| (k.as_str(), v.as_str())))
+            .args(args)
+            .output()
+            .expect("run admin command")
     }
 
     /// Run `stratum-server <args>` against this server's store and DB.
@@ -608,6 +626,7 @@ impl Server {
                 .to_string(),
             location,
             session: set_cookie_value(&cookies, "stratum_session").filter(|s| !s.is_empty()),
+            state_cleared: set_cookie_value(&cookies, "weft_ghauth").as_deref() == Some(""),
         }
     }
 

@@ -130,6 +130,9 @@ export const METRICS = {
   sync: { last_sync_at: Date.now() - 30_000, sync_error: null },
 };
 
+/// `GET /v1/auth/methods` on a server with no single sign-on.
+export const METHODS = { password: true, github: true, sso: null };
+
 export const ME = {
   id: "01user",
   email: "owner@acme.test",
@@ -298,6 +301,10 @@ export async function mockApi(
     r.fulfill({ status: 404, json: { error: "not mocked by this test" } }),
   );
   await page.route("**/v1/auth/me", (r) => r.fulfill({ json: ME }));
+  // What a server with no single sign-on answers: passwords and GitHub,
+  // as every server offered before it could say. Specs about SSO
+  // register their own answer after this one.
+  await page.route("**/v1/auth/methods", (r) => r.fulfill({ json: METHODS }));
   await page.route("**/v1/auth/login", (r) => r.fulfill({ json: ME }));
   await page.route("**/v1/auth/logout", (r) =>
     r.fulfill({ status: 204, body: "" }),

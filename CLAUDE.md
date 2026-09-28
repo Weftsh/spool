@@ -14,7 +14,7 @@ test that fails without it.**
 
 ## The gates
 
-Ten things stand between a change and `main`. Five are CI jobs; five
+Eleven things stand between a change and `main`. Five are CI jobs; six
 are a person, with real credentials, against something we do not control.
 None of them is optional, and none of them is "usually fine".
 
@@ -30,10 +30,11 @@ None of them is optional, and none of them is "usually fine".
 | **manual CI contract** | real GitHub answers the refusals our poller classifies, every `status`/`conclusion` pair it emits is one we map, and a real non-GitHub CI's verdict reaches the intake | `scripts/manual-ci.sh all`, plus `intake watch` |
 | **manual GitHub-sign-in contract** | real GitHub answers `GET /user/emails` in the shape the sign-in reads, and the `verified` flag on the `primary` entry — the single fact that lets a first GitHub sign-in be linked to the account with that address — is really there | `scripts/manual-github-signin.sh all`, then `fixtures` |
 | **manual mirror-push contract** | real GitHub takes the exact `git push` a forwarded mirror push sends under the App installation, and every refusal it prints — a protected branch, a stale lease, a missing `Contents: write` — lands on the answer `classify` gives it | `scripts/manual-mirror-push.sh all`, then `fixtures` |
+| **manual SSO contract** | a real identity provider — the one a deployment signs in with — answers discovery, the key set, the token endpoint and an ID token in the shapes `oidc.rs` reads, takes the client credentials as the server encodes them, and vouches for a person's address the way the trust rule needs | `scripts/manual-oidc.sh all`, then `fixtures`, once per provider |
 
 The manual ones are manual for the same reason the browser pass is: they
-need credentials for a real bucket and a real GitHub App, and none of
-that belongs in CI. Do not mistake the MinIO run inside
+need credentials for a real bucket, a real GitHub App and a real
+identity provider, and none of that belongs in CI. Do not mistake the MinIO run inside
 `correctness-gate` for the S3 contract. I9 — the manifest is the only ref
 truth and changes only by CAS — is not a property of our code, it is a
 property of the store, and it had only ever been checked against MinIO.
@@ -92,6 +93,27 @@ the case under one that holds it; `protected` needs
 or the atomic sibling is a NOTE. `fixtures` writes the wire into the
 suite, and `mirror_push_fixtures_classify_like_the_fake` holds the
 classifier and the e2e hook to it.
+
+The SSO contract is the same argument about the provider that decides
+who gets an account. Single sign-on makes one for anybody the company's
+provider vouches for, and every hermetic test of it signs in through
+`stratum-testkit`'s fake provider, which we wrote from the OpenID
+Connect specification and the providers' documentation. What Entra ID
+leaves out of an ID token, whether Keycloak sends `email_verified` as a
+boolean or a string, whether a provider percent-decodes the Basic
+credentials RFC 6749 says to encode — each is a belief, and
+`crates/stratum-testkit/fixtures/oidc/belief/provenance.json` says
+`observed: false` until a real provider has been recorded beside it.
+`scripts/manual-oidc.sh` checks what needs no browser (discovery, the key
+set, a made-up code at the token endpoint), then has a person sign in
+once and checks the token's signature, its claims, userinfo, and whether
+the trust rule would admit them. `fixtures` writes a scrubbed recording
+per provider, and `oidc_fixtures_parse_like_the_fake` holds the server's
+own parsers to every one. Run it under the **issuer and client you
+deploy with**, signed in as an ordinary person the application is
+assigned to, and once **per provider** you support: a run against Okta
+has not claimed Entra. The operator's version of the no-browser half is
+`stratum-server admin sso-check`, which runs the product's own code.
 
 One command reproduces those CI jobs, in CI's order, from CI's own
 commands:
@@ -456,6 +478,12 @@ Every one of those is now held by a test.
       GitHub account has an *unverified* primary address has not watched
       a proved address arrive, and `noperm` cannot be claimed without a
       second App that genuinely lacks the permission
+- [ ] if the change touches single sign-on — `oidc.rs`, `api/sso_api.rs`,
+      `stratum-control`'s `sso.rs`, the SSO-only doors in `auth_api.rs`
+      and `github_auth.rs`, or the fake provider — `scripts/manual-oidc.sh
+      all` passes under a real provider's issuer and client, `fixtures`
+      has been run, and the fixture test is green on the recording. A run
+      under one provider has not claimed another
 - [ ] OpenAPI and the docs are updated in the same commit — `docs_e2e`
       fails on route drift, and the Repos quickstart is executed verbatim
       against a live server

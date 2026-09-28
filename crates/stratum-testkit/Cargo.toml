@@ -14,3 +14,4 @@ serde_json.workspace = true
 hmac = "0.12"
 sha1.workspace = true
 sha2.workspace = true
+rsa = { version = "0.9", features = ["sha2"] }

@@ -67,6 +67,30 @@ describe("settingsSections", () => {
     ]);
   });
 
+  it("offers no Password page on a server that takes no passwords", () => {
+    // Single sign-on only: `POST /v1/auth/password` is refused for
+    // everybody, so the page would be a form that can only fail. Every
+    // other section is untouched — tokens and SSH keys still work.
+    const withoutPasswords = (me: Me | null) =>
+      settingsSections(me, "acme", false).map((s) => s.slug);
+    expect(withoutPasswords(person("owner"))).toEqual([
+      "members",
+      "runners",
+      "teams",
+      "activity",
+      "tokens",
+      "ssh-keys",
+      "emails",
+    ]);
+    expect(withoutPasswords(person("viewer"))).not.toContain("password");
+    expect(withoutPasswords(null)).toEqual(slugs(null));
+    // And a server that does take them keeps the page, which is also
+    // what an unspecified answer means.
+    expect(
+      settingsSections(person("owner"), "acme", true).map((s) => s.slug),
+    ).toContain("password");
+  });
+
   it("never returns an empty list — the redirect target always exists", () => {
     expect(slugs(null).length).toBeGreaterThan(0);
     expect(slugs(person("viewer")).length).toBeGreaterThan(0);

@@ -4,8 +4,8 @@ import { type Me } from "@/api";
 /// truth for the sidebar group and the /settings/:section redirect.
 /// Members and Runners need org:admin (a token session counts: me is
 /// null and the credential's own scopes gate the API); Password only
-/// exists for password accounts. A section absent here is a section
-/// whose page would only ever answer 404.
+/// exists for a person, on a server that takes passwords. A section
+/// absent here is a section whose page would only ever be refused.
 export interface SettingsSection {
   slug: string;
   label: string;
@@ -19,6 +19,10 @@ export interface SettingsSection {
 export function settingsSections(
   me: Me | null,
   org: string,
+  /// Whether this server signs anybody in with a password at all. When
+  /// it does not — single sign-on is the only way in — changing one is
+  /// refused for everybody, so there is no Password page to offer.
+  passwords = true,
 ): SettingsSection[] {
   const role = me?.orgs.find((o) => o.name === org)?.role;
   const admin = role === "owner" || role === "admin" || me === null;
@@ -46,6 +50,8 @@ export function settingsSections(
     // for the same reason as Password — a token session has no person
     // behind it and every call would 401.
     ...(me ? [{ slug: "emails", label: "Email addresses", group: "account" as const }] : []),
-    ...(me ? [{ slug: "password", label: "Password", group: "account" as const }] : []),
+    ...(me && passwords
+      ? [{ slug: "password", label: "Password", group: "account" as const }]
+      : []),
   ];
 }

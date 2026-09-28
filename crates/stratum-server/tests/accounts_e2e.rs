@@ -1,17 +1,19 @@
 //! How an account comes to exist, end to end against a real server.
 //!
-//! There are exactly two ways: an operator's `admin user-create`, and
-//! accepting an organization's invitation. Nobody signs themselves up.
+//! There are exactly three ways: an operator's `admin user-create`,
+//! accepting an organization's invitation, and — when the operator
+//! configured one — the company's identity provider signing somebody in
+//! (`sso_e2e.rs`). Nobody signs themselves up.
 //! That is a claim about **absence**, and absence is easy to assert
 //! badly — a refused request that left a row behind reads exactly like
 //! one that did not — so the negative here asks the control plane's
 //! `users` table directly, before and after, rather than trusting any
 //! HTTP answer.
 //!
-//! The positive half is the invitation, which is the only way into this
-//! server for somebody with no account, and which now makes a *whole*
-//! account in one transaction: the user, their proved address, and a
-//! handle with the personal namespace behind it. The handle is the new
+//! The positive half is the invitation, which is the only way into a
+//! server without SSO for somebody with no account, and which now makes
+//! a *whole* account in one transaction: the user, their proved address,
+//! and a handle with the personal namespace behind it. The handle is the new
 //! part and most of the cases are about it, because it is a name in every
 //! clone URL the person will ever hand out:
 //!
@@ -159,6 +161,50 @@ fn no_door_makes_an_account() {
         401
     );
 
+    assert!(server.healthy());
+}
+
+/// `user-create` makes an account with no password only when told to in
+/// so many words — on an SSO server that is the right account for the
+/// first owner, and anywhere else it is one nobody can sign in to.
+#[test]
+fn user_create_is_told_whether_there_is_a_password() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("accounts-nopw");
+    let scratch = Scratch::new("accounts-nopw");
+    let mail = Mailbox::temp("accounts-nopw");
+    let server = spawn(&bucket.base_url, &scratch, "accounts_nopw", &mail);
+    server.bootstrap_org("acme");
+    let base = ["admin", "user-create", "--org", "acme", "--email"];
+
+    let err = server.admin_expect_err(&[&base[..], &["neither@acme.test"]].concat());
+    assert!(
+        err.contains("--password SECRET required") && err.contains("--no-password"),
+        "{err}"
+    );
+    let err = server.admin_expect_err(
+        &[
+            &base[..],
+            &["both@acme.test", "--password", PASSWORD, "--no-password"],
+        ]
+        .concat(),
+    );
+    assert!(err.contains("together"), "{err}");
+    assert!(
+        accounts(&server).is_empty(),
+        "a refused command made somebody"
+    );
+
+    let made = server.admin_json(&[&base[..], &["sso@acme.test", "--no-password"]].concat());
+    assert_eq!(made["user"]["email"], "sso@acme.test", "{made}");
+    assert_eq!(accounts(&server), ["sso@acme.test"]);
+    assert!(
+        namespace_exists(&server, "sso"),
+        "a whole account, handle and all"
+    );
+    for guess in ["", PASSWORD] {
+        assert_eq!(Browser::new(&server).login("sso@acme.test", guess), 401);
+    }
     assert!(server.healthy());
 }
 

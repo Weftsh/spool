@@ -468,6 +468,29 @@ pub fn handle_from(seed: &str) -> String {
     }
 }
 
+/// A handle nobody holds, made from `seed` for somebody who did not
+/// choose one: [`handle_from`]'s name if it is free and not reserved,
+/// otherwise the same name with a short random suffix. `None` when both
+/// are taken, which a caller reports rather than retrying forever.
+///
+/// Free *at the time of asking*: the caller claims it inside its own
+/// transaction, and a unique violation there — somebody took it in
+/// between — is [`is_namespace_taken`].
+pub fn free_handle_near(db: &ControlDb, seed: &str) -> Result<Option<String>, String> {
+    let base = handle_from(seed);
+    let free = |name: &str| -> Result<bool, String> {
+        Ok(valid_namespace_name("handle", name).is_ok() && org_by_name(db, name)?.is_none())
+    };
+    if free(&base)? {
+        return Ok(Some(base));
+    }
+    let alt = format!("{base}-{}", &crate::ids::token_secret()[..6].to_lowercase());
+    if free(&alt)? {
+        return Ok(Some(alt));
+    }
+    Ok(None)
+}
+
 /// Is this namespace a person's own?
 ///
 /// The one question that separates the two kinds, asked wherever

@@ -1,0 +1,11 @@
+{
+  "aud": "spool-client",
+  "email": "person@example.com",
+  "email_verified": true,
+  "exp": 1790641415,
+  "iat": 1790637815,
+  "iss": "https://other.example.test/issuer",
+  "name": "Recorded Person",
+  "nonce": "recorded-nonce",
+  "sub": "recorded-subject"
+}

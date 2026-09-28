@@ -1,0 +1,23 @@
+{
+  "authorization_endpoint": "https://other.example.test/issuer/authorize",
+  "code_challenge_methods_supported": [
+    "S256"
+  ],
+  "id_token_signing_alg_values_supported": [
+    "RS256"
+  ],
+  "issuer": "https://other.example.test/issuer",
+  "jwks_uri": "https://other.example.test/issuer/jwks",
+  "response_types_supported": [
+    "code"
+  ],
+  "subject_types_supported": [
+    "public"
+  ],
+  "token_endpoint": "https://other.example.test/issuer/token",
+  "token_endpoint_auth_methods_supported": [
+    "client_secret_basic",
+    "client_secret_post"
+  ],
+  "userinfo_endpoint": "https://other.example.test/issuer/userinfo"
+}

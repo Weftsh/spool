@@ -155,7 +155,7 @@ a component.
 
 ## The manual gates
 
-`ci-local.sh` covers the CI jobs and nothing else. Five gates are
+`ci-local.sh` covers the CI jobs and nothing else. Six gates are
 **manual**, because each needs credentials for something the project
 does not control, and those do not belong in CI:
 
@@ -166,6 +166,7 @@ does not control, and those do not belong in CI:
 | the CI-provider contract | `scripts/manual-ci.sh all`, under a real App installation and token |
 | the GitHub sign-in contract | `scripts/manual-github-signin.sh all`, then `fixtures` |
 | the mirror-push contract | `scripts/manual-mirror-push.sh all`, then `fixtures` |
+| the SSO contract | `scripts/manual-oidc.sh all`, then `fixtures`, once per identity provider |
 
 [`CLAUDE.md`](CLAUDE.md) says when each is required. The argument for
 all of them is the same: every automated test of those features runs

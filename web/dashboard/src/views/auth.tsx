@@ -2,13 +2,43 @@ import { useEffect, useRef, useState } from "react";
 import { api, ApiError, type Me, type Role, type Session } from "@/api";
 import { AuthCard } from "@/components/auth-card";
 import {
-  GithubSigninBanner,
-  type GithubSigninOutcome,
-} from "@/components/github-signin-banner";
+  SigninBanner,
+  type SigninOutcome,
+} from "@/components/signin-banner";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import {
+  type AuthMethods,
+  noAccountLine,
+  passwordsOffLine,
+  type SsoMethod,
+} from "@/lib/auth-methods";
 import { handleFromAddress } from "@/lib/handle";
+import { rememberReturn, tabStorage } from "@/lib/return-to";
+
+/// Just before the browser leaves for a provider: keep where to come
+/// back to, or forget an older one. A click handler rather than part of
+/// the `href` — the address stays in this tab and never becomes a
+/// redirect parameter the server would have to honour.
+function leavingFor(next: string | undefined) {
+  return () => rememberReturn(tabStorage(), next);
+}
+
+/// "Continue with Okta": the company's identity provider, as a real
+/// link. A full-page leave, not a fetch — the flow goes out to the
+/// provider and comes back to the server's callback, and an anchor works
+/// with no script running. Primary, because when an operator has set
+/// single sign-on up it is the way in they mean people to use.
+function SsoLink(props: { sso: SsoMethod; next?: string }) {
+  return (
+    <Button asChild size="lg" className="w-full">
+      <a href={props.sso.start} onClick={leavingFor(props.next)}>
+        Continue with {props.sso.name}
+      </a>
+    </Button>
+  );
+}
 
 /// Redeeming a password-reset link.
 ///
@@ -17,6 +47,58 @@ import { handleFromAddress } from "@/lib/handle";
 /// a dead link means: saying "try again" about a link that can never
 /// work again sends somebody round a loop.
 export function ResetPassword(props: {
+  token: string;
+  methods: AuthMethods;
+  onDone: (me: Me) => void;
+  onDismissed: () => void;
+}) {
+  if (!props.methods.password) {
+    return (
+      <PasswordsOff
+        methods={props.methods}
+        blurb={`Passwords are not used to sign in here, so this reset link has nothing to reset.${
+          props.methods.sso
+            ? ""
+            : " Ask whoever runs this server how to sign in."
+        }`}
+        onDismissed={props.onDismissed}
+      />
+    );
+  }
+  return <ResetPasswordForm {...props} />;
+}
+
+/// A screen that exists only for passwords, on a server that has
+/// switched them off: a reset link from before the switch, still in
+/// somebody's inbox. Says so, and offers the way in there is — not a
+/// form whose every submission is refused.
+function PasswordsOff(props: {
+  methods: AuthMethods;
+  blurb: string;
+  onDismissed: () => void;
+}) {
+  const { sso } = props.methods;
+  return (
+    <div className="flex min-h-screen items-center justify-center px-5">
+      <div className="w-full max-w-sm rounded-xl border border-borderline bg-surface-1 p-6 shadow-[var(--shadow-1)]">
+        <h1 className="mb-1 text-lg font-semibold tracking-tight">
+          {passwordsOffLine(props.methods)}
+        </h1>
+        <p className="mb-5 text-sm text-ink-3">{props.blurb}</p>
+        {sso && <SsoLink sso={sso} />}
+        <button
+          type="button"
+          className="mt-3 w-full text-xs text-ink-3 underline-offset-2 hover:text-ink-2 hover:underline"
+          onClick={props.onDismissed}
+        >
+          Go to sign in
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function ResetPasswordForm(props: {
   token: string;
   onDone: (me: Me) => void;
   onDismissed: () => void;
@@ -108,13 +190,25 @@ export function ResetPassword(props: {
 /// same reason sign-in answers identically for a wrong password and an
 /// unknown address. An existing account that accepts through the long
 /// form simply has its name, password and handle ignored.
+///
+/// A third shape, on a server that takes no passwords: nobody signed in
+/// can be given an account here by choosing one, and the server refuses
+/// the long form for exactly that reason. The company's identity
+/// provider makes the account instead, so the screen says to sign in
+/// with it and come back to this link — the round trip out to the
+/// provider cannot carry the link home, because the link lives in the
+/// fragment, which never leaves this browser.
 export function AcceptInvite(props: {
   token: string;
   me: Me | null;
+  methods: AuthMethods;
   onAccepted: (me: Me) => void;
   onDismissed: () => void;
 }) {
-  const { token, me } = props;
+  const { token, me, methods } = props;
+  // Signed out on a server with no passwords: nothing to type, and no
+  // way to accept from here.
+  const signInFirst = !me && !methods.password;
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
   const [handle, setHandle] = useState("");
@@ -206,11 +300,16 @@ export function AcceptInvite(props: {
               ? `${invitation.email} was invited as ${invitation.role}.${
                   me
                     ? ` Accepting adds ${me.email}, the account you are signed in as.`
-                    : " Choose a password and you're in. The link works once."
+                    : signInFirst
+                      ? ` ${passwordsOffLine(methods)}. Sign in${
+                          methods.sso ? ` with ${methods.sso.name}` : ""
+                        }, then open this link again.`
+                      : " Choose a password and you're in. The link works once."
                 }`
               : "Checking your invitation…"}
         </p>
-        {!me && !dead && (
+        {signInFirst && !dead && methods.sso && <SsoLink sso={methods.sso} />}
+        {!me && !signInFirst && !dead && (
           <>
             <Label htmlFor="name">Your name</Label>
             <Input
@@ -287,7 +386,7 @@ export function AcceptInvite(props: {
             {error}
           </p>
         )}
-        {!dead && (
+        {!dead && !signInFirst && (
           <Button size="lg" className="w-full" disabled={busy || !invitation}>
             {busy ? "Accepting…" : "Accept invitation"}
           </Button>
@@ -297,7 +396,7 @@ export function AcceptInvite(props: {
           className="mt-3 w-full text-xs text-ink-3 underline-offset-2 hover:text-ink-2 hover:underline"
           onClick={props.onDismissed}
         >
-          {dead
+          {dead || signInFirst
             ? "Go to sign in"
             : me
               ? "Not now"
@@ -327,25 +426,51 @@ const AUTH_HEADINGS: Record<"person" | "token" | "forgot", [string, string]> =
 /// a browser hands a long-lived credential to every script on the page;
 /// a session cookie is HttpOnly and cannot be read at all.
 ///
-/// There is no way to make an account here. Accounts on this server are
-/// made by an organization's invitation or by whoever runs the server,
-/// and the screen says so where "Create an account" used to be — a
-/// visitor with no account has to be told who to ask, not left hunting
-/// for a door that is not there.
+/// What the person path offers is the server's to say
+/// (`GET /v1/auth/methods`): the company's identity provider when one is
+/// configured, GitHub when it is allowed, and the email-and-password
+/// form when passwords are on. A way in the server will refuse is not
+/// drawn — a form whose every submission is a 403 is a door painted on a
+/// wall. The token path is offered whatever that answer is: a token is a
+/// machine credential, single sign-on leaves tokens alone, and it is the
+/// one way in a script has.
+///
+/// There is no form here for making an account. With single sign-on the
+/// company's identity provider makes one the first time somebody signs
+/// in with it; without, accounts are made by an organization's
+/// invitation or by whoever runs the server. The screen says which,
+/// where "Create an account" used to be — a visitor with no account has
+/// to be told how to get one, not left hunting for a door that is not
+/// there.
 export function Login(props: {
+  /// How this server lets a person sign in. Always an answer: a server
+  /// that could not say is read as offering what every server did before
+  /// it could (see `lib/auth-methods.ts`).
+  methods: AuthMethods;
   onSignedIn: (s: Session, me: Me | null) => void;
-  /// How a trip through GitHub came back, when it came back refused.
+  /// How a trip through GitHub or the company's identity provider came
+  /// back, when it came back refused.
   ///
   /// Every one of those redirects lands *here*, signed out, so this is
   /// the only screen that can say what happened. The signed-in shell's
   /// banner never sees them.
-  githubOutcome?: GithubSigninOutcome | null;
+  outcome?: SigninOutcome | null;
   /// A sentence above the form saying why the person is here, when the
   /// page they came from knows: an install that began on GitHub lands
   /// signed-out visitors here with an installation waiting.
   notice?: string;
+  /// Where signing in returns to, when this screen is `/login?next=…`.
+  /// The password form goes there itself; a provider's round trip takes
+  /// it along in this tab (`lib/return-to.ts`).
+  next?: string;
 }) {
-  const [mode, setMode] = useState<"person" | "token" | "forgot">("person");
+  const { methods } = props;
+  const { sso } = methods;
+  const [chosen, setMode] = useState<"person" | "token" | "forgot">("person");
+  // Forgetting a password is a mode only a server that takes passwords
+  // has. Nothing offers it otherwise; this makes it impossible rather
+  // than merely unoffered.
+  const mode = chosen === "forgot" && !methods.password ? "person" : chosen;
   const [note, setNote] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -354,8 +479,21 @@ export function Login(props: {
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
+  // The person path, piece by piece. Each is drawn only when the server
+  // will honour it.
+  const passwordForm = mode === "forgot" || (mode === "person" && methods.password);
+  const providers = mode === "person" && (sso !== null || methods.github);
+  // Nothing at all a person could use. Not a configuration anybody
+  // means to run, but a screen with a heading and nothing under it
+  // would read as broken rather than as refused.
+  const noWayIn =
+    mode === "person" && !methods.password && !methods.github && !sso;
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
+    // A screen with no field has nothing to send. The form is still a
+    // form — the other modes are — so Enter must not post an empty one.
+    if (mode === "person" && !methods.password) return;
     setBusy(true);
     setError(null);
     setNote(null);
@@ -443,42 +581,61 @@ export function Login(props: {
           </h1>
           <p className="mt-1 text-sm text-ink-3">{AUTH_HEADINGS[mode][1]}</p>
         </div>
-        {props.githubOutcome && (
-          <GithubSigninBanner outcome={props.githubOutcome} />
+        {props.outcome && (
+          <SigninBanner outcome={props.outcome} methods={methods} />
         )}
-        {/* Above the form rather than below it. It signs in to an
-            account this server already has, found by the address GitHub
-            has proved; it never makes one. A full-page link, not a
-            fetch — the flow leaves for GitHub and comes back to our
+        {/* Above the form rather than below it, and only on the person
+            path: the other modes of the screen are not ways to sign in
+            with a provider. The company's identity provider comes first
+            and is the primary button — an operator who set it up means
+            it to be the way in. GitHub signs in to an account this
+            server already has, found by the address GitHub has proved;
+            it never makes one. Both are full-page links, not fetches:
+            the flow leaves for the provider and comes back to our
             callback, and an anchor works with no script running. */}
-        {mode === "person" && (
-          <>
-            <Button asChild size="lg" variant="outline" className="w-full">
-              <a href="/v1/auth/github/start">
-                <svg
-                  width="16"
-                  height="16"
-                  viewBox="0 0 16 16"
-                  fill="currentColor"
-                  aria-hidden
+        {providers && (
+          <div className="flex flex-col gap-3">
+            {sso && <SsoLink sso={sso} next={props.next} />}
+            {methods.github && (
+              <Button asChild size="lg" variant="outline" className="w-full">
+                <a
+                  href="/v1/auth/github/start"
+                  onClick={leavingFor(props.next)}
                 >
-                  <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
-                </svg>
-                Continue with GitHub
-              </a>
-            </Button>
-            {/* The rules sit against the word, so the word gets an
-                element of its own: bare text touching an inline tag
-                reads as one run to anything that strips markup, which
-                is what the walkthrough's layout audit reports. */}
-            <div className="my-4 flex items-center gap-3 text-xs text-ink-3">
-              <span className="h-px flex-1 bg-borderline" aria-hidden />
-              <span>or</span>
-              <span className="h-px flex-1 bg-borderline" aria-hidden />
-            </div>
-          </>
+                  <svg
+                    width="16"
+                    height="16"
+                    viewBox="0 0 16 16"
+                    fill="currentColor"
+                    aria-hidden
+                  >
+                    <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82a7.4 7.4 0 0 1 2-.27c.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8Z" />
+                  </svg>
+                  Continue with GitHub
+                </a>
+              </Button>
+            )}
+          </div>
         )}
-        {mode === "person" || mode === "forgot" ? (
+        {/* The rules sit against the word, so the word gets an element
+            of its own: bare text touching an inline tag reads as one run
+            to anything that strips markup, which is what the
+            walkthrough's layout audit reports. Only between two things:
+            with nothing on one side, "or" is a question with one answer. */}
+        {providers && passwordForm && (
+          <div className="my-4 flex items-center gap-3 text-xs text-ink-3">
+            <span className="h-px flex-1 bg-borderline" aria-hidden />
+            <span>or</span>
+            <span className="h-px flex-1 bg-borderline" aria-hidden />
+          </div>
+        )}
+        {noWayIn && (
+          <p className="mb-3 text-sm text-ink-2" role="status">
+            This server offers no way to sign in from a browser. Ask whoever
+            runs this server.
+          </p>
+        )}
+        {passwordForm ? (
           <>
             <Label htmlFor="email">Email</Label>
             <Input
@@ -507,7 +664,7 @@ export function Login(props: {
               </>
             )}
           </>
-        ) : (
+        ) : mode === "token" ? (
           <>
             <Label htmlFor="org">Organization</Label>
             <Input
@@ -530,7 +687,7 @@ export function Login(props: {
               required
             />
           </>
-        )}
+        ) : null}
         {error && (
           <p className="mb-3 text-sm text-serious" role="alert">
             {error}
@@ -541,16 +698,28 @@ export function Login(props: {
             {note}
           </p>
         )}
-        <Button size="lg" className="w-full" disabled={busy}>
-          {busy
-            ? "Checking…"
-            : mode === "forgot"
-              ? "Send a reset link"
-              : "Sign in"}
-        </Button>
+        {(passwordForm || mode === "token") && (
+          <Button
+            size="lg"
+            // One primary per screen: beside the company's identity
+            // provider, the password form is the other way in, not the
+            // one this server means.
+            variant={mode === "person" && sso ? "outline" : "default"}
+            className="w-full"
+            disabled={busy}
+          >
+            {busy
+              ? "Checking…"
+              : mode === "forgot"
+                ? "Send a reset link"
+                : "Sign in"}
+          </Button>
+        )}
         {[
           mode === "person"
-            ? { to: "forgot" as const, label: "Forgot your password?" }
+            ? methods.password
+              ? { to: "forgot" as const, label: "Forgot your password?" }
+              : null
             : { to: "person" as const, label: "Sign in instead" },
           mode === "person"
             ? {
@@ -560,7 +729,11 @@ export function Login(props: {
             : mode === "token"
               ? {
                   to: "person" as const,
-                  label: "Sign in with email and password",
+                  label: methods.password
+                    ? "Sign in with email and password"
+                    : sso
+                      ? `Sign in with ${sso.name} instead`
+                      : "Sign in as a person instead",
                 }
               : null,
         ]
@@ -581,9 +754,7 @@ export function Login(props: {
           ))}
         {mode === "person" && (
           <p className="mt-4 border-t border-borderline pt-4 text-sm text-ink-2">
-            No account yet? Accounts on this server are made by invitation.
-            Ask an admin of your organization to invite you, or whoever runs
-            this server to add you, then use the link in the email.
+            {noAccountLine(methods)}
           </p>
         )}
         <p className="mt-3 text-xs text-ink-3">

@@ -324,6 +324,32 @@ The server's SMTP client has no STARTTLS and refuses to send credentials
 to anything but loopback unless `STRATUM_MAIL_SMTP_ALLOW_CLEARTEXT_AUTH`
 is `1`; only do that for a relay inside your network.
 
+### 10. Single sign-on (optional)
+
+Register the server with your identity provider as
+[operations.md](operations.md#single-sign-on) describes — the callback is
+`https://<domain_name>/v1/auth/sso/callback` — and pass the settings the
+same way, the client secret from a secret of your own:
+
+```hcl
+extra_environment = {
+  STRATUM_OIDC_ISSUER    = "https://login.microsoftonline.com/<tenant-id>/v2.0"
+  STRATUM_OIDC_CLIENT_ID = "<application-id>"
+  STRATUM_OIDC_ORG       = "acme"
+  STRATUM_OIDC_NAME      = "Microsoft"
+  STRATUM_OIDC_ALLOWED_DOMAINS = "acme.com"
+}
+extra_secrets = {
+  STRATUM_OIDC_CLIENT_SECRET = "arn:aws:secretsmanager:us-east-1:111111111111:secret:oidc-client-AbCdEf"
+}
+```
+
+With SSO configured, signing in with a password is off unless
+`STRATUM_SSO_ONLY = "false"` says otherwise. Make the first owner with
+`deploy/admin-ecs.sh user-create --org acme --email you@acme.com
+--no-password` before signing in, so that the first SSO sign-in finds
+an owner rather than making a member.
+
 ## Deploying a new version
 
 Terraform creates the service; it does not roll it afterwards.

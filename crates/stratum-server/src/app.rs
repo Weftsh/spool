@@ -54,6 +54,15 @@ pub struct AppState {
     /// this server has no App to connect, and the connect flow says so
     /// rather than offering a dead link.
     pub github_install_url: Option<String>,
+    /// Single sign-on with the company's OpenID Connect provider, when
+    /// configured (`STRATUM_OIDC_*`).
+    pub sso: Option<Arc<crate::oidc::Oidc>>,
+    /// Whether SSO is the only way in (`STRATUM_SSO_ONLY`, on by default
+    /// when SSO is configured): password sign-in and GitHub sign-in are
+    /// both off, so somebody switched off at the company's provider
+    /// cannot keep signing in another way. Tokens, SSH keys and git are
+    /// untouched.
+    pub sso_only: bool,
     pub data_dir: std::path::PathBuf,
     /// Built dashboard SPA (Vite dist) served at `/dashboard/`.
     pub dashboard_dir: Option<std::path::PathBuf>,
@@ -200,6 +209,12 @@ pub fn router(state: SharedState) -> Router {
         // `/v1/github/setup` is: the caller is a browser mid-redirect,
         // and the anti-CSRF state — a cookie here, a row there — is the
         // only credential either one has.
+        .route("/v1/auth/methods", get(crate::api::sso_api::methods))
+        // Single sign-on. Unauthenticated for the reason GitHub's are: the
+        // caller is a browser mid-redirect, and the state cookie is the
+        // only credential it has.
+        .route("/v1/auth/sso/start", get(crate::api::sso_api::start))
+        .route("/v1/auth/sso/callback", get(crate::api::sso_api::callback))
         .route("/v1/auth/github/start", get(crate::api::github_auth::start))
         .route(
             "/v1/auth/github/callback",
@@ -1638,7 +1653,13 @@ pub fn state_from_env() -> Result<SharedState, String> {
         .and_then(|v| v.parse::<usize>().ok())
         .unwrap_or(256)
         .saturating_mul(1024 * 1024);
+    // Checked at boot, loudly — but discovery is not fetched here: a
+    // provider that is down must not stop this server starting.
+    let sso_cfg = crate::oidc::config_from(|k| std::env::var(k).ok())?;
+    let sso_only = crate::oidc::sso_only_from(|k| std::env::var(k).ok(), sso_cfg.is_some())?;
     Ok(Arc::new(AppState {
+        sso: sso_cfg.map(|c| Arc::new(crate::oidc::Oidc::new(c))),
+        sso_only,
         db,
         store: Arc::new(stratum_store::ObjectStore::new(
             &store_url,

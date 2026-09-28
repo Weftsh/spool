@@ -2,9 +2,11 @@
 
 There are two kinds of caller, and the difference decides everything else.
 
-A **person** signs in with an email address and a password and gets an
-HttpOnly session cookie. That is how the dashboard works; no script on
-the page can read the credential.
+A **person** signs in — through your company's identity provider when
+the server is [configured for single sign-on](#single-sign-on), with an
+email address and a password otherwise — and gets an HttpOnly session
+cookie. That is how the dashboard works; no script on the page can read
+the credential.
 
 A **machine** — CI, a script, `git` itself — sends a bearer token of the
 form `weft_<id>_<secret>`. Only a hash of the secret is stored; the
@@ -170,6 +172,9 @@ For somebody who already has an account on this server, only `invite`
 matters: the account joins the organization at the invited role, keeps
 its password and its handle, and is signed in.
 
+On a server that signs in with [SSO only](#sso-only), accepting needs
+the invited person to be signed in already, and makes nobody new.
+
 The **handle** is the new account's personal namespace — the `you` in
 `/you/repo`. It holds repositories of the person's own, such as their
 [forks](forks.md), and nobody else's: a personal namespace cannot have
@@ -207,8 +212,8 @@ AWS, use `ses`, which is HTTPS.
 
 ## How people get accounts
 
-There is no signing yourself up. An account comes from one of two
-places, and both prove its address on the way in:
+There is no signing yourself up. An account comes from one of three
+places, and each proves its address on the way in:
 
 - **An invitation** from an admin of an organization, [accepted](#accepting-an-invitation)
   by the person it was mailed to.
@@ -225,12 +230,17 @@ places, and both prove its address on the way in:
   which is otherwise made from the address exactly as an invitation
   makes it. Run against an address that already has an account, it adds
   that account to the organization instead.
+- **Your company's identity provider**, when the server is configured
+  for [single sign-on](#single-sign-on). Anybody the provider signs in
+  gets an account on their first visit — the provider is where people
+  are admitted and turned away, not this server.
 
 ### Signing in with GitHub
 
 When your server has a GitHub App configured, the sign-in screen offers
-**Continue with GitHub**. It signs you in to an account you already
-have here; it never makes one. The round trip is the ordinary OAuth
+**Continue with GitHub** — unless it signs in with [SSO only](#sso-only),
+when GitHub sign-in is off too. It signs you in to an account you
+already have here; it never makes one. The round trip is the ordinary OAuth
 one — `GET /v1/auth/github/start` sends you to GitHub's authorization
 screen and GitHub returns you to `GET /v1/auth/github/callback`, which
 redirects back into the dashboard with the outcome in `?github=`.
@@ -252,6 +262,92 @@ GitHub's **numeric user id**, never your login. After it, the address no
 longer matters: renaming yourself on GitHub, or changing your primary
 address there, still lands you on your own account, and whoever claims
 your old login next gets nothing.
+
+### Single sign-on
+
+With single sign-on configured, the sign-in screen offers **Continue
+with** your provider — Okta, Entra ID, Google Workspace, Keycloak, or
+anything else that speaks OpenID Connect. The operator's side of it is
+in [operations.md](../operations.md#single-sign-on); this is what it
+does for the people signing in.
+
+`GET /v1/auth/sso/start` sends you to the provider, and the provider
+returns you to `GET /v1/auth/sso/callback`, which redirects back into
+the dashboard with the outcome in `?sso=`:
+
+| Outcome | Means |
+|---|---|
+| `ok` | signed in |
+| `denied` | you cancelled at the provider |
+| `expired` | the round trip took too long, was started in another browser, or its code was already used — start again |
+| `noemail` | the provider did not give an address this server trusts, so there is no account to find or make |
+| `domain` | the address is outside the domains the operator said this provider speaks for |
+| `disabled` | your account here has been switched off |
+| `unavailable` | this server has no single sign-on |
+| `error` | the provider did not answer, or answered something that did not check out; the server's log says which |
+
+**Which account you land on**, in this order:
+
+1. The one already linked to you at this provider. The link is keyed on
+   the provider's own immutable id for you (`sub`), never on an address
+   or a username — both of which the provider lets people change — so a
+   renamed address still lands on the same account.
+2. The account that signs in with your address, or has proved it as
+   one of its own. This is how people who had a password account before
+   SSO was switched on keep everything they had: their first SSO
+   sign-in links them, and their role in every organization is
+   untouched.
+3. Nobody yet: a new account, with your address proved, a
+   [handle](#accepting-an-invitation) made from your provider username
+   or your address, and membership of the one organization the
+   operator named, at the role the operator chose (`member` unless they
+   said otherwise).
+
+That last step happens once. Somebody an administrator takes out of the
+organization afterwards is not put back into it the next time they sign
+in: they still have an account, with nothing in it.
+
+**Which addresses are trusted.** An address is only used to find or
+make an account when the provider vouches for it — it marks it
+`email_verified`, or the operator has named the domains this provider
+speaks for and the address is in one of them. A provider that
+explicitly says an address is *not* verified is believed. With a domain
+list, nothing outside it gets in, not even a person already linked.
+
+**Sessions last twelve hours** by default, not a password session's
+fourteen days, and the next sign-in after that is a trip to the
+provider, which usually needs no typing at all. The provider is where
+people are switched off, and a session this server minted keeps working
+until it expires; twelve hours means somebody disabled there is out by
+the next working day.
+
+#### SSO only
+
+When single sign-on is configured, **it is the only way into the
+dashboard** unless the operator says otherwise. Every other door is
+closed:
+
+- signing in with a password, changing it, and the forgotten-password
+  pair all answer `403` naming the provider;
+- signing in with GitHub redirects back with `?github=unavailable`;
+- accepting an invitation needs you to be signed in through the provider
+  as the invited address first, and joins that account to the
+  organization rather than making a new one — so an invitation is how an
+  administrator adds somebody to a *second* organization, or at a
+  different role.
+
+A password or a linked GitHub account would otherwise let somebody the
+company switched off at its provider keep signing in here.
+
+**Tokens and SSH keys are not sign-ins**, and keep working: they are
+how `git`, CI and scripts reach the server, and they are not sessions.
+The other side of that is offboarding. Disabling somebody at the
+provider stops their next sign-in, and their session runs out within
+the session length, but a personal access token or an SSH key they made
+keeps working until it is revoked or the account is disabled here —
+which is what `stratum-server admin user-disable` is for (see
+[Offboarding](../operations.md#offboarding)). Run it as part of the
+same checklist as the provider.
 
 ### Forgotten passwords
 

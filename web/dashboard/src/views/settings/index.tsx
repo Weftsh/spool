@@ -18,13 +18,17 @@ import { TokensPanel } from "@/views/settings/tokens";
 export function SettingsView(props: {
   session: Session;
   me: Me | null;
+  /// Whether this server takes passwords. Without them there is no
+  /// Password section to open, and a link to one lands on the first
+  /// section instead.
+  passwords: boolean;
   section: string | undefined;
   navigate: (to: string, replace?: boolean) => void;
 }) {
   const { session, me } = props;
   const role = me?.orgs.find((o) => o.name === session.org)?.role;
   const admin = role === "owner" || role === "admin" || me === null;
-  const sections = settingsSections(me, session.org);
+  const sections = settingsSections(me, session.org, props.passwords);
   const current = sections.find((s) => s.slug === props.section);
 
   const fallback = sections[0].slug;
@@ -49,7 +53,9 @@ export function SettingsView(props: {
       return <SshKeysPanel session={session} isAdmin={admin} />;
     case "emails":
       return <EmailsPanel session={session} me={me} />;
-    default:
+    case "password":
       return <PasswordPanel />;
+    default:
+      return null;
   }
 }

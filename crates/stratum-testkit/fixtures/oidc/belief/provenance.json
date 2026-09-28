@@ -1,0 +1,23 @@
+{
+  "allowed_domains": [],
+  "claim_names": [
+    "aud",
+    "email",
+    "email_verified",
+    "exp",
+    "iat",
+    "iss",
+    "name",
+    "nonce",
+    "sub"
+  ],
+  "client_auth": "basic",
+  "client_id": "spool-client",
+  "family": "belief",
+  "issuer": "https://other.example.test/issuer",
+  "nonce": "recorded-nonce",
+  "note": "NOT observed: what stratum-testkit's fake provider answers, recorded by running scripts/manual-oidc.sh all against it (the fake-oidc binary). Every other directory here is a real provider, written by `fixtures`; until one exists, the fixture test holds the server to this belief and says so.",
+  "observed": false,
+  "recorded_at": null,
+  "trust": "email"
+}

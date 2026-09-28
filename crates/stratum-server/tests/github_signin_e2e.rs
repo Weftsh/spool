@@ -153,6 +153,14 @@ fn an_identity_that_matches_nobody_here_makes_no_account() {
     let out = server.github_signin("code_as_501_ada");
     assert_eq!(out.outcome, "ok", "{}", out.location);
     assert!(out.session.is_some());
+    // The state cookie is spent by arriving, on a sign-in as on a
+    // refusal. It used to survive every successful one: the response set
+    // two cookies as an array of pairs, and axum inserts each pair, so
+    // the session replaced the clearing.
+    assert!(
+        out.state_cleared,
+        "a signed-in browser kept its spent state cookie"
+    );
 
     assert!(server.healthy(), "still serving");
 }

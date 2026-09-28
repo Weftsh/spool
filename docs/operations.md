@@ -90,6 +90,12 @@ and gives it a personal namespace. Sign in to the dashboard with it and
 invite everyone else from there; invitations are mailed, so configure
 [mail](#mail) first or hand the invitation link over yourself.
 
+With [single sign-on](#single-sign-on) there is nobody to invite: people
+arrive through your identity provider. Make only the first owner, with
+the address they sign in to the provider with and no password —
+`user-create --org acme --email you@example.com --no-password` — and
+their first SSO sign-in finds that account and keeps its role.
+
 With the compose file, prefix each command with `docker compose exec
 spool`; on AWS, use `deploy/admin-ecs.sh` (see [Operator CLI](#operator-cli)).
 
@@ -143,6 +149,19 @@ Everything is an environment variable. Unset means the default.
 | `STRATUM_GITHUB_CLIENT_ID` / `STRATUM_GITHUB_CLIENT_SECRET` | *(unset)* | The App's OAuth client, both or neither. Set, the install callback proves the person connecting an installation controls it, and signing in with GitHub works. Unset, the callback trusts the installation id it is given and sign-in with GitHub is off. |
 | `STRATUM_GITHUB_INSTALL_URL` | *(unset)* | `https://github.com/apps/<slug>/installations/new`. What the dashboard's **Connect GitHub** button sends people to; unset, that button answers 501. |
 | `STRATUM_GITHUB_API_BASE` / `STRATUM_GITHUB_GIT_BASE` / `STRATUM_GITHUB_OAUTH_BASE` | github.com | Overrides for GitHub Enterprise Server. |
+
+### Single sign-on (OpenID Connect)
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STRATUM_OIDC_ISSUER` | *(unset)* | The provider's issuer URL, exactly as its discovery document spells it. Setting this, the client id and the secret together turns single sign-on on; any one without the others refuses to boot. `https://` only, except to this machine. |
+| `STRATUM_OIDC_CLIENT_ID` / `STRATUM_OIDC_CLIENT_SECRET` | — | The client you registered at the provider. |
+| `STRATUM_OIDC_ORG` | *(required with SSO)* | The organisation everybody arriving by SSO for the first time joins. It need not exist at boot; a sign-in before it does ends at `sso=error` naming it. |
+| `STRATUM_OIDC_ROLE` | `member` | Their role in it: `viewer`, `member`, `admin` or `owner`. |
+| `STRATUM_OIDC_ALLOWED_DOMAINS` | *(unset)* | Comma-separated. Addresses at these domains are trusted without the provider's `email_verified`, and no other address gets in. Required for Google. |
+| `STRATUM_OIDC_NAME` | `SSO` | What the sign-in button says after **Continue with**, at most 40 characters. |
+| `STRATUM_OIDC_SESSION_HOURS` | `12` | How long a session begun through the provider lasts, 1–336. |
+| `STRATUM_SSO_ONLY` | `true` with SSO | Whether SSO is the only way into the dashboard: password and GitHub sign-in are off. `false` keeps them alongside. `true` without SSO configured refuses to boot. |
 
 ### Webhooks
 
@@ -370,6 +389,119 @@ installation's owner approves it on GitHub. Until then pushes to those
 mirrors are refused with a message naming the missing permission and a
 link to approve it.
 
+## Single sign-on
+
+Point the server at the identity provider your company already runs —
+Okta, Entra ID, Google Workspace, Keycloak, or anything else that speaks
+OpenID Connect — and people sign in with it. **Anybody the provider signs
+in gets an account** on their first visit, in the organisation
+`STRATUM_OIDC_ORG` names at the role `STRATUM_OIDC_ROLE` names: who may
+use the forge is decided where you already decide who works for you, by
+assigning the application to people or groups at the provider. A
+provider that lets anybody register themselves — a Keycloak realm with
+self-registration, a Google issuer without a domain list — is a forge
+anybody can join, so restrict the application to your people there, and
+set `STRATUM_OIDC_ALLOWED_DOMAINS` as a second fence. What signing in
+looks like for the person is in
+[guide/authentication.md](guide/authentication.md#single-sign-on).
+
+Register a **web application** (a confidential client, authorization
+code flow) with, `PUBLIC` standing for your `STRATUM_PUBLIC_URL`:
+
+| Setting | Value |
+|---|---|
+| Redirect (callback) URI | `PUBLIC/v1/auth/sso/callback` |
+| Scopes | `openid email profile` |
+| Token endpoint authentication | client secret, Basic or POST — the server uses whichever the provider's discovery offers, Basic first |
+| ID token signing | RS256 (every provider's default) |
+
+and configure the server:
+
+```sh
+STRATUM_OIDC_ISSUER=https://acme.okta.com
+STRATUM_OIDC_CLIENT_ID=0oa…
+STRATUM_OIDC_CLIENT_SECRET=…
+STRATUM_OIDC_ORG=acme
+STRATUM_OIDC_NAME=Okta
+```
+
+Then, with the same environment the server runs with (`docker compose
+exec spool …`, or `deploy/admin-ecs.sh` on AWS), ask the provider
+everything that needs no person at a browser:
+
+```sh
+stratum-server admin sso-check
+```
+
+It fetches discovery and the signing keys through the server's own
+checks, looks up the organisation, and trades a made-up code at the
+token endpoint: `invalid_grant` back means the provider took the client
+credentials and refused only the code, `invalid_client` that it refused
+the credentials. One JSON line names each part and whether it passed,
+and the exit status is non-zero when any did not.
+
+The provider is found and checked when somebody first signs in, not at
+boot, so a provider that is briefly down does not stop the server
+starting; the sign-in screen's button answers `sso=error` until it is
+back, and the log says why. So does a secret the provider refuses —
+every sign-in would fail the same way, so it is not reported to the
+person as a round trip to start again.
+
+Per provider:
+
+- **Okta** — the issuer is your org URL, `https://<you>.okta.com`, or a
+  custom authorization server's, `https://<you>.okta.com/oauth2/default`.
+  Okta puts `email` and `email_verified` in the ID token for the `email`
+  scope, which is all the server needs.
+- **Entra ID** — the issuer is your tenant's,
+  `https://login.microsoftonline.com/<tenant-id>/v2.0`. The shared
+  endpoints (`common`, `organizations`, `consumers`) are refused at boot:
+  they sign in any Microsoft account. Entra sends no `email_verified`
+  and, by default, no `email` in the ID token (the server asks userinfo
+  for it), so set `STRATUM_OIDC_ALLOWED_DOMAINS` to your tenant's
+  domains, or nobody new can be given an account. That tells the server
+  to trust your tenant's administrators for those addresses, which is
+  who sets them.
+- **Google Workspace** — the issuer is `https://accounts.google.com`,
+  which is every Google account on earth, so the server refuses to boot
+  without `STRATUM_OIDC_ALLOWED_DOMAINS`, and admits only accounts whose
+  Workspace (`hd`) is one of those domains — a personal Gmail account
+  whose address happens to be at your domain is not one of yours.
+- **Keycloak** — the issuer is the realm's,
+  `https://<host>/realms/<realm>`. Keycloak says `email_verified: false`
+  for an address nobody has confirmed, and the server believes it
+  whatever the domain list says, so turn on *Verify email* for the realm
+  or have an administrator mark addresses verified.
+
+**Existing accounts** — made by `user-create` or an invitation before SSO
+was switched on — are found by address the first time their owner signs
+in through the provider, and keep every role they had. After that the
+account is tied to the provider's own id for the person (its `sub`), not
+the address.
+
+**Only SSO, by default.** With SSO configured, password sign-in,
+forgotten-password links, changing a password and signing in with
+GitHub are all off: otherwise somebody switched off at the provider
+could keep signing in with a password they still know.
+`STRATUM_SSO_ONLY=false` keeps them alongside SSO.
+
+**Break glass.** When the provider is down or misconfigured and nobody
+can sign in, restart the server with `STRATUM_SSO_ONLY=false`; every
+account that has a password can use it again. An account made by SSO
+has none — `forgot-password` gives it one, or make a separate
+break-glass owner with `user-create --password …` ahead of time and keep
+its password where your other emergency credentials live. Put
+`STRATUM_SSO_ONLY` back when you are done.
+
+**Offboarding with SSO.** Switching somebody off at the provider stops
+their next sign-in, and a session they already hold ends within
+`STRATUM_OIDC_SESSION_HOURS` (twelve by default) — sessions begun before
+SSO was switched on keep their fourteen days. It does **not** reach
+their personal access tokens or SSH keys: those are how `git` and
+scripts sign in, and the provider is never asked about them. Run
+[`user-disable`](#offboarding) as part of the same checklist; it ends
+all of it at once.
+
 ## Self-hosted runners
 
 `.weft/` workflows run on runners you register: the `weft-runner`
@@ -415,11 +547,13 @@ that can reach the database. Each command prints one JSON line.
 stratum-server admin bootstrap --org NAME            # organisation + org:admin token
 stratum-server admin mint --org NAME --scopes repo:read[,repo:write,org:read,org:admin] \
     [--repo NAME] [--label L]                        # an API token
-stratum-server admin user-create --org NAME --email ADDR --password SECRET \
+stratum-server admin user-create --org NAME --email ADDR \
+    (--password SECRET | --no-password) \
     [--name N] [--role R] [--handle H]               # an account, added to the org
 stratum-server admin user-disable --email ADDR       # offboarding
 stratum-server admin user-enable  --email ADDR       # …and undoing it
 stratum-server admin repair-identities [--dry-run]   # accounts missing a handle
+stratum-server admin sso-check                       # ask the SSO provider, before anybody signs in
 ```
 
 - **Where to run it.** In the compose stack, `docker compose exec spool
@@ -430,11 +564,15 @@ stratum-server admin repair-identities [--dry-run]   # accounts missing a handle
 - **Tokens** are shown once at mint and stored only as SHA-256 hashes.
   Revoking one (`DELETE /v1/orgs/{org}/tokens/{id}`, or the dashboard) is
   immediate; there is no verification cache.
-- **`user-create`** is one of the two ways an account is made — the
-  other is an invitation; nobody signs themselves up. On an address that
-  already has an account it adds the membership instead of failing. It
-  derives a handle from the address (`dev.eloper@` becomes
-  `dev-eloper`); `--handle` picks another when that one is taken.
+- **`user-create`** is one of the ways an account is made — the others
+  are an invitation and, when it is configured, single sign-on; nobody
+  signs themselves up. On an address that already has an account it adds
+  the membership instead of failing. It derives a handle from the
+  address (`dev.eloper@` becomes `dev-eloper`); `--handle` picks another
+  when that one is taken. `--no-password` makes an account that signs in
+  only through [single sign-on](#single-sign-on) (or after a reset link);
+  one of it and `--password` is required, so an account nobody can sign
+  in to is never made by leaving a flag out.
 - **`repair-identities`** gives a handle and personal namespace to any
   account made without one (by an older `user-create`). It names every
   account it could not repair and why; nothing is changed with
@@ -448,7 +586,9 @@ every request, and SSH keys stop authenticating through the same check.
 It is deliberately not a delete — the audit trail names people by id —
 so memberships are kept and `user-enable` restores exactly what they had.
 Deploy keys and organisation service tokens belong to nobody and keep
-working.
+working. A disabled account cannot sign in through
+[single sign-on](#single-sign-on) either: the provider still vouching
+for the person does not switch the account back on.
 
 ## Health, readiness, metrics
 
@@ -484,8 +624,11 @@ claimed; the `jobs` table in the database says which.
 
 - **Accounts.** Nobody can make their own account. An account comes
   from an organisation admin's invitation, accepted by the person it
-  was mailed to, or from `admin user-create`; signing in with GitHub
-  only reaches an account that already exists. A signed-out visitor
+  was mailed to, from `admin user-create`, or — when you configure
+  [single sign-on](#single-sign-on) — from your identity provider
+  signing the person in, which makes the provider's list of who may use
+  this application the list of who has an account here. Signing in with
+  GitHub only reaches an account that already exists. A signed-out visitor
   cannot tell which organisations or people exist: a name nobody holds
   answers exactly as one they may not see. The sign-in page itself is
   still reachable by anybody who can reach the server, so keep it on a

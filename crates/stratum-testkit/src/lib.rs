@@ -18,6 +18,7 @@ pub mod gitcli;
 pub mod httpfake;
 pub mod mailbox;
 pub mod minio;
+pub mod oidc;
 pub mod pg;
 pub mod proxy;
 pub mod runner_bin;

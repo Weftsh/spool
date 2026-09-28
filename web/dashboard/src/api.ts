@@ -1658,6 +1658,13 @@ export const api = {
   logout(): Promise<void> {
     return raw("/v1/auth/logout", "", { method: "POST" });
   },
+  /// How this server lets a person sign in. Asked with no credential and
+  /// answered to anybody — it is what the sign-in screen is drawn from.
+  /// The body is read by `authMethodsOf`, which is also what decides
+  /// that a failure means today's screen rather than an empty one.
+  authMethods(): Promise<unknown> {
+    return raw("/v1/auth/methods", "");
+  },
   me(): Promise<Me> {
     return raw("/v1/auth/me", "");
   },

@@ -16,6 +16,7 @@ mod git_http;
 mod mail;
 mod metering;
 mod mirror;
+mod oidc;
 mod push;
 mod review;
 mod ssh;
@@ -152,7 +153,24 @@ fn admin(args: &[String]) -> Result<(), String> {
             // this arrives by invitation from someone already inside.
             let email = flag("--email").ok_or("--email ADDRESS required")?;
             let name = flag("--name").unwrap_or_else(|| email.clone());
-            let password = flag("--password").ok_or("--password SECRET required")?;
+            // One or the other, said out loud: an account with no password
+            // is right on a server that signs in with SSO — the first owner
+            // there would otherwise have to invent a secret nobody uses —
+            // and a quiet way to make an account nobody can sign in to
+            // anywhere else.
+            let password = match (
+                flag("--password"),
+                args.iter().any(|a| a == "--no-password"),
+            ) {
+                (Some(p), false) => Some(p),
+                (None, true) => None,
+                (Some(_), true) => return Err("--password and --no-password together".into()),
+                (None, false) => {
+                    return Err("--password SECRET required \
+                                (or --no-password, on a server that signs in with SSO)"
+                        .into())
+                }
+            };
             let org_name = flag("--org").ok_or("--org NAME required")?;
             let role_str = flag("--role").unwrap_or_else(|| "owner".into());
             let role = stratum_control::members::Role::parse(&role_str)
@@ -163,7 +181,7 @@ fn admin(args: &[String]) -> Result<(), String> {
             // one person, several orgs, is the normal case.
             let user = match stratum_control::users::by_email(&db, &email)? {
                 Some(u) => u,
-                None => stratum_control::users::create(&db, &email, &name, Some(&password))?,
+                None => stratum_control::users::create(&db, &email, &name, password.as_deref())?,
             };
             // A handle and a personal namespace, exactly as an invitation mints
             // them — because an account without one is not a whole
@@ -351,9 +369,89 @@ fn admin(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
+        "sso-check" => sso_check(&db),
         other => Err(format!(
             "unknown admin command {other:?} (bootstrap | mint | \
-             user-create | repair-identities | user-disable | user-enable)"
+             user-create | repair-identities | user-disable | user-enable | sso-check)"
         )),
+    }
+}
+
+/// `admin sso-check`: everything single sign-on needs that can be asked
+/// without a person at a browser, asked of the real provider with this
+/// server's own configuration and parsers — so an operator finds a
+/// wrong issuer, secret or organization before the first person does.
+///
+/// The client credentials are checked by trading a made-up code: a
+/// provider authenticates the client before it looks at the code, so
+/// `invalid_grant` means the credentials were taken and `invalid_client`
+/// that they were not.
+fn sso_check(db: &stratum_control::ControlDb) -> Result<(), String> {
+    use serde_json::json;
+    let cfg = oidc::config_from(|k| std::env::var(k).ok())?.ok_or(
+        "single sign-on is not configured: set STRATUM_OIDC_ISSUER, \
+         STRATUM_OIDC_CLIENT_ID and STRATUM_OIDC_CLIENT_SECRET",
+    )?;
+    let sso_only = oidc::sso_only_from(|k| std::env::var(k).ok(), true)?;
+    let bind = std::env::var("STRATUM_BIND").unwrap_or_else(|_| "127.0.0.1:8080".into());
+    let public = std::env::var("STRATUM_PUBLIC_URL").unwrap_or_else(|_| format!("http://{bind}"));
+    let callback = format!("{}/v1/auth/sso/callback", public.trim_end_matches('/'));
+    let issuer = cfg.issuer.clone();
+    let sso = oidc::Oidc::new(cfg);
+    let failed = |e: String| json!({ "ok": false, "error": e });
+
+    let organization = match sso.org_id(db) {
+        Ok(_) => json!({ "ok": true, "name": sso.cfg.org }),
+        Err(e) => failed(e),
+    };
+    let (discovery, keys, client) = match sso.discovery() {
+        Err(e) => {
+            let skipped = || failed("not asked: discovery failed".into());
+            (failed(e), skipped(), skipped())
+        }
+        Ok(d) => {
+            let keys = match sso.key_count(&d) {
+                Ok(n) => json!({ "ok": true, "count": n }),
+                Err(e) => failed(e),
+            };
+            let verifier = stratum_control::ids::token_secret();
+            let client = match sso.exchange(&d, "weft-sso-check-not-a-code", &callback, &verifier) {
+                Err(oidc::Exchange::Refused(answer)) => json!({ "ok": true, "answer": answer }),
+                Err(oidc::Exchange::Client(e)) => failed(format!(
+                    "the provider refused this server's client credentials: {e}"
+                )),
+                Err(oidc::Exchange::Unanswered(e)) => failed(e),
+                Ok(_) => failed("the provider accepted a made-up code".into()),
+            };
+            let discovery = json!({
+                "ok": true,
+                "authorization_endpoint": d.authorization_endpoint,
+                "token_endpoint": d.token_endpoint,
+                "userinfo_endpoint": d.userinfo_endpoint,
+                "client_auth": if d.basic_auth { "basic" } else { "post" },
+            });
+            (discovery, keys, client)
+        }
+    };
+    let ok = [&organization, &discovery, &keys, &client]
+        .iter()
+        .all(|v| v["ok"] == true);
+    println!(
+        "{}",
+        json!({
+            "ok": ok,
+            "issuer": issuer,
+            "callback": callback,
+            "sso_only": sso_only,
+            "organization": organization,
+            "discovery": discovery,
+            "keys": keys,
+            "client": client,
+        })
+    );
+    if ok {
+        Ok(())
+    } else {
+        Err("sso-check: a check failed; the line above says which".into())
     }
 }

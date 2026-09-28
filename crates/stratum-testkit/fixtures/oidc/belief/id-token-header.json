@@ -1,0 +1,5 @@
+{
+  "alg": "RS256",
+  "kid": "spool-test-1",
+  "typ": "JWT"
+}

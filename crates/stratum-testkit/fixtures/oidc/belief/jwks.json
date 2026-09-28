@@ -1,0 +1,12 @@
+{
+  "keys": [
+    {
+      "alg": "RS256",
+      "e": "AQAB",
+      "kid": "spool-test-1",
+      "kty": "RSA",
+      "n": "xCDfdgcyehsFCK0ORoxd5jGhCDo5VZdtvofHp0bE-StO8ANGoYbKKIDBRTGogNduDYsMb0tVelycgXy91Wiinq0eg_CVKZN8BsMYQKZUznCbOzftJrqmnauG2bTMJqiO6iC844FrIv-Vl8Sv55cfYXnfedY6DR6Yj8V3uoqKGOKOQUAo9eoB8ZuDxMUxjauXL-qqBX3XJ6U04wP8gfmGQXegdX7QwFrw8z3PspOjHwYLS57dLrvVZW8qNv1Fb-5_zpy658qsap8pg0-zhQzZLdUPHbwVtvKFLXjUgaWUCidbJ3SaOsB6ac72CJr7DSx8igf1eYS4tTHj_AtQSqz-Sw",
+      "use": "sig"
+    }
+  ]
+}

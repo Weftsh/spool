@@ -54,6 +54,11 @@ GITHUBPORT=${GITHUBPORT:-29110}
 # ci.sh, and signs a verdict back into the intake. See
 # scripts/manual-stack/ci-runner.py.
 CIPORT=${CIPORT:-29120}
+# The stand-in identity provider single sign-on goes through: the fake
+# the SSO suite uses, as a process (crates/stratum-testkit/src/bin/
+# fake-oidc.rs). It serves a sign-in form, so the walkthrough signs in
+# the way a person at their company's provider does.
+OIDCPORT=${OIDCPORT:-29130}
 CI_REPO=${CI_REPO:-pipeline}
 # The repository the workflow and self-hosted-runner stages push
 # `.weft/ci.yml` into. Seeded with a README and no workflow, because
@@ -81,7 +86,7 @@ wait_for() { # wait_for <name> <logfile> <command...>
 }
 
 stop_all() {
-  for p in server ci-runner github minio pg; do
+  for p in server ci-runner github oidc minio pg; do
     if [ -f "$RUN/$p.pid" ]; then
       kill "$(cat "$RUN/$p.pid")" 2>/dev/null || true
       rm -f "$RUN/$p.pid"
@@ -106,7 +111,7 @@ stop_all() {
   # 8080 and 2222 — then failed on a port it had every reason to think
   # was free, and the error said nothing about why.
   wait_ports_free "$HTTPPORT" "$SSHPORT" "$PGPORT" "$MINIOPORT" \
-    "$GITHUBPORT" "$CIPORT"
+    "$GITHUBPORT" "$CIPORT" "$OIDCPORT"
 }
 
 # True while anything is listening on $1.
@@ -224,6 +229,22 @@ ENV
 export RUNNER_BIN="$RUNNER_BIN"
 ENV
   fi
+  # Single sign-on through the stand-in provider, *beside* passwords:
+  # every other stage of the pass signs in with one, and SSO-only is the
+  # default the moment an issuer is set. SSO_STAND_IN tells the
+  # walkthrough the provider is up; without it the SSO stage reports the
+  # missing prerequisite rather than skipping.
+  if [ -n "$OIDC_BIN" ]; then
+    cat >> "$RUN/env.sh" <<ENV
+export STRATUM_OIDC_ISSUER="http://127.0.0.1:$OIDCPORT"
+export STRATUM_OIDC_CLIENT_ID="spool-stack"
+export STRATUM_OIDC_CLIENT_SECRET="stack-oidc-secret"
+export STRATUM_OIDC_ORG="acme"
+export STRATUM_OIDC_NAME="Acme SSO"
+export STRATUM_SSO_ONLY="false"
+export SSO_STAND_IN=1
+ENV
+  fi
 }
 
 cmd_env() { [ -f "$RUN/env.sh" ] || die "no stack — run: scripts/manual-stack.sh up"; cat "$RUN/env.sh"; }
@@ -330,7 +351,7 @@ Start Docker, or run scripts/fetch-minio.sh."
   elif [ -x "$ROOT/target/debug/stratum-server" ]; then
     bin=$ROOT/target/debug/stratum-server
   else
-    die "no server binary — run: cargo build --release -p stratum-server -p stratum-runner"
+    die "no server binary — run: cargo build --release -p stratum-server -p stratum-runner -p stratum-testkit --bins"
   fi
   # Both browser gates read dist, not src: a source edit with no build
   # behind it is tested against the previous bundle.
@@ -362,6 +383,19 @@ Start Docker, or run scripts/fetch-minio.sh."
   elif [ -n "$(find "$ROOT/crates/stratum-runner/src" -newer "$RUNNER_BIN" -print -quit)" ]; then
     say "self-hosted runners: $RUNNER_BIN is older than crates/stratum-runner/src — rebuild it"
   fi
+  # The stand-in identity provider, from the same profile.
+  OIDC_BIN=
+  for cand in "$ROOT/target/$profile/fake-oidc" "$ROOT/target/release/fake-oidc" \
+              "$ROOT/target/debug/fake-oidc"; do
+    if [ -x "$cand" ]; then OIDC_BIN=$cand; break; fi
+  done
+  if [ -z "$OIDC_BIN" ]; then
+    say "single sign-on: no fake-oidc binary — build it with"
+    say "  cargo build --release -p stratum-testkit --bin fake-oidc"
+    say "  (the walkthrough's SSO stage will report this as a problem)"
+  elif [ -n "$(find "$ROOT/crates/stratum-testkit/src/oidc.rs" "$ROOT/crates/stratum-testkit/src/bin/fake-oidc.rs" -newer "$OIDC_BIN" -print -quit)" ]; then
+    say "single sign-on: $OIDC_BIN is older than its sources — rebuild it"
+  fi
 
   stop_all
   # A port another run still holds is fatal, not a warning. `up` used to
@@ -371,7 +405,7 @@ Start Docker, or run scripts/fetch-minio.sh."
   # ci stages then failed on a provider that "never reported", which
   # read as a product bug and was leftover Python processes.
   ports_free_or_die "$HTTPPORT" "$SSHPORT" "$PGPORT" "$MINIOPORT" \
-    "$GITHUBPORT" "$CIPORT"
+    "$GITHUBPORT" "$CIPORT" "$OIDCPORT"
   rm -rf "$RUN/pgdata" "$RUN/miniodata" "$RUN/data" "$RUN/mail" "$RUN/ci-work" "$RUN/origins"
   # `$RUN/miniodata/$BUCKET` is made before minio starts so it is there
   # the first time the server writes; the bucket is then *proved* over
@@ -475,6 +509,16 @@ Start Docker, or run scripts/fetch-minio.sh."
   echo $! > "$RUN/github.pid"
   wait_for github "$RUN/logs/github.log" \
     curl -fsS -o /dev/null "http://127.0.0.1:$GITHUBPORT/app/installations"
+
+  if [ -n "$OIDC_BIN" ]; then
+    say "stand-in identity provider…"
+    FAKE_OIDC_ADDR="127.0.0.1:$OIDCPORT" FAKE_OIDC_CLIENT_ID="spool-stack" \
+      FAKE_OIDC_CLIENT_SECRET="stack-oidc-secret" \
+      "$OIDC_BIN" > "$RUN/logs/oidc.log" 2>&1 &
+    echo $! > "$RUN/oidc.pid"
+    wait_for "identity provider" "$RUN/logs/oidc.log" \
+      curl -fsS -o /dev/null "http://127.0.0.1:$OIDCPORT/.well-known/openid-configuration"
+  fi
 
   write_env
   say "server…"
@@ -595,6 +639,16 @@ Start Docker, or run scripts/fetch-minio.sh."
     {"op":"put","path":"README.md","content":"# builds\n\nA workflow in .weft/ runs here, on a registered runner, on every push.\n"}]}' \
     || true
 
+  local SSO_STATUS
+  if [ -n "$OIDC_BIN" ]; then
+    SSO_STATUS="a stand-in provider on http://127.0.0.1:$OIDCPORT, beside
+               passwords: Continue with Acme SSO, type any address, and a
+               newcomer is made a member of acme."
+  else
+    SSO_STATUS="OFF — no fake-oidc binary (cargo build --release
+               -p stratum-testkit --bin fake-oidc). The walkthrough's SSO
+               stage will report this as a problem, not skip it."
+  fi
   local SELF_HOSTED_STATUS
   if [ -n "$RUNNER_BIN" ]; then
     SELF_HOSTED_STATUS="$RUNNER_BIN. The walkthrough registers one from
@@ -627,8 +681,10 @@ Start Docker, or run scripts/fetch-minio.sh."
 
     runners    ${SELF_HOSTED_STATUS}
 
+    sso        ${SSO_STATUS}
+
   manual pass:
-    eval "\$(scripts/manual-stack.sh env)"   # RUNNER_BIN, CI_RUNNER_URL, RUNNER_WF_REPO…
+    eval "\$(scripts/manual-stack.sh env)"   # RUNNER_BIN, CI_RUNNER_URL, SSO_STAND_IN…
     cd web/dashboard && BASE=http://127.0.0.1:$HTTPPORT \\
       STRATUM_MAIL_DIR=$RUN/mail node tools/walkthrough.mjs
 

@@ -37,7 +37,7 @@ use crate::mail::templates::urlencode;
 use crate::mirror::origin::{GithubApp, GithubIdentity, UserAuth, UserAuthError};
 use axum::extract::{Query, State};
 use axum::http::{header, HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Redirect, Response};
+use axum::response::{AppendHeaders, IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use stratum_control::identities::{self, GITHUB as PROVIDER};
 use stratum_control::ids::token_secret;
@@ -113,6 +113,12 @@ fn user_auth(state: &SharedState) -> Option<(std::sync::Arc<GithubApp>, UserAuth
 /// ordinary link, so a browser with no script running can still sign in,
 /// and there is no second round trip between the click and the leave.
 pub async fn start(State(state): State<SharedState>) -> Response {
+    // SSO is the only way in: a linked GitHub account would otherwise
+    // let somebody switched off at the company's provider keep signing
+    // in. The App itself stays, for mirrors.
+    if state.sso_only {
+        return Redirect::to(&dashboard(&state, "unavailable")).into_response();
+    }
     let Some((_, auth)) = user_auth(&state) else {
         // A deployment with no OAuth client on its App. An operator
         // state rather than a person's, but the person is the one
@@ -195,6 +201,9 @@ pub async fn callback(
 
     if params.error.is_some() {
         return back("denied");
+    }
+    if state.sso_only {
+        return back("unavailable");
     }
     let Some((app, auth)) = user_auth(&state) else {
         return back("unavailable");
@@ -281,14 +290,17 @@ pub async fn callback(
     };
     (
         StatusCode::SEE_OTHER,
-        [
+        // Appended, not an array of pairs: axum *inserts* each pair of an
+        // array, so a second `Set-Cookie` replaced the first and the state
+        // cookie this sign-in spent was never cleared.
+        AppendHeaders([
             (header::SET_COOKIE, clear.clone()),
             (
                 header::SET_COOKIE,
                 crate::api::auth_api::set_cookie(&state, &session, sessions::DEFAULT_TTL_SECS),
             ),
-            (header::LOCATION, dashboard(&state, "ok")),
-        ],
+        ]),
+        [(header::LOCATION, dashboard(&state, "ok"))],
     )
         .into_response()
 }

@@ -773,6 +773,78 @@ exit 0
     );
 }
 
+/// A failing step prints the tail of **its own** output — even while
+/// another run of the script is running steps of its own.
+///
+/// That is not hypothetical: this file runs `scripts/ci-local.sh` from
+/// inside the correctness gate's `cargo test`, so every local run of the
+/// gate has nested runs going while its own test step is still writing.
+/// The step log was one fixed path, `/tmp/ci-local-step.log`, and each
+/// nested step truncated it: the outer run's test output was replaced by
+/// NUL bytes and a nested run's, and had the tests failed, the "failure"
+/// printed would have been somebody else's. Here the step that fails
+/// runs a nested gate first, the way `cargo test` does.
+#[test]
+fn a_failing_step_shows_its_own_output_not_another_runs() {
+    let repo = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .canonicalize()
+        .expect("repository root");
+    let root = std::env::temp_dir().join(format!("stratum-step-log-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("outer")).unwrap();
+    std::fs::create_dir_all(root.join("nested")).unwrap();
+    let root = scopeguard_dir(root);
+    let outer = root.path().join("outer");
+    let nested = root.path().join("nested");
+    // The nested run's terraform: says who it is, and passes everything.
+    let nested_tf = "#!/bin/bash\ncase \"$1\" in version) echo 'Terraform v99.0.0'; exit 0;; esac\n\
+                     echo NESTED-RUN-OUTPUT; mkdir -p \"${TF_DATA_DIR:-/nonexistent}\" 2>/dev/null; exit 0\n";
+    // The outer run's: its `fmt` runs a whole nested gate, then fails
+    // with output of its own.
+    let outer_tf = format!(
+        "#!/bin/bash\ncase \"$1\" in version) echo 'Terraform v99.0.0'; exit 0;; esac\n\
+         PATH=\"{nested}:$PATH\" bash \"{script}\" --only terraform-validation > /dev/null 2>&1\n\
+         echo OUTER-STEP-OUTPUT; exit 1\n",
+        nested = nested.display(),
+        script = repo.join("scripts/ci-local.sh").display(),
+    );
+    for (dir, body) in [(&nested, nested_tf.to_string()), (&outer, outer_tf)] {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::write(dir.join("terraform"), body).unwrap();
+        std::fs::write(dir.join("docker"), "#!/bin/bash\nexit 1\n").unwrap();
+        for name in ["terraform", "docker"] {
+            std::fs::set_permissions(dir.join(name), std::fs::Permissions::from_mode(0o755))
+                .unwrap();
+        }
+    }
+    let out = std::process::Command::new("bash")
+        .arg(repo.join("scripts/ci-local.sh"))
+        .args(["--only", "terraform-validation"])
+        .env(
+            "PATH",
+            format!(
+                "{}:{}",
+                outer.display(),
+                std::env::var("PATH").unwrap_or_default()
+            ),
+        )
+        .env("STRATUM_MIN_FREE_GIB", "0")
+        .current_dir(&repo)
+        .output()
+        .expect("run scripts/ci-local.sh");
+    let said = String::from_utf8_lossy(&out.stdout);
+    assert!(said.contains("FAILED: terraform fmt + validate"), "{said}");
+    assert!(
+        said.contains("OUTER-STEP-OUTPUT") && !said.contains("NESTED-RUN-OUTPUT"),
+        "the failing step's tail is not its own output:\n{said}"
+    );
+    assert!(
+        !said.contains('\0'),
+        "the failing step's tail has NUL bytes in it"
+    );
+}
+
 /// A directory removed when the test that made it finishes, however.
 struct FakeBin(std::path::PathBuf);
 

@@ -86,12 +86,22 @@ note() { printf '   %s\n' "$*"; }
 
 # Run one named check. A failure is recorded and the job stops there —
 # later steps in a CI job never run after an earlier one fails either.
+# Each run's step output in a file of its own. It was one fixed path,
+# /tmp/ci-local-step.log, shared by every run on the machine — and
+# docs_e2e runs this script from inside the correctness gate's own
+# `cargo test`, so the nested runs truncated the outer test step's log
+# while it was still being written. The outer output became NUL bytes
+# and a nested run's lines; had the tests failed, the tail printed as
+# the failure would have been somebody else's.
+STEP_LOG="$(mktemp "${TMPDIR:-/tmp}/ci-local-step.XXXXXX")"
+trap 'rm -f "$STEP_LOG"' EXIT
+
 step() {
   local name="$1"; shift
   note "$name"
-  if ! "$@" > /tmp/ci-local-step.log 2>&1; then
+  if ! "$@" > "$STEP_LOG" 2>&1; then
     printf '\033[31m   FAILED: %s\033[0m\n' "$name"
-    tail -40 /tmp/ci-local-step.log
+    tail -40 "$STEP_LOG"
     FAILED+=("$name")
     return 1
   fi
@@ -103,7 +113,7 @@ step() {
 # ran" and a summary with no failures, which reads exactly like a pass —
 # the same trap as a SKIP being mistaken for one, and worse, because
 # nothing ran at all.
-ALL_JOBS="correctness-gate chaos web deploy-validation terraform-validation s3-contract github-signin-contract"
+ALL_JOBS="correctness-gate chaos web deploy-validation terraform-validation s3-contract github-signin-contract oidc-contract"
 # `none` runs the preconditions — the disk check above — and no job at
 # all. It is spelled out rather than being any unmatched word, because
 # "any unmatched word means run nothing" is indistinguishable from a
@@ -379,6 +389,25 @@ under the client you deploy with (it needs a person at a browser), then \`fixtur
   else
     SKIPPED+=("github-signin-contract: needs a person at a browser to approve the \
 authorization, so it is never run unattended — scripts/manual-github-signin.sh all")
+  fi
+fi
+
+# ----------------------------------------------- manual gate: oidc-contract
+# Single sign-on makes an account for anybody the company's provider
+# vouches for, and every automated test of it runs against the fake
+# provider in stratum-testkit, which says what we believe Okta, Entra ID,
+# Google and Keycloak send. This block names the real-provider half as
+# unchecked. Run it under the issuer and client you deploy with, once per
+# provider you support: a run against one claims nothing about another.
+if wants oidc-contract; then
+  say "oidc-contract (manual gate)"
+  if [ -z "${STRATUM_OIDC_ISSUER:-}" ] || [ -z "${STRATUM_OIDC_CLIENT_SECRET:-}" ]; then
+    SKIPPED+=("oidc-contract: no identity provider configured. Sign-in ran against the fake \
+provider in correctness-gate; a real one is a MANUAL gate — scripts/manual-oidc.sh all, \
+under the issuer and client you deploy with (it needs a person to sign in), then \`fixtures\`")
+  else
+    SKIPPED+=("oidc-contract: needs a person to sign in at the provider, so it is never \
+run unattended — scripts/manual-oidc.sh all")
   fi
 fi
 

@@ -36,6 +36,7 @@ pub mod runners;
 pub mod sessions;
 pub mod signals;
 pub mod sshkeys;
+pub mod sso;
 pub mod storage;
 pub mod teams;
 pub mod topics;

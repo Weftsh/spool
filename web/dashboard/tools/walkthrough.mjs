@@ -31,6 +31,14 @@
 // URL to show and correctly hides the row, and this run reports that
 // rather than passing quietly: a walkthrough against a half-configured
 // deployment is a walkthrough of a different product.
+//
+// The stack must also sign people in with single sign-on *beside*
+// passwords: an OIDC identity provider configured, and password sign-in
+// left on so every other stage here can keep signing in the way it
+// always has. The provider is a stand-in the stack serves — a plain form
+// with an email and a name field — and `SSO_STAND_IN=1` says it is up.
+// Without it, the "signing in with SSO" stage reports the missing
+// prerequisite rather than skipping, the same rule as RUNNER_BIN.
 import { chromium, expect } from "@playwright/test";
 import { execFileSync, spawn } from "node:child_process";
 import crypto from "node:crypto";
@@ -58,6 +66,65 @@ execFileSync("ssh-keygen", [
 const PUBKEY = fs.readFileSync(path.join(KEYDIR, "id.pub"), "utf8").trim();
 const MAIL_DIR = process.env.STRATUM_MAIL_DIR;
 const problems = [];
+
+// How the stack says people sign in (`GET /v1/auth/methods`), read once
+// before any stage. The sign-in screen's words depend on it — with
+// single sign-on, "no account yet?" is answered by the identity
+// provider, not by an invitation — so a stage that checks those words
+// has to know which answer is the right one. Null when the server could
+// not say, which the dashboard reads as today's screen, and so does
+// this.
+const METHODS = await fetch(`${BASE}/v1/auth/methods`)
+  .then((r) => (r.ok ? r.json() : null))
+  .catch(() => null);
+const SSO_NAME = METHODS?.sso?.name ?? null;
+const reEscape = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+// What a person with no account is told to do next: sign in with the
+// company's identity provider when there is one, ask for an invitation
+// when there is not.
+const NO_ACCOUNT_NEXT = SSO_NAME
+  ? new RegExp(`${reEscape(SSO_NAME)} — your account is made the first time`)
+  : /made by invitation/;
+const GITHUB_NOACCOUNT_NEXT = SSO_NAME
+  ? new RegExp(`Continue with ${reEscape(SSO_NAME)} instead`)
+  : /invitation/i;
+
+// Every address a page's main frame lands on, the page's own rewrites
+// included (`replaceState` is a navigation to Playwright too).
+//
+// A sign-in round trip comes home as `/dashboard/?github=<outcome>` or
+// `?sso=<outcome>`, and the dashboard takes the outcome out of the
+// address bar as soon as it has read it — so by the time a stage reads
+// `page.url()` it is gone, and a stage that read it there would report
+// "came back github=null" against a server that answered correctly.
+// What the browser was sent to is what these record.
+function landings(p) {
+  const seen = [];
+  const on = (f) => {
+    if (f === p.mainFrame()) seen.push(f.url());
+  };
+  p.on("framenavigated", on);
+  return { seen, stop: () => p.off("framenavigated", on) };
+}
+
+/// The first `key=` any of those addresses carried, or null.
+function landedWith(seen, key) {
+  for (const u of seen) {
+    const v = new URL(u).searchParams.get(key);
+    if (v) return v;
+  }
+  return null;
+}
+
+/// Wait until one of them carries `key=` — the round trip has come home.
+async function waitForLanding(nav, key, ms = 20000) {
+  const until = Date.now() + ms;
+  while (Date.now() < until) {
+    if (landedWith(nav.seen, key) !== null) return;
+    await new Promise((r) => setTimeout(r, 100));
+  }
+  throw new Error(`no address carrying ${key}= was landed on in ${ms}ms: ${nav.seen.join(" -> ")}`);
+}
 const shots = [];
 
 // Steps that provoke a refusal on purpose. A 401 for a password we typed
@@ -82,6 +149,9 @@ const EXPECTED = {
   // Every GitHub refusal lands on the sign-in screen by design, so this
   // stage is signed out for all of them and meets the probe each time.
   "signing in with GitHub, refused": [401],
+  // A fresh context with no cookie: the boot probe, before the round
+  // trip through the identity provider signs the newcomer in.
+  "signing in with SSO": [401],
   // The recipient's browser has never been here: the same boot probe,
   // from a context with no cookie, before the invitation is accepted.
   // The 409 is the handle somebody already has, asked for on purpose to
@@ -361,11 +431,11 @@ await step("a stranger is told how to get an account", async () => {
     .getByText(/No account yet\?/)
     .textContent()
     .catch(() => null);
-  if (!how || !/made by invitation/.test(how)) {
+  if (!how || !NO_ACCOUNT_NEXT.test(how)) {
     problems.push({
       where: stage,
       kind: "content",
-      text: `the sign-in screen does not say accounts are made by invitation: ${how}`,
+      text: `the sign-in screen does not say how an account is made (${NO_ACCOUNT_NEXT}): ${how}`,
     });
   }
   for (const [what, found] of [
@@ -425,10 +495,16 @@ await step("a stranger is told how to get an account", async () => {
 await step("GitHub never makes an account", async () => {
   await page.goto(`${BASE}/dashboard/`, { waitUntil: "networkidle" });
   await shot(page, "04b-github-button", "GitHub is offered beside the password form");
+  const nav = landings(page);
   await page.getByRole("link", { name: "Continue with GitHub" }).click();
-  await page.waitForURL(/\/dashboard\/.*github=/, { timeout: 20000 });
+  try {
+    await waitForLanding(nav, "github");
+  } finally {
+    nav.stop();
+  }
+  await page.waitForLoadState("networkidle");
 
-  const outcome = new URL(page.url()).searchParams.get("github");
+  const outcome = landedWith(nav.seen, "github");
   if (outcome !== "noaccount") {
     problems.push({
       where: stage,
@@ -442,11 +518,11 @@ await step("GitHub never makes an account", async () => {
     .first()
     .textContent()
     .catch(() => null);
-  if (!said || !/invitation/i.test(said)) {
+  if (!said || !GITHUB_NOACCOUNT_NEXT.test(said)) {
     problems.push({
       where: stage,
       kind: "content",
-      text: `github=${outcome} does not send the person to an invitation: ${said}`,
+      text: `github=${outcome} does not say how to get an account (${GITHUB_NOACCOUNT_NEXT}): ${said}`,
     });
   }
   // Nobody was signed in, and so nothing was made to sign in to.
@@ -478,7 +554,7 @@ await step("GitHub never makes an account", async () => {
 // stage exists to catch.
 await step("signing in with GitHub, refused", async () => {
   for (const [outcome, needle] of [
-    ["noaccount", /invitation/i],
+    ["noaccount", GITHUB_NOACCOUNT_NEXT],
     ["noemail", /confirmed/i],
     ["denied", /cancelled at GitHub/i],
   ]) {
@@ -516,6 +592,166 @@ await step("signing in with GitHub, refused", async () => {
     }
   }
   await shot(page, "04h-github-refused", "a refusal that still leaves a way in");
+});
+
+// Signing in through the company's identity provider, as somebody the
+// server has never seen. The stack's stand-in provider is a plain form:
+// it takes whatever address it is given, vouches for it, and sends the
+// browser back to the server's callback — so a real round trip through
+// the button must come home signed in, with an account made on the way
+// in the stack's default organization. Nothing is stubbed: the button
+// is the server's start route, which parks the anti-forgery state and
+// sends the browser out, and the provider redirects back to our
+// callback.
+//
+// A context of its own, like the invitation's recipient: this is a
+// different person, and the main page has to reach "login form" still
+// signed out. The newcomer is removed from the organization again once
+// the owner is signed in (`settings / the SSO newcomer leaves again`).
+const SSO_NEWCOMER = `sso-newcomer-${Date.now()}@acme.dev`;
+let ssoNewcomerJoined = false;
+
+await step("signing in with SSO", async () => {
+  if (!process.env.SSO_STAND_IN) {
+    problems.push({
+      where: stage,
+      kind: "harness",
+      text: "SSO_STAND_IN is not set — the single sign-on stage needs the stack's stand-in identity provider (an OIDC provider serving a form with email and name fields); the stack exports SSO_STAND_IN=1 when it runs one",
+    });
+    console.log("  no stand-in identity provider — skipping the SSO round trip");
+    return;
+  }
+  if (!SSO_NAME) {
+    problems.push({
+      where: stage,
+      kind: "harness",
+      text: `SSO_STAND_IN=1, but /v1/auth/methods says single sign-on is not configured: ${JSON.stringify(METHODS)}`,
+    });
+    return;
+  }
+  if (METHODS.password === false) {
+    // Every other stage signs in with a password, and would fail for a
+    // reason that has nothing to do with what it checks.
+    problems.push({
+      where: stage,
+      kind: "harness",
+      text: "the stack refuses passwords (SSO only); this pass expects single sign-on beside passwords",
+    });
+  }
+  const ssoCtx = await browser.newContext({
+    viewport: { width: 1440, height: 900 },
+  });
+  const sso = await ssoCtx.newPage();
+  watch(sso, () => stage);
+  try {
+    await sso.goto(`${BASE}/dashboard/`, { waitUntil: "networkidle" });
+    const button = sso.getByRole("link", {
+      name: `Continue with ${SSO_NAME}`,
+      exact: true,
+    });
+    await button.waitFor({ timeout: 15000 });
+    await shot(sso, "04i-sso-button", `${SSO_NAME} is offered first, beside GitHub and the password form`);
+    await button.click();
+
+    // The stand-in provider's own page, on its own origin.
+    const email = sso.locator("input[name=email]");
+    await email.waitFor({ timeout: 20000 });
+    if (new URL(sso.url()).origin === new URL(BASE).origin)
+      problems.push({
+        where: stage,
+        kind: "behaviour",
+        text: `Continue with ${SSO_NAME} never left this server: ${sso.url()}`,
+      });
+    await email.fill(SSO_NEWCOMER);
+    await sso.locator("input[name=name]").fill("Sso Newcomer");
+    const nav = landings(sso);
+    await sso.locator("button[type=submit]").click();
+
+    // Home, on this server — a pattern on the whole URL would also match
+    // a provider page that merely carries our address in a parameter.
+    const home = new URL(BASE).origin;
+    try {
+      await sso.waitForURL(
+        (u) => u.origin === home && u.pathname.startsWith("/dashboard"),
+        { timeout: 20000 },
+      );
+    } finally {
+      nav.stop();
+    }
+    // What the callback sent the browser to, not what the page left in
+    // the address bar after reading it.
+    const outcome = landedWith(nav.seen, "sso");
+    const landed = await sso
+      .getByText("Requests today")
+      .waitFor({ timeout: 20000 })
+      .then(() => true)
+      .catch(() => false);
+    if (!landed) {
+      const said = await sso
+        .getByRole("status")
+        .first()
+        .textContent()
+        .catch(() => null);
+      problems.push({
+        where: stage,
+        kind: "behaviour",
+        text: `signing in with ${SSO_NAME} as ${SSO_NEWCOMER} did not land signed in (${sso.url()}): ${said}`,
+      });
+      return;
+    }
+    // Said once, then gone: an outcome left in the address is said
+    // again on every reload. Waited on rather than read at once — the
+    // address is rewritten by the page, not by the redirect.
+    await sso
+      .waitForFunction(() => !new URLSearchParams(location.search).has("sso"), null, {
+        timeout: 5000,
+      })
+      .catch(() => {});
+    if (new URL(sso.url()).searchParams.has("sso"))
+      problems.push({
+        where: stage,
+        kind: "behaviour",
+        text: `the sign-in outcome was left in the address bar: ${sso.url()}`,
+      });
+    if (outcome !== "ok")
+      problems.push({
+        where: stage,
+        kind: "behaviour",
+        text: `a sign-in that landed came back sso=${outcome}, not ok (${nav.seen.join(" -> ")})`,
+      });
+
+    // Who the server says is signed in: the newcomer, made on the way
+    // in, a member of the stack's default organization.
+    const me = await sso.evaluate(async () => {
+      const r = await fetch("/v1/auth/me");
+      return { status: r.status, body: r.ok ? await r.json() : null };
+    });
+    if (me.status !== 200 || me.body?.email?.toLowerCase() !== SSO_NEWCOMER) {
+      problems.push({
+        where: stage,
+        kind: "behaviour",
+        text: `after signing in with ${SSO_NAME}, /v1/auth/me answered ${me.status} for ${me.body?.email ?? "nobody"}, not ${SSO_NEWCOMER}`,
+      });
+    } else {
+      ssoNewcomerJoined = true;
+      const orgs = (me.body.orgs ?? []).map((o) => o.name);
+      if (!orgs.includes("acme"))
+        problems.push({
+          where: stage,
+          kind: "behaviour",
+          text: `the account ${SSO_NAME} made is not in acme, the default organization: its orgs are ${JSON.stringify(orgs)}`,
+        });
+    }
+    await shot(sso, "04j-sso-landed", `a newcomer signed in with ${SSO_NAME}, and an account was made on the way in`);
+
+    // Signed out again, so this person's session does not outlive the
+    // stage that made it.
+    const out = sso.getByRole("button", { name: "Sign out" });
+    if (await out.count()) await out.click();
+    await audit(sso, stage);
+  } finally {
+    await ssoCtx.close();
+  }
 });
 
 await step("login form", async () => {
@@ -584,6 +820,31 @@ await step("settings / members", async () => {
   await page.getByLabel("Role for dev@acme.dev").click();
   await page.getByRole("option", { name: "member" }).click();
   await page.waitForTimeout(500);
+});
+
+// Put the org back as it was found: the account single sign-on made on
+// the way in leaves acme again. Its own namespace outlives the
+// membership, like the invited new hire's below.
+await step("settings / the SSO newcomer leaves again", async () => {
+  if (!ssoNewcomerJoined) return;
+  await page.getByText(SSO_NEWCOMER).waitFor({ timeout: 10000 });
+  await page.getByLabel(`Remove ${SSO_NEWCOMER}`).click();
+  await page
+    .getByRole("alertdialog")
+    .getByRole("button", { name: "Remove" })
+    .click();
+  const gone = await page
+    .locator("tbody tr", { hasText: SSO_NEWCOMER })
+    .first()
+    .waitFor({ state: "detached", timeout: 10000 })
+    .then(() => true)
+    .catch(() => false);
+  if (!gone)
+    problems.push({
+      where: stage,
+      kind: "behaviour",
+      text: `${SSO_NEWCOMER} survived removal`,
+    });
 });
 
 // A fresh address each run: an outstanding invitation for the same

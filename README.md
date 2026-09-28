@@ -29,6 +29,10 @@ plus an intake for any CI you already run.
   surface: a request with no credential is refused, and a person with no
   role in an organization cannot tell its repositories from ones that do not
   exist.
+- **Your people sign in the way they already do.** Point it at Okta,
+  Entra ID, Google Workspace, Keycloak or any OpenID Connect provider and
+  whoever the provider admits gets an account on first sign-in; nobody else
+  can make one. Without a provider, accounts come from invitations.
 - **Stateless serving.** Storage is immutable segments in object storage,
   with the manifest as the only ref truth, changed only by compare-and-swap.
   Scale by adding nodes; lose a node and nothing is lost.
@@ -97,7 +101,8 @@ Steps run directly on that machine, as that account. See
 ## Deploy it
 
 - [docs/operations.md](docs/operations.md) — configuration reference,
-  migrations, backups, upgrades, mail, SSH, the GitHub App, runners.
+  migrations, backups, upgrades, mail, SSH, single sign-on, the GitHub App,
+  runners.
 - [docs/deployment-aws.md](docs/deployment-aws.md) — the Terraform reference
   deployment for AWS (ECS, RDS, S3, CloudFront) in `deploy/terraform`.
 

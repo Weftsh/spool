@@ -5,9 +5,14 @@ import { NEW_ORG } from "@/components/app-sidebar";
 import { AdminShell } from "@/shells/admin-shell";
 import { ClaimInstall } from "@/components/claim-install";
 import { ConnectBanner, connectOutcomeOf } from "@/components/connect-banner";
-import { githubOutcomeOf } from "@/components/github-signin-banner";
+import {
+  signinOutcomeOf,
+  withoutSigninOutcome,
+} from "@/components/signin-banner";
 import { Loading } from "@/components/feedback";
 import { NotFound } from "@/components/not-found";
+import { type AuthMethods, loadAuthMethods } from "@/lib/auth-methods";
+import { signinReturnOf, tabStorage, takeReturn } from "@/lib/return-to";
 import { settingsSections } from "@/lib/settings-sections";
 import { AcceptInvite, Login, ResetPassword } from "@/views/auth";
 import { ChangesetsView } from "@/views/changesets";
@@ -15,7 +20,15 @@ import { NewRepo } from "@/views/newrepo";
 import { NewOrg, OrgView } from "@/views/org";
 import { Search } from "@/views/search";
 import { SettingsView } from "@/views/settings";
-import { DASH, dash, href, mountedAt, segments, useRoute } from "./router";
+import {
+  DASH,
+  dash,
+  href,
+  mountedAt,
+  navigateTo,
+  segments,
+  useRoute,
+} from "./router";
 import { match } from "./routes";
 import { ForgeView } from "@/views/forge";
 
@@ -85,6 +98,29 @@ export default function App() {
     tokenFromHash("verify-email"),
   );
   const [creatingOrg, setCreatingOrg] = useState(false);
+  // How this server lets a person sign in. Null until the server has
+  // answered — and it always answers, because a failure reads as the
+  // screen every server offered before it could say (password and
+  // GitHub). Asked at boot, beside "who am I", so the sign-in screen is
+  // never drawn with a password form that disappears a moment later.
+  const [methods, setMethods] = useState<AuthMethods | null>(null);
+  // How a trip out to sign in — through GitHub, or through the
+  // company's identity provider — came back. A query rather than a
+  // fragment because our callback builds the URL, and it carries an
+  // outcome, not a credential: the session rode home in an HttpOnly
+  // cookie.
+  //
+  // Read once, here, and then taken out of the address bar (the effect
+  // below). It used to be read off the live URL on every render and
+  // never removed, so `?github=denied` said "you cancelled at GitHub"
+  // again on every reload, and again after the person signed in with a
+  // password and later signed out — about nothing they had just done.
+  // `ok` and anything unknown are no outcome: a success lands signed in
+  // like any other sign-in. Dropped on signing out, too: the sign-in
+  // screen that follows is not the one the round trip landed on.
+  const [signinOutcome, setSigninOutcome] = useState(() =>
+    signinOutcomeOf(new URLSearchParams(window.location.search)),
+  );
   const [browserRoute, browserNavigate] = useRoute();
   // Everything below this line is written as if the SPA were mounted at
   // `/dashboard`, because it is — the forge mounts the same views at the
@@ -128,16 +164,29 @@ export default function App() {
   // the person picks the org here, after signing in if they must.
   const claimingInstall = connectOutcome === "claim";
 
-  // How a trip through the GitHub sign-in came back. A query for the
-  // same reason `connect` is: our callback builds this URL, and it
-  // carries an outcome rather than a credential — the session rode home
-  // in an HttpOnly cookie.
-  const githubOutcome = route.query.get("github");
-  // GitHub only signs somebody in to an account they already have, so
-  // there is no "new account" outcome to onboard: `ok` lands on the
-  // overview like any other sign-in, and a refusal lands on the sign-in
-  // screen with its sentence.
-  const githubProblem = githubOutcomeOf(githubOutcome);
+  // Said once, then gone: the outcome is in state (above), so the
+  // address bar no longer needs it. Everything else the address carries
+  // — `connect`, `org`, `next`, a mailed link's fragment — is left
+  // exactly as it was. `replace`, so Back does not return to it.
+  //
+  // A round trip that came home signed in goes back to the page it left
+  // from, when the sign-in screen it left had one (`lib/return-to.ts`):
+  // `/login?next=/acme/widget` → the provider → `/acme/widget`, not the
+  // overview. Any return spends the kept address, a refusal included,
+  // so a later sign-in cannot find a stale one. A second run of this
+  // effect (StrictMode's) finds the address already clean and does
+  // nothing.
+  useEffect(() => {
+    const { pathname, search, hash } = window.location;
+    const came = signinReturnOf(new URLSearchParams(search));
+    const back = came ? takeReturn(tabStorage()) : null;
+    if (came === "ok" && back) {
+      navigateTo(back, true);
+      return;
+    }
+    const rest = withoutSigninOutcome(search);
+    if (rest !== search) navigateTo(`${pathname}${rest}${hash}`, true);
+  }, []);
 
   // A mailed link opened while this page is already showing changes only
   // the fragment, which is a *same-document* navigation: the browser
@@ -162,14 +211,21 @@ export default function App() {
   // HttpOnly, so nothing here can read it. A stored API token, by
   // contrast, is right there in localStorage and needs no round trip.
   useEffect(() => {
+    let alive = true;
+    const asked = loadAuthMethods(api.authMethods).then(
+      (m) => alive && setMethods(m),
+    );
     const stored = loadSession();
     if (stored?.token) {
+      // A token session has no person behind it and draws no sign-in
+      // screen, so it does not wait for the answer.
       setSession(stored);
       setBooting(false);
-      return;
+      return () => {
+        alive = false;
+      };
     }
-    let alive = true;
-    api
+    const who = api
       .me()
       .then((who) => {
         if (!alive) return;
@@ -182,8 +238,10 @@ export default function App() {
       })
       .catch(() => {
         /* not signed in — the login form is the answer */
-      })
-      .finally(() => alive && setBooting(false));
+      });
+    void Promise.allSettled([asked, who]).then(
+      () => alive && setBooting(false),
+    );
     return () => {
       alive = false;
     };
@@ -199,9 +257,15 @@ export default function App() {
     saveSession(null);
     setSession(null);
     setMe(null);
+    setSigninOutcome(null);
   }, [session]);
 
   if (booting) return <Loading />;
+  // Every screen below that offers a way in is drawn from the server's
+  // answer. It is only still missing after a token session signed out
+  // before it arrived — a moment, not a state.
+  const signinScreen = (screen: (m: AuthMethods) => React.ReactNode) =>
+    methods ? screen(methods) : <Loading />;
 
   const signedIn = (who: Me) => {
     const org = who.orgs[0]?.name ?? "";
@@ -211,9 +275,10 @@ export default function App() {
   };
 
   if (resetting) {
-    return (
+    return signinScreen((methods) => (
       <ResetPassword
         token={resetting}
+        methods={methods}
         onDone={(who) => {
           clearHash();
           setResetting(null);
@@ -224,14 +289,15 @@ export default function App() {
           setResetting(null);
         }}
       />
-    );
+    ));
   }
 
   if (invite) {
-    return (
+    return signinScreen((methods) => (
       <AcceptInvite
         token={invite}
         me={me}
+        methods={methods}
         onAccepted={(who) => {
           clearHash();
           setInvite(null);
@@ -242,7 +308,7 @@ export default function App() {
           setInvite(null);
         }}
       />
-    );
+    ));
   }
 
   // Which page the address means, decided *after* the mailed-link gates
@@ -254,9 +320,11 @@ export default function App() {
   // `next` is carried at all.
   if (forge.kind === "login") {
     const back = forge.next;
-    return (
+    return signinScreen((methods) => (
       <Login
-        githubOutcome={githubProblem}
+        methods={methods}
+        outcome={signinOutcome}
+        next={back}
         onSignedIn={(s, who) => {
           if (s.token) saveSession(s);
           else saveSession({ org: s.org, token: "" });
@@ -265,7 +333,7 @@ export default function App() {
           browserNavigate(back, true);
         }}
       />
-    );
+    ));
   }
   // Redeem a mailed "prove this address" link once, as soon as we know
   // who is signed in.
@@ -354,9 +422,10 @@ export default function App() {
   }
 
   if (!session) {
-    return (
+    return signinScreen((methods) => (
       <Login
-        githubOutcome={githubProblem}
+        methods={methods}
+        outcome={signinOutcome}
         notice={
           claimingInstall
             ? "Your GitHub installation is ready to connect. Sign in, and then choose the organization it belongs to."
@@ -369,17 +438,22 @@ export default function App() {
           setMe(who);
         }}
       />
-    );
+    ));
   }
+  // An unanswered question about passwords keeps the page: the answer is
+  // in before anybody signed in with a cookie reaches this line.
+  const passwords = methods?.password ?? true;
   const currentSection = routedSettings
-    ? settingsSections(me, session.org).find((x) => x.slug === settingsSection)
+    ? settingsSections(me, session.org, passwords).find(
+        (x) => x.slug === settingsSection,
+      )
     : undefined;
 
   return (
     <AdminShell
       me={me}
       org={session.org}
-      sections={settingsSections(me, session.org)}
+      sections={settingsSections(me, session.org, passwords)}
       currentPath={route.path}
       crumbs={[
         // The group the sidebar files the section under, so the crumb
@@ -447,6 +521,7 @@ export default function App() {
         <SettingsView
           session={session}
           me={me}
+          passwords={passwords}
           section={settingsSection}
           navigate={navigate}
         />
