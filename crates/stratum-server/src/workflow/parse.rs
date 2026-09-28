@@ -388,10 +388,10 @@ fn refuse_mining(line: usize, key: String, what: String) -> Refusal {
     Refusal::at(
         Some(line),
         key,
-        "mining software is not permitted on hosted runners",
+        "mining software is not permitted in a workflow",
     )
     .hint(format!(
-        "{what}; hosted runners are for building and testing your code"
+        "{what}; workflows are for building and testing your code"
     ))
 }
 
@@ -1453,7 +1453,7 @@ jobs:
                 .err()
                 .unwrap_or_else(|| panic!("this workflow was accepted: {run}"));
             assert_eq!(
-                r.message, "mining software is not permitted on hosted runners",
+                r.message, "mining software is not permitted in a workflow",
                 "{run}"
             );
             assert_eq!(r.key, "jobs.a.steps[0].run", "{run}");
@@ -1494,7 +1494,7 @@ jobs:
         ] {
             let r = err(src);
             assert_eq!(
-                r.message, "mining software is not permitted on hosted runners",
+                r.message, "mining software is not permitted in a workflow",
                 "{src}"
             );
             assert!(r.hint.contains("`POOL` is a mining pool address"), "{r:?}");
@@ -1526,10 +1526,7 @@ jobs:
       - run: echo done
 ";
         let r = err(src);
-        assert_eq!(
-            r.message,
-            "mining software is not permitted on hosted runners"
-        );
+        assert_eq!(r.message, "mining software is not permitted in a workflow");
         assert_eq!(r.line, Some(9), "the miner is on line 9");
         assert!(r.hint.contains("mining pool address"), "{r:?}");
     }

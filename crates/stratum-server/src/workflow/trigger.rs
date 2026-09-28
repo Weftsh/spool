@@ -21,8 +21,9 @@
 //!   and a failing check on the commit, rather than nothing. A workflow
 //!   that silently does not run looks exactly like one that has not
 //!   started yet, and somebody waits for it.
-//! - **A deployment with no runner fails the run at trigger time**, with
-//!   an error naming the variables to set, for the same reason.
+//! - **A repository no registered runner can serve fails the run at
+//!   trigger time**, with an error naming the labels nobody has, for the
+//!   same reason.
 //! - **A change from a fork is `blocked`** rather than run: its workflow
 //!   file was written by the contributor, and running it would hand a
 //!   stranger a repo-read token and a machine. It shows as a queued
@@ -42,7 +43,7 @@
 //!   so any member moving makes every one of them stale — including the
 //!   members that did not move, whose build has not seen the new
 //!   combination either. See [`on_changeset`].
-//! - **A `timeout-minutes:` over the fleet's cap fails the run**,
+//! - **A `timeout-minutes:` over the server's cap fails the run**,
 //!   rather than being clamped down to the cap. A build told it may run
 //!   for ten hours and stopped at six fails in a way its author cannot
 //!   explain from anything they wrote.
@@ -789,7 +790,7 @@ pub(crate) async fn start(state: &SharedState, repo: &Repo, cause: &Cause<'_>) {
                 continue;
             }
         };
-        // A `timeout-minutes:` over the fleet's ceiling is a property of
+        // A `timeout-minutes:` over the server's ceiling is a property of
         // the file, so it is refused here beside the parse refusals and
         // for the same reason: whatever the event, the person who wrote
         // it needs to be told, and the file will not run on this
@@ -818,7 +819,7 @@ pub(crate) async fn start(state: &SharedState, repo: &Repo, cause: &Cause<'_>) {
                 &new,
                 "failed",
                 &format!(
-                    "timeout-minutes: {asked} exceeds this fleet's limit of {}",
+                    "timeout-minutes: {asked} exceeds this server's limit of {}",
                     state.max_timeout_minutes
                 ),
                 None,

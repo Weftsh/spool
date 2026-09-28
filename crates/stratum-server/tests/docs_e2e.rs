@@ -124,10 +124,10 @@ fn repos_quickstart_runs_verbatim() {
     let hostport = server.base.strip_prefix("http://").unwrap();
     let subst = |b: &str| {
         b.replace(
-            "https://x:$WEFT_TOKEN@api.weft.sh",
+            "https://x:$WEFT_TOKEN@spool.example.com",
             &format!("http://x:$WEFT_TOKEN@{hostport}"),
         )
-        .replace("https://api.weft.sh", &format!("http://{hostport}"))
+        .replace("https://spool.example.com", &format!("http://{hostport}"))
     };
 
     // Glue between doc blocks supplies the values a reader would have on

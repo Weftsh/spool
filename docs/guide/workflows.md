@@ -464,8 +464,9 @@ What the job gets from the server:
   moment the job reports its verdict**.
 - The log, streamed live to the run page, and a check on the commit.
 
-Every step runs as **`bash -e -c '<your run block>'`** in the checkout,
-with a scrubbed environment — a step does **not** inherit whatever the
+Every step runs as **`bash -e -c '<your run block>'`** in the checkout
+(`sh -e -c` on a machine with no `bash` on the step's `PATH` — install
+bash on your runners), with a scrubbed environment — a step does **not** inherit whatever the
 runner's own environment held. So each step is one bash script: `-e`
 means a multi-line `run:` block stops at its first failing command, and
 `set +e` turns that off if you want it to. There is **no `pipefail`**
@@ -539,7 +540,7 @@ job asking for more than that does not run: the whole file is a **failed
 run**, with the reason
 
 ```
-timeout-minutes: 720 exceeds this fleet's limit of 360
+timeout-minutes: 720 exceeds this server's limit of 360
 ```
 
 on a check named after the file. It is refused rather than quietly
@@ -795,8 +796,8 @@ is the ordinary kind, with the file, the line and a hint. Its wording
 still comes from the hosted service:
 
 ```
-mining software is not permitted on hosted runners
-`xmrig` is mining software; hosted runners are for building and testing your code
+mining software is not permitted in a workflow
+`xmrig` is mining software; workflows are for building and testing your code
 ```
 
 The pool schemes are `stratum+tcp://`, `stratum+ssl://`, `stratum2+tcp://`

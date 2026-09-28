@@ -36,7 +36,7 @@ import { AccessPanel } from "@/views/access";
 import { PoliciesPanel } from "@/views/policies";
 import { href } from "@/router";
 import { formatAgo } from "@/format";
-import { PROSE_LINK } from "@/lib/links";
+import { guide, PROSE_LINK } from "@/lib/links";
 
 /// What `GET …/ci/secret` answers, and the whole of it.
 ///
@@ -665,7 +665,12 @@ function CiIntakePanel(props: {
         The body is signed HMAC-SHA256 with this secret, and there are
         ready-made steps for GitHub Actions, GitLab CI, Buildkite and CircleCI
         in{" "}
-        <a href="/docs/ci-integration/" className={PROSE_LINK}>
+        <a
+          href={guide("ci-integration")}
+          target="_blank"
+          rel="noreferrer"
+          className={PROSE_LINK}
+        >
           the CI integration guide
         </a>
         . A repository mirrored through the GitHub App needs none of this: its
@@ -1002,11 +1007,21 @@ function WebhooksPanel(props: { session: Session; repo: string }) {
         secret above. A push over git or SSH says only that the repository was
         pushed to — it does not name the branch or the commit — so a receiver
         has to fetch to find out what moved. Details in{" "}
-        <a href="/docs/webhooks/" className={PROSE_LINK}>
+        <a
+          href={guide("webhooks")}
+          target="_blank"
+          rel="noreferrer"
+          className={PROSE_LINK}
+        >
           the webhooks guide
         </a>
         , and the whole loop for a repository hosted here in{" "}
-        <a href="/docs/ci-integration/" className={PROSE_LINK}>
+        <a
+          href={guide("ci-integration")}
+          target="_blank"
+          rel="noreferrer"
+          className={PROSE_LINK}
+        >
           CI integration
         </a>
         .
@@ -1028,4 +1043,3 @@ function WebhooksPanel(props: { session: Session; repo: string }) {
     </Panel>
   );
 }
-

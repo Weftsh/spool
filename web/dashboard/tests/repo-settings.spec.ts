@@ -708,7 +708,10 @@ test("a configured secret reports when it moved, never what it is", async ({
   // And the page that explains the exchange, at the built path.
   await expect(
     page.getByRole("link", { name: "the CI integration guide" }),
-  ).toHaveAttribute("href", "/docs/ci-integration/");
+  ).toHaveAttribute(
+    "href",
+    "https://github.com/Weftsh/spool/blob/main/docs/guide/ci-integration.md",
+  );
 });
 
 test("minting shows the secret once, says so, and takes it back out of the page", async ({
@@ -909,7 +912,10 @@ test("a repository with no webhook says nothing is being told about its pushes",
   ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "the webhooks guide" }),
-  ).toHaveAttribute("href", "/docs/webhooks/");
+  ).toHaveAttribute(
+    "href",
+    "https://github.com/Weftsh/spool/blob/main/docs/guide/webhooks.md",
+  );
 });
 
 test("an existing subscription is listed from the server's own response shape", async ({

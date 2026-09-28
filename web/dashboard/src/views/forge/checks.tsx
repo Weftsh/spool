@@ -39,7 +39,7 @@ import {
   SelectValue,
 } from "@/components/ui/select";
 import { Err, Loading } from "@/components/feedback";
-import { FOCUS_RING, PROSE_LINK, STRUCTURAL_LINK } from "@/lib/links";
+import { FOCUS_RING, guide, PROSE_LINK, STRUCTURAL_LINK } from "@/lib/links";
 import { cn } from "@/lib/utils";
 import { href, useQuery } from "@/router";
 
@@ -1031,7 +1031,12 @@ function NoRuns(props: {
               Settings, and the page that explains the whole exchange —
               signing, fields, provider snippets — is the docs page. This
               is the moment somebody needs it. */}
-          <a href="/docs/ci-integration/" className={PROSE_LINK}>
+          <a
+            href={guide("ci-integration")}
+            target="_blank"
+            rel="noreferrer"
+            className={PROSE_LINK}
+          >
             an intake secret
           </a>
           , or connect this repository through the GitHub App to have its

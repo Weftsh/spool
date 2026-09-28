@@ -410,9 +410,10 @@ pub fn run_with(o: &RunOpts, p: &Params, stop: &'static AtomicBool) -> i32 {
             }
             // The credential is dead and re-asking cannot revive it. 2,
             // the same code a job that never started uses, so a systemd
-            // unit with `Restart=on-failure` keeps restarting a runner
-            // that lost its network and stops restarting one that was
-            // removed.
+            // unit with `RestartPreventExitStatus=2` stops restarting a
+            // runner that was removed. A runner that lost its network
+            // never gets here: that is `Trouble`, which backs off and
+            // asks again.
             Claim::Removed => {
                 eprintln!("this runner has been removed; register it again");
                 return 2;

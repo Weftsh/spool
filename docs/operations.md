@@ -329,7 +329,7 @@ GitHub Apps → New GitHub App**, with `PUBLIC` below standing for your
 | Request user authorization (OAuth) during installation | on |
 | Setup URL | `PUBLIC/v1/github/setup`, with **Redirect on update** on |
 | Webhook URL | `PUBLIC/webhooks/github`, active, with a secret you generate |
-| Repository permissions | **Contents: Read and write** (write is what forwards a push made to a mirror to its origin), **Metadata: Read**, **Issues: Read** (imports), **Actions: Read** (verdicts of GitHub Actions runs on mirrored repositories) |
+| Repository permissions | **Contents: Read and write** (write is what forwards a push made to a mirror to its origin), **Workflows: Read and write** (a forwarded push that changes the origin's `.github/workflows/`), **Metadata: Read**, **Issues: Read** (imports), **Actions: Read** (verdicts of GitHub Actions runs on mirrored repositories) |
 | Account permissions | **Email addresses: Read** (signing in with GitHub) |
 | Subscribe to events | **Push** |
 | Where can this App be installed | Only on this account — unless the organisations your people mirror from are elsewhere |

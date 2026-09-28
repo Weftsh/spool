@@ -13,13 +13,13 @@ repository — created in under 100 ms, written and read entirely over HTTP.
    your scripts, with `repo:write`. It is the `$WEFT_TOKEN` in every
    example below.
 
-In the commands on this page, `api.weft.sh` stands for your server's
+In the commands on this page, `spool.example.com` stands for your server's
 host name: put yours in its place.
 
 ## 1. Create a repo
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/repos \
+curl -X POST https://spool.example.com/v1/orgs/acme/repos \
   -H "Authorization: Bearer $WEFT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "name": "session-8412" }'
@@ -33,7 +33,7 @@ and `"public": true` is refused with `400`.
 ## 2. Commit
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/repos/session-8412/commits \
+curl -X POST https://spool.example.com/v1/orgs/acme/repos/session-8412/commits \
   -H "Authorization: Bearer $WEFT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{
@@ -60,11 +60,11 @@ Commits are durable at acknowledgment.
 ```bash
 # newest version (ETag = content hash; If-None-Match gives you 304s)
 curl -H "Authorization: Bearer $WEFT_TOKEN" \
-  https://api.weft.sh/v1/orgs/acme/repos/session-8412/files/src/app.js
+  https://spool.example.com/v1/orgs/acme/repos/session-8412/files/src/app.js
 
 # the same file two commits ago
 curl -H "Authorization: Bearer $WEFT_TOKEN" \
-  "https://api.weft.sh/v1/orgs/acme/repos/session-8412/files/src/app.js?at=$OLD_COMMIT"
+  "https://spool.example.com/v1/orgs/acme/repos/session-8412/files/src/app.js?at=$OLD_COMMIT"
 ```
 
 Also available: `/tree` listings (each entry carries a `size`, `null` for
@@ -78,7 +78,7 @@ sorted, with the default marked.
 
 ```bash
 curl -H "Authorization: Bearer $WEFT_TOKEN" \
-  "https://api.weft.sh/v1/orgs/acme/repos/session-8412/log?path=src/app.js"
+  "https://spool.example.com/v1/orgs/acme/repos/session-8412/log?path=src/app.js"
 ```
 
 ```json
@@ -124,7 +124,7 @@ old version is as sendable as the current one.
 
 ```bash
 # put the branch back where it was before the agent went sideways
-curl -X POST https://api.weft.sh/v1/orgs/acme/repos/session-8412/reset \
+curl -X POST https://spool.example.com/v1/orgs/acme/repos/session-8412/reset \
   -H "Authorization: Bearer $WEFT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "branch": "main", "to": "'$GOOD_COMMIT'", "expected_head": "'$BAD_COMMIT'" }'
@@ -136,7 +136,7 @@ never erases the record. See [audit & undo](audit-and-undo.md).
 ## 5. It's still git
 
 ```bash
-git clone https://x:$WEFT_TOKEN@api.weft.sh/acme/session-8412.git
+git clone https://x:$WEFT_TOKEN@spool.example.com/acme/session-8412.git
 ```
 
 Clone it, push to it, or [export it as a standard bundle](export.md) any

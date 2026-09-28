@@ -40,3 +40,13 @@ export const STRUCTURAL_LINK_2 = `rounded-sm text-ink-2 hover:text-brand hover:u
 /// sentence, an inline `#123`. These do carry the brand colour: there
 /// is no position or weight to make them legible in a paragraph.
 export const PROSE_LINK = `rounded-sm text-brand hover:underline underline-offset-2 ${FOCUS_RING}`;
+
+/// Where the user guide lives. The server serves no docs of its own — the
+/// guide is Markdown in spool's repository — so a link to a page of it
+/// goes there, and opens beside the dashboard rather than replacing it.
+export const GUIDE_URL = "https://github.com/Weftsh/spool/blob/main/docs/guide";
+
+/// One page of the guide, by its file name without `.md`.
+export function guide(page: string): string {
+  return `${GUIDE_URL}/${page}.md`;
+}

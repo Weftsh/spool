@@ -3943,6 +3943,9 @@
           "202": {
             "description": "{ repo, clone_url, status }"
           },
+          "400": {
+            "description": "\"public\": true — `this server has no public repositories: every repository is private to its organization — omit \"public\" or set it to false` — a provider this server has not configured, or a description that is not one line. Nothing is created."
+          },
           "404": {
             "description": "`installation_id` is not one this organization connected. The same answer for an installation another organization holds and for one that does not exist: which installations exist is not this organization's business, and the id would otherwise be a bearer token to somebody else's source."
           },

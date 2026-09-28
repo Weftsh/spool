@@ -45,10 +45,13 @@ org, and the sign-in callback `<public-url>/v1/auth/github/callback`. Both
 are listed as OAuth callback URLs, because with user authorization
 requested GitHub returns the browser to a *callback* URL.
 
-Not requested, and worth knowing: `workflows: write`. GitHub refuses an App
-token a push that creates or changes a file under `.github/workflows/`
-unless the App holds it, so a push to a mirror that touches the origin's
-Actions workflows is refused at the origin.
+  * `workflows: write` — GitHub refuses an App token a push that creates
+    or changes a file under `.github/workflows/` unless the App holds it,
+    so without it a push to a mirror that touches the origin's Actions
+    workflows would be refused at the origin. **Not yet observed against
+    real GitHub**: `scripts/manual-mirror-push.sh` has not pushed such a
+    change, so the exact sentence GitHub answers without the permission —
+    and whether `mirror/forward.rs`'s `classify` names it — is unrecorded.
 
 Compare against `gh api apps/<slug> --jq .permissions,.events` for an
 existing App; an App created before this file changed needs its
@@ -76,6 +79,10 @@ PERMISSIONS = {
     "contents": "write",
     "issues": "read",
     "actions": "read",
+    # A forwarded mirror push that touches `.github/workflows/`. Asked for
+    # on GitHub's documented rule, not yet on an observed refusal — see
+    # the module docstring.
+    "workflows": "write",
     # Account permission: `GET /user/emails` during GitHub sign-in.
     "email_addresses": "read",
 }

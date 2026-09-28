@@ -62,9 +62,10 @@ pub struct NewJob<'a> {
     /// reads, and frozen at creation so a retry runs what the commit
     /// said rather than what `.weft/` says by the time it happens.
     pub spec: &'a str,
-    /// Which fleet this job may run on. Always `self_hosted` here: the
-    /// column also admits `hosted`, which this edition never writes — a
-    /// file that asks for a hosted runner is refused at trigger time.
+    /// Which pool this job may run on. Always `self_hosted` here: the
+    /// column also admits the hosted edition's `hosted`, which spool never
+    /// writes — a file that asks for a hosted runner is refused by the
+    /// parser.
     pub pool: &'a str,
     /// The `runs-on` list as written — lowercased, deduped, file order,
     /// always containing `self-hosted`. Routed on by the claim, and
@@ -187,12 +188,12 @@ pub struct WorkflowJob {
     pub from_fork: bool,
     /// See [`NewJob::spec`].
     pub spec: String,
-    /// `hosted` or `self_hosted`. See [`NewJob::pool`].
+    /// Always `self_hosted` in spool. See [`NewJob::pool`].
     pub pool: String,
     /// See [`NewJob::labels`].
     pub labels: Vec<String>,
-    /// The self-hosted runner that claimed this attempt. `None` for
-    /// every hosted job, and for a self-hosted job nobody has taken.
+    /// The runner that claimed this attempt; `None` for a job nobody has
+    /// taken.
     pub runner_id: Option<String>,
     pub created_at: i64,
     pub started_at: Option<i64>,

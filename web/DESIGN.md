@@ -106,7 +106,7 @@ every highlighted line and no component carries a colour of its own.
 - Sans: **Inter Variable**, self-hosted via `@fontsource-variable/inter`
   (weights used: 400/500/600/700). Mono: **JetBrains Mono**
   (`@fontsource/jetbrains-mono`) — code, stat values, eyebrows, chart
-  labels. No runtime font CDNs; both apps bundle the woff2 at build.
+  labels. No runtime font CDNs; the dashboard bundles the woff2 at build.
 - Display headings tighten tracking: h1 `tracking-[-0.03em]`, section
   h2 `tracking-tight`. Body 16px / 1.65 in prose; UI copy `text-sm`.
 - Numbers always render in mono.

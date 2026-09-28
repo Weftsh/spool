@@ -2178,7 +2178,7 @@ fn a_timeout_over_the_fleets_cap_is_refused_when_the_run_is_triggered() {
         .unwrap_or_else(|| panic!("no run for ci.yml: {runs:?}"));
     assert_eq!(over["state"], "failed", "{over}");
     assert_eq!(
-        over["error"], "timeout-minutes: 720 exceeds this fleet's limit of 60",
+        over["error"], "timeout-minutes: 720 exceeds this server's limit of 60",
         "{over}"
     );
     assert!(
