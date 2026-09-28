@@ -3297,6 +3297,30 @@ const MIGRATIONS: &[&str] = &[
     );
     CREATE INDEX package_uploads_stale ON package_uploads(updated_at);
     "#,
+    // Spool: the tables of what the self-hosted edition does not ship.
+    //
+    // The migrations above are the hosted edition's history, kept whole
+    // so the schema a table was born with is still readable where it was
+    // born. These are the ones nothing in spool reads or writes: billing
+    // and metering (`subscriptions`, `billing_events`, `meter_events`,
+    // `usage_ledger`, `storage_daily`), the package registry, the
+    // Actions cache, GitHub-hosted runner jobs, static sites, stars,
+    // follows and pinned repositories. Dropped rather than left empty so
+    // an operator reading their own database sees the product they run.
+    //
+    // CASCADE because some of them reference each other; nothing that
+    // survives references any of them. `IF EXISTS` so the step is safe on
+    // a database that never had one.
+    r#"
+    DROP TABLE IF EXISTS
+        subscriptions, billing_events, meter_events, usage_ledger, storage_daily,
+        packages, package_versions, package_files, package_tags, package_blobs,
+        package_blocks, package_uploads, package_policy_events,
+        org_ecosystems, org_license_rules, org_reserved_namespaces,
+        cache_entries, github_jobs, site_deploys, sites,
+        repo_stars, follows, pinned_items
+    CASCADE;
+    "#,
 ];
 
 /// The sync `postgres` client drives its own internal runtime with
@@ -3569,6 +3593,63 @@ pub(crate) fn is_unique_violation(e: &postgres::Error) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A migrated database holds none of the hosted edition's tables.
+    ///
+    /// An operator reading their own database should see the product
+    /// they run. And a table nothing reads is a table a future edit can
+    /// start writing to without noticing it was supposed to be gone.
+    #[test]
+    fn a_migrated_database_has_none_of_the_hosted_editions_tables() {
+        let db = ControlDb::open(&stratum_testkit::pg::test_db_url("db_dropped")).unwrap();
+        for table in [
+            "subscriptions",
+            "billing_events",
+            "meter_events",
+            "usage_ledger",
+            "storage_daily",
+            "packages",
+            "package_versions",
+            "package_files",
+            "package_tags",
+            "package_blobs",
+            "package_blocks",
+            "package_uploads",
+            "package_policy_events",
+            "org_ecosystems",
+            "org_license_rules",
+            "org_reserved_namespaces",
+            "cache_entries",
+            "github_jobs",
+            "site_deploys",
+            "sites",
+            "repo_stars",
+            "follows",
+            "pinned_items",
+        ] {
+            let found: Option<String> = db
+                .lock()
+                .query_one("SELECT to_regclass($1)::TEXT", &[&table])
+                .unwrap()
+                .get(0);
+            assert_eq!(found, None, "{table} survived the migrations");
+        }
+        // …and the ones spool uses are still there.
+        for table in [
+            "repos",
+            "workflow_jobs",
+            "usage_daily",
+            "storage_usage",
+            "contributions",
+        ] {
+            let found: Option<String> = db
+                .lock()
+                .query_one("SELECT to_regclass($1)::TEXT", &[&table])
+                .unwrap()
+                .get(0);
+            assert_eq!(found.as_deref(), Some(table));
+        }
+    }
 
     /// A failing migration says what was wrong with it.
     ///
