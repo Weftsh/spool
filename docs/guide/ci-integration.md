@@ -1,28 +1,28 @@
 # CI integration
 
 This page is about **bringing your own CI**: whatever already builds your
-code, wherever it runs, signing a verdict back to us. That is one of two
-ways to get a check onto a commit here.
+code, wherever it runs, signing a verdict back to your Spool server.
+That is one of two ways to get a check onto a commit here.
 
-The other is [Workflows](workflows.md) — hosted CI, a
-`.weft/*.yml` file in the repository, run on our runners, with logs
-you can read while the job is still going and `push`/`change` triggers
-that start it. If you have no CI yet, start there; it is fewer moving
-parts than anything on this page.
+The other is [Workflows](workflows.md) — a `.weft/*.yml` file in the
+repository, run on runners your organization registered, with logs you
+can read while the job is still going and `push`/`change` triggers that
+start it. If you have no CI yet, start there; it is fewer moving parts
+than anything on this page.
 
 The two coexist, and neither replaces the other. Both write into the
-same `check_runs` table under the same names, so a hosted `ci / test`
+same `check_runs` table under the same names, so a workflow's `ci / test`
 and a Buildkite `ci/tests` sit in one list on the Checks tab, are
 required by name the same way, and gate the land queue identically. A
-repository can run both. Note that a hosted workflow starts from a
+repository can run both. Note that a workflow starts from a
 **push** — over HTTPS, over SSH, or through `POST …/commits` — so
 commits that arrive in a mirror by syncing from its origin do not start
 one; a mirrored repository's verdicts come from the paths on this page.
 
-What Weft does with either is **hold the verdict and act on it**. A
-check named `ci/tests` sitting at `failing` blocks the land queue, shows
-in review beside the human approvals, and colours the badge in your
-README. The rest of this page is how a verdict from *your* CI gets here.
+What the server does with either is **hold the verdict and act on it**.
+A check named `ci/tests` sitting at `failing` blocks the land queue and
+shows in review beside the human approvals. The rest of this page is how
+a verdict from *your* CI gets here.
 
 ## Which of the three paths you are on
 
@@ -40,7 +40,7 @@ finishes after the last look is picked up by the next one. **Check
 GitHub again** on the Checks tab asks right now instead of waiting for
 the next sync.
 
-The one requirement is a permission: the installation needs
+It needs your server's GitHub App, and one permission: the installation needs
 **`actions: read`**, which installations created before checks existed do
 not have. Until it is approved, the Checks tab says so in as many words —
 "we cannot read this project's checks" — rather than showing an empty
@@ -52,10 +52,11 @@ That is the whole of it. The rest of this page is for the other two.
 
 ### 2. Hosted here, CI somewhere else — four steps, and none of them is optional
 
-This is the case with the most moving parts, because **nothing on Weft
-starts a build of yours**. Hosted [workflows](workflows.md) are the
-one exception and they run here rather than on your CI; for everything
-else, a repository created here is not connected to anything that runs
+This is the case with the most moving parts, because **nothing on the
+server starts a build of yours**. [Workflows](workflows.md) are the one
+exception and they run on your registered runners rather than on your
+CI; for everything else, a repository created here is not connected to
+anything that runs
 your code, so the loop has to be closed at both ends: something has
 to tell your CI there is work, and something has to bring the verdict
 back. Each half is useless without the other, and each is a different
@@ -71,12 +72,11 @@ than left to be assembled.
    not tell you* below before you write the receiver.
 2. **Give the runner a credential to clone with.** A token with
    `repo:read` ([Authentication](authentication.md)) or a deploy-style
-   SSH key ([SSH](ssh.md)). Your CI fetches from us the same way a
-   person does.
+   SSH key ([SSH](ssh.md)). Your CI fetches from the server the same way
+   a person does.
 3. **Post the verdict back.** The intake secret and the request in the
    rest of this page.
-4. **Read it on the Checks tab**, on the change under review, and in the
-   badge.
+4. **Read it on the Checks tab** and on the change under review.
 
 #### What a delivery does and does not tell you
 
@@ -112,15 +112,14 @@ not exclusive.
 
 ## Where the verdicts end up
 
-Every path lands in the same three places, which is the point of having
+Every path lands in the same two places, which is the point of having
 one vocabulary for them:
 
 - the repository's **Checks** tab, newest first, filterable by state;
 - the **change** under review, beside the human approvals, where a
   `failing` check blocks the land queue and a **required** one must go
   green before the change may land — see
-  [Making a check required](#making-a-check-required);
-- the **badge** in your README.
+  [Making a check required](#making-a-check-required).
 
 ## The shape of it
 
@@ -129,7 +128,7 @@ one vocabulary for them:
    **Settings → CI checks** panel, or with the request below.
 2. Your CI posts a small signed JSON body to
    `/v1/orgs/{org}/repos/{repo}/ci/checks` when a build finishes.
-3. `GET /v1/orgs/{org}/repos/{repo}/badge.svg` renders the result.
+3. The check appears on the Checks tab and on the change.
 
 The secret can do exactly one thing: write a check on the latest patchset
 of a change. It cannot read your code, approve anything, land anything,
@@ -141,18 +140,18 @@ repository.
 ### What the intake does not do for you, said now rather than later
 
 Worth knowing before you wire anything up, because it is a plan you make
-once. None of this is a limit of the product as a whole — hosted
+once. None of this is a limit of the product as a whole —
 [workflows](workflows.md) do run code, keep logs and start
 themselves — it is what the *intake on this page* is and is not:
 
 - **It does not run your code.** A verdict arrives; nothing executes
   here. That is the point of a credential that can only write a check.
-- **It does not start your build.** We announce a push over a
+- **It does not start your build.** The server announces a push over a
   [webhook](webhooks.md) and your CI acts on it. There is no nightly
-  timer here to hang one off, for hosted workflows either.
-- **It does not hold your logs.** We store the `url` you send and link to
-  it; the log lives on your CI and stays there. (A hosted workflow's log
-  *is* held here, and streamed.)
+  timer here to hang one off, for workflows either.
+- **It does not hold your logs.** The server stores the `url` you send
+  and links to it; the log lives on your CI and stays there. (A
+  workflow's log *is* held here, and streamed.)
 - **It has no re-run button.** Re-run it where it ran, and post the new
   verdict.
 
@@ -200,7 +199,7 @@ curl -sS --fail-with-body -X POST "$WEFT_URL/v1/orgs/$ORG/repos/$REPO/ci/checks"
 ```
 
 The signature is HMAC-SHA256 over the **raw request body** with the intake
-secret, hex-encoded, prefixed `sha256=`. It is the same scheme Weft's
+secret, hex-encoded, prefixed `sha256=`. It is the same scheme the server's
 outbound webhooks use, so if you have already written a verifier for
 those, you have already written this.
 
@@ -211,7 +210,7 @@ whether the body names a `change`:
 
 - **Commit-scoped** — `change` absent. The verdict is about the commit
   alone. **Send this one.** It works on every event including a plain
-  push, it fills the repository's **Checks** tab and the badge, and —
+  push, it fills the repository's **Checks** tab, and —
   because a change's checks are the union of its patchset's rows and the
   runs reported against that patchset's commit — it also appears on the
   review page and satisfies the land gate. One request covers everything.
@@ -227,8 +226,8 @@ row was written, so a reporter that wants both can retry whichever
 failed.
 
 > A change key is `I` followed by hex, taken from the commit's
-> `Change-Id: I…` trailer — and if a commit has no such trailer, Weft
-> mints an oid-derived key that your CI cannot compute. It is **never**
+> `Change-Id: I…` trailer — and if a commit has no such trailer, the
+> server mints an oid-derived key that your CI cannot compute. It is **never**
 > the branch name and never the pull request title; anything else is
 > answered `404 no such change`. This is the main reason to prefer the
 > commit-scoped shape: it needs no key at all.
@@ -295,18 +294,18 @@ because a silent green ships code nobody checked and a silent red blocks
 code that is fine. The refusal names the shape it judged you under and
 what the other shape would have taken, so if you sent `pending` on a
 push you are told where `pending` is legal rather than left to conclude
-we have no such state.
+the server has no such state.
 
 ### Why `commit` is required
 
 A new patchset starts with no checks at all, and this is the field that
 keeps it that way. If your run started on patchset 3 and the author
 pushed patchset 4 while it was going, the verdict that arrives is about
-code that is no longer under review; Weft answers `409` and names both
+code that is no longer under review; the server answers `409` and names both
 commits rather than marking the new patchset green on the strength of a
 build of the old one.
 
-For the same reason `sent_at` must be within five minutes of our clock,
+For the same reason `sent_at` must be within five minutes of the server's clock,
 and an identical body is accepted only once. A captured request is worth
 nothing five minutes later.
 
@@ -330,8 +329,8 @@ careful not to do. If you are debugging a `404`, check all three.
 
 All four are the same request with that provider's variable names
 substituted, and all four are **commit-scoped**: no change key, works on
-a push and on a review alike, and it lands on the Checks tab, the badge
-and the review page at once.
+a push and on a review alike, and it lands on the Checks tab and the
+review page at once.
 
 The optional fields are not decoration. `ref`, `event` and `actor` are
 what the Checks tab filters on, `started_at`/`completed_at` are what its
@@ -342,10 +341,10 @@ keyed on `(commit, name)`.
 ### GitHub Actions
 
 ```yaml
-- name: Report to Weft
+- name: Report to Spool
   if: always()
   env:
-    WEFT_URL: https://api.weft.sh
+    WEFT_URL: https://spool.example.com
     ORG: acme
     REPO: app
     WEFT_CI_SECRET: ${{ secrets.WEFT_CI_SECRET }}
@@ -372,10 +371,10 @@ keyed on `(commit, name)`.
 
 ```yaml
 - run:
-    name: Report to Weft
+    name: Report to Spool
     when: always
     environment:
-      WEFT_URL: https://api.weft.sh
+      WEFT_URL: https://spool.example.com
       ORG: acme
       REPO: app
     command: |
@@ -401,11 +400,11 @@ keyed on `(commit, name)`.
 
 ```yaml
 steps:
-  - label: "Report to Weft"
+  - label: "Report to Spool"
     depends_on: tests
     allow_dependency_failure: true
     env:
-      WEFT_URL: https://api.weft.sh
+      WEFT_URL: https://spool.example.com
       ORG: acme
       REPO: app
     command: |
@@ -434,7 +433,7 @@ report-to-stratum:
   stage: .post
   when: always
   variables:
-    WEFT_URL: https://api.weft.sh
+    WEFT_URL: https://spool.example.com
     ORG: acme
     REPO: app
   script:
@@ -479,7 +478,7 @@ derive the key from the commit's own trailer:
 CHANGE=$(git log -1 --format=%B "$COMMIT" | sed -n 's/^Change-Id: *//p' | tail -1)
 ```
 
-If that comes back empty the commit has no trailer, Weft minted a key
+If that comes back empty the commit has no trailer, the server minted a key
 your CI cannot compute, and the commit-scoped report above is the one to
 send — which is why it is the default here.
 
@@ -563,69 +562,16 @@ which is also how you find out you required `ci/tets`. A required name
 nothing ever reports is legal and silent: it holds every change on that
 branch until the budget runs out.
 
-## 3. The badge
-
-```markdown
-[![build](https://api.weft.sh/v1/orgs/acme/repos/app/badge.svg)](https://api.weft.sh/dashboard/acme/app/changes)
-```
-
-Add `?branch=release-2` for a branch other than the default.
-
-Wrap it in a link, as above. A badge nobody can click is a dead end: the
-reader has just been told the build is red and has nowhere to go. Both
-GitHub's own badge generator and shields.io hand you linked Markdown for
-the same reason.
-
-It is drawn to the same geometry as every other badge in your README —
-20px tall, 3px corners, 11px Verdana, 5px of padding either side of each
-word — so `build | passing` comes out 88 pixels wide, which is exactly
-what shields.io serves. It will not be the odd one out in the row.
-
-The SVG is rendered by Weft. There is no shields.io in the path and no
-outbound request of any kind — a badge is fetched by every reader of your
-README, and that is not a log to hand to a third party.
-
-It reports the checks on the **most recent change that landed on the
-branch**, which is the last thing to reach that branch through review:
-
-| Colour | Meaning |
-|---|---|
-| green `passing` | Every check on that change passed |
-| red `failing` | At least one failed |
-| amber `pending` | Something is still running |
-| grey `no status` | Nothing has landed on that branch, or nothing reported |
-
-An open change never colours the branch's badge — it is not on the branch
-yet, and a red review making trunk look broken is the expensive direction
-to be wrong in. A branch with nothing landed is honestly grey, never
-green.
-
-**Post-landing runs work, and they are why the badge can go red at all.**
-Landing already refuses a change with a failing check, so a badge that
-only ever looked at what passed on the way in could never turn red. Point
-your nightly or post-landing suite at the landed change — naming its landed
-commit, which is the branch tip — and trunk breaking after the fact shows
-up where readers see it.
-
-A public repository's badge is readable by anyone, which is the point. A
-**private** repository's badge is masked exactly as the repository is: a
-stranger gets the same answer they would get for a repository that does
-not exist. There is deliberately no badge that says "private" — that
-badge would confirm the repository exists.
-
-The badge carries `Cache-Control: max-age=60`. A badge that caches for a
-day is a badge that lies.
-
 ## What this deliberately is not
 
-Through this intake, Weft holds a verdict and not a *run*. Your build
-happened somewhere we cannot see, and the fields in the request are
-everything we will ever know about it. If you are coming from GitHub
+Through this intake, the server holds a verdict and not a *run*. Your
+build happened somewhere it cannot see, and the fields in the request are
+everything it will ever know about it. If you are coming from GitHub
 Actions, here is what stays on your CI's side, so you can plan around it
-rather than discover it — with, for contrast, what a hosted
-[workflow](workflows.md) has, since that one *does* run here:
+rather than discover it — with, for contrast, what a
+[workflow](workflows.md) has, since that one *does* run on your runners:
 
-| On GitHub, a failing check offers | Through this intake | With a hosted workflow |
+| On GitHub, a failing check offers | Through this intake | With a workflow |
 |---|---|---|
 | Re-run job / re-run failed jobs | Nothing. Re-run it where it ran, and post the new verdict. | Not yet. Push again, or cancel and push again. |
 | Full logs, searchable, per step | Nothing. `url` points at your CI's log page. | The whole log, `text/plain` or streamed live as it is written. |
@@ -634,8 +580,8 @@ rather than discover it — with, for contrast, what a hosted
 | A job-summary panel the run writes | Nothing. | Nothing. |
 | The workflow graph, per-job timing | Nothing. | The run's jobs, their `needs`, and each job's start and finish, over the API. |
 
-Everything in the middle column needs us to be running your code, and
-through this path we are not. What this path gives you instead is the
+Everything in the middle column needs the server to be running your
+code, and through this path it is not. What this path gives you instead is the
 part your CI cannot do for itself: the verdict gating the land queue,
 sitting beside the human approvals, on a credential that cannot touch
 your repository.
@@ -643,13 +589,13 @@ your repository.
 One consequence worth stating plainly: **the `url` field is the whole
 escape hatch.** It is the only route from a red check back to the thing
 that went wrong, so a delivery without one leaves a reviewer with the
-word "failing" and nowhere to go. Set it. (A hosted workflow's rows fill
-it in for themselves: they link to the run's page here, which is where
-its log lives.)
+word "failing" and nowhere to go. Set it. (A workflow's rows fill it in
+for themselves: they link to the run's page here, which is where its log
+lives.)
 
 ## Verifying deliveries the other way
 
-If you want Weft to tell *your* CI when something happens, rather than
+If you want the server to tell *your* CI when something happens, rather than
 the other way round, that is [webhooks](webhooks.md) — outbound push
 events, signed with the same `X-Weft-Signature-256` scheme. The two
 directions use one signing scheme on purpose.

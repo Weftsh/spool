@@ -1,8 +1,7 @@
 # Correctness invariants
 
 These are the load-bearing properties. Every one was earned — most by a
-concrete failure during the research (the ledger in `docs/HANDOFF.md`
-maps invariants to the experiments that forced them). A future
+concrete failure during the research that produced the engine. A future
 implementation can change any format or component freely **as long as
 these still hold**; violating one silently produces corrupt clones,
 torn reads, or wrong refs, usually far from the code that broke it.
@@ -159,21 +158,9 @@ ff proof). `--strict` is deliberately absent (requires a full local
 odb; stock git's `receive.fsckObjects` defaults off for the same
 reason) — connectivity is our check, not index-pack's.
 
-**I12a — A published package version's bytes never change.** The digest
-is verified before the artifact becomes addressable, and republishing a
-version is refused rather than honoured: only yank and deprecate exist.
-npm, PyPI, Maven and Cargo all assume this and cache accordingly, so a
-mutable version is not a policy choice, it is a supply-chain hole — and
-it is what the provenance and the licence gate both rest on. The one
-deliberate exception is an **OCI tag**, which is a moving pointer by
-design; what never changes there is the *manifest*, addressed by its
-digest, and both the old and the new remain pullable that way.
-
 **I13 — Bounded hostile input everywhere.** Varints capped, inflate
 output bounded by declared size, delta opcodes bounds-checked, pkt-line
-≤ 65516, body ≤ 64 MB (an OCI layer is the one exception and is
-streamed into fixed-size blocks rather than buffered, so no request's
-body is ever resident), BFS ≤ 200k visits / 5k frontier lookups,
+≤ 65516, body ≤ 64 MB, BFS ≤ 200k visits / 5k frontier lookups,
 ranged GETs must return 206. Any new parser follows suit; over-budget
 work is rejected loudly to the fallback path, never best-effort.
 

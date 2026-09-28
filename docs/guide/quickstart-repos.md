@@ -1,20 +1,20 @@
 # First commit over REST
 
-Weft Repos gives every user, session, or agent its own real git repository —
-created in under 100 ms, written and read entirely over HTTP.
+Your Spool server can give every user, session, or agent its own real git
+repository — created in under 100 ms, written and read entirely over HTTP.
 
 ## 0. Before you start
 
-Three things, once, and each takes about a minute:
+1. **An account and an organization** on your server
+   ([Authentication](authentication.md)). The repositories below are
+   created in the organization `acme`, and are private to it like every
+   repository on the server.
+2. [Mint a token](authentication.md#minting-and-revoking-tokens) for
+   your scripts, with `repo:write`. It is the `$WEFT_TOKEN` in every
+   example below.
 
-1. [Create an account](/login?mode=signup). Free, no card; your
-   personal namespace holds public repositories.
-2. Create an organization from the dashboard if the repositories will
-   be private or shared with a team. Creating one saves a card and
-   charges nothing, and stays free while everything in it is public; see
-   [organizations and billing](/docs/billing/#creating-one).
-3. [Mint a token](authentication.md#minting-and-revoking-tokens) for
-   your scripts. It is the `$WEFT_TOKEN` in every example below.
+In the commands on this page, `api.weft.sh` stands for your server's
+host name: put yours in its place.
 
 ## 1. Create a repo
 
@@ -25,8 +25,10 @@ curl -X POST https://api.weft.sh/v1/orgs/acme/repos \
   -d '{ "name": "session-8412" }'
 ```
 
-Response: `201` with the repo and its `clone_url`. Need a fleet? Batch up to
-1,000 per call at `/v1/orgs/acme/repos/batch/create`.
+Response: `201` with the repo and its `clone_url`. Need many? Batch up to
+1,000 per call at `/v1/orgs/acme/repos/batch/create`. There is no
+`"public"` flag to set: every repository is private to its organization,
+and `"public": true` is refused with `400`.
 
 ## 2. Commit
 
@@ -138,17 +140,22 @@ git clone https://x:$WEFT_TOKEN@api.weft.sh/acme/session-8412.git
 ```
 
 Clone it, push to it, or [export it as a standard bundle](export.md) any
-time. Adopting Weft is not a lock-in decision.
+time. Nothing about the repository is specific to spool.
 
 ## The same thing from an SDK
 
 Everything above is one call each in the [TypeScript SDK](sdk.md),
-`npm install @weftsh/sdk`:
+`npm install @weftsh/sdk`. Both SDKs default to Weft's hosted service, so
+give them your server's URL:
 
 ```ts
 import { Weft } from "@weftsh/sdk";
 
-const weft = new Weft({ token: process.env.WEFT_TOKEN!, org: "acme" });
+const weft = new Weft({
+  token: process.env.WEFT_TOKEN!,
+  org: "acme",
+  baseUrl: "https://spool.example.com",
+});
 
 const repo = await weft.createRepo({ name: "session-8412" });
 const { commit } = await repo
@@ -167,7 +174,11 @@ and in the [Python SDK](sdk-python.md), `pip install weftsh`:
 import os
 from weftsh import Weft
 
-weft = Weft(token=os.environ["WEFT_TOKEN"], org="acme")
+weft = Weft(
+    token=os.environ["WEFT_TOKEN"],
+    org="acme",
+    base_url="https://spool.example.com",
+)
 
 repo = weft.create_repo(name="session-8412")
 commit = (

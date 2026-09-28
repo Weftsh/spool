@@ -6,7 +6,11 @@ user, session or agent, written and read without a checkout anywhere.
 ```ts
 import { Weft } from "@weftsh/sdk";
 
-const weft = new Weft({ token: process.env.WEFT_TOKEN!, org: "acme" });
+const weft = new Weft({
+  token: process.env.WEFT_TOKEN!,
+  org: "acme",
+  baseUrl: "https://spool.example.com", // your Spool server
+});
 
 const repo = await weft.createRepo();
 
@@ -17,12 +21,13 @@ await repo
   .send();
 
 await repo.readFile("src/app.ts"); // "export const answer = 42;\n"
-await repo.getRemoteURL(); // https://x:weft_…@api.weft.sh/acme/repo-….git
+await repo.getRemoteURL(); // https://x:weft_…@spool.example.com/acme/repo-….git
 ```
 
 It has no dependencies, ships ESM and CommonJS with full types, and runs
-anywhere `fetch` does: Node 20+, Bun, Deno and edge runtimes. The source and
-the full reference are on
+anywhere `fetch` does: Node 20+, Bun, Deno and edge runtimes. It was written
+for Weft's hosted service and defaults to it, so **always pass `baseUrl`**
+with your Spool server's URL. The source and the full reference are on
 [GitHub](https://github.com/weftsh/typescript-sdk); the same API is in the
 [Python SDK](sdk-python.md).
 
@@ -31,8 +36,8 @@ the full reference are on
 From nothing to a repository you have committed to over HTTP and cloned with
 `git`, in about five minutes.
 
-**1. Get a token.** [Create an account](/login?mode=signup) (free, no card)
-and an organization, then mint a token under **Settings → Tokens** with
+**1. Get a token.** Sign in to your Spool server, in an organization you
+belong to, and mint a token under **Settings → Tokens** with
 `org:read` and `repo:write`. `repo:write` creates and commits; `org:read` lets
 the SDK mint the short-lived clone credential in the last step. An `org:admin`
 token does both. See [authentication](authentication.md) for the rest.
@@ -40,6 +45,7 @@ token does both. See [authentication](authentication.md) for the rest.
 ```bash
 export WEFT_TOKEN=weft_…     # the token you just minted
 export WEFT_ORG=acme         # your organization's name
+export WEFT_URL=https://spool.example.com   # your server
 ```
 
 **2. Install.**
@@ -62,7 +68,7 @@ import { Weft } from '@weftsh/sdk';
 const weft = new Weft({
   token: process.env.WEFT_TOKEN!,
   org: process.env.WEFT_ORG!,
-  baseUrl: process.env.WEFT_URL, // optional: defaults to https://api.weft.sh
+  baseUrl: process.env.WEFT_URL!, // your Spool server
 });
 
 // 1. A repository of its own: a real git remote, made in well under a second.
@@ -72,7 +78,7 @@ console.log('created   ', repo.name);
 // 2. A commit, straight over HTTP. No clone, no checkout, no disk.
 const { commit } = await repo
   .createCommit({ message: 'first commit' })
-  .put('hello.txt', 'hello from the Weft SDK\n')
+  .put('hello.txt', 'hello from the SDK\n')
   .send();
 console.log('committed ', commit.slice(0, 7));
 
@@ -93,12 +99,12 @@ name and commit will differ):
 ```text
 created    repo-4259aedc-3173-4cb7-a3cd-1dbf15fc30c7
 committed  889ba6d
-read back  "hello from the Weft SDK\n"
-cloned     hello from the Weft SDK
+read back  "hello from the SDK\n"
+cloned     hello from the SDK
 ```
 
-That repository is yours: it is in the dashboard, you can `git push` to it,
-and it costs nothing while it sits there.
+That repository is yours: it is in the dashboard, and you can `git push` to
+it.
 
 ## Set up the client
 
@@ -110,7 +116,7 @@ anything else.
 const weft = new Weft({
   token: process.env.WEFT_TOKEN!, // weft_<id>_<secret>
   org: "acme", // your organization, or your personal namespace
-  // baseUrl: "https://api.weft.sh", // the default
+  baseUrl: "https://spool.example.com", // your server; the default is Weft's hosted service
   // fetch: myFetch,                 // for retries, logging or a proxy
 });
 ```

@@ -1,24 +1,25 @@
-# Search and discovery
+# Search
 
-One endpoint answers both "find that repo of ours" and "what is public
-here", because they are the same question asked with different
-credentials.
+One endpoint finds a repository across every organization you belong to:
+by name, namespace, description or topic.
 
 ```bash
-curl "https://api.weft.sh/v1/search/repos?q=widget"
+curl -H "Authorization: Bearer $WEFT_TOKEN" \
+  "https://spool.example.com/v1/search/repos?q=widget"
 ```
 
 ```json
 { "repos": [
-    { "id": "01HX…", "org": "acme", "name": "widget",
-      "description": "the fast one", "public": true,
-      "kind": "native", "created_at": 1766000000000 } ],
+    { "id": "01HX…", "org_id": "01HW…", "org": "acme", "name": "widget",
+      "description": "the fast one", "kind": "native",
+      "created_at": 1766000000000 } ],
   "next": null }
 ```
 
-No credential is needed. With one — a session cookie from the dashboard,
-or an org token — the same request also returns repositories in the
-namespaces you belong to.
+Search needs a signed-in person — a dashboard session or a personal
+token — or an organization token. A request with no credential is a
+`401`. A token bound to one repository is a `403`: it was minted to reach
+that repository, and a search is not that repository.
 
 ## What matches
 
@@ -26,8 +27,7 @@ A case-insensitive substring of the **repo name**, its **namespace**, its
 **description**, or any of its **topics**. Nothing else: not file paths,
 not file contents.
 
-An empty `q` matches everything you can see, which is what the
-[discovery page](/discover) browses with.
+An empty `q` matches everything you can see.
 
 ## Narrowing to one topic
 
@@ -39,7 +39,8 @@ it in its description both come back.
 `topic` is the other half, and is exact:
 
 ```bash
-curl "https://api.weft.sh/v1/search/repos?topic=kubernetes"
+curl -H "Authorization: Bearer $WEFT_TOKEN" \
+  "https://spool.example.com/v1/search/repos?topic=kubernetes"
 ```
 
 Only repositories actually carrying that topic. This is what a topic pill
@@ -60,7 +61,8 @@ whose name, namespace, description or topics also mention operator".
 ## What topics exist
 
 ```bash
-curl "https://api.weft.sh/v1/search/topics?limit=24"
+curl -H "Authorization: Bearer $WEFT_TOKEN" \
+  "https://spool.example.com/v1/search/topics?limit=24"
 ```
 
 ```json
@@ -75,12 +77,6 @@ see is not listed, because a list of topic names is an existence oracle
 for the work behind them — "we have a `project-atlas` topic" is a
 sentence about a private repository.
 
-This is what the [discovery page](/discover) builds its topic chips
-from. They were a fixed list of common words until 2026-08-31, which
-matched whatever a repository happened to *say* rather than what anybody
-had filed under, so most of them found nothing on a real instance while
-the topics in genuine use appeared nowhere.
-
 Your query is text, never syntax — `%` matches a literal percent sign and
 `_` a literal underscore, so a search for `100%` finds the repo called
 `100%` rather than every repo there is. Queries longer than 128
@@ -92,17 +88,18 @@ no.
 
 | You are | You see |
 | --- | --- |
-| anonymous | every public repository |
-| signed in | public repositories, plus everything in namespaces you belong to |
-| an org token | public repositories, plus that org's |
-| a repo-scoped token | public repositories only — it was minted to reach one repo, and a search is not that repo |
+| no credential | nothing: `401` |
+| signed in, or a personal token | repositories in every organization you belong to, and in your own namespace |
+| an organization token | that organization's repositories |
+| a token bound to one repository | nothing: `403` |
 
 This is the same rule every other route enforces, and it is deliberately
-*not* per-repo grants: a grant without membership is not access anywhere
-else in the product, so it does not widen search either.
+*not* per-repo grants: a grant without membership does not make a
+repository show up in search. You can still open a repository you hold a
+grant on by its name.
 
 **A description is as private as its repository.** Text you write about a
-private repo is never matched for anyone who cannot already see it.
+repository is never matched for anyone who cannot already see it.
 
 ## Paging
 
@@ -110,7 +107,8 @@ private repo is never matched for anyone who cannot already see it.
 response carries a `next` cursor:
 
 ```bash
-curl "https://api.weft.sh/v1/search/repos?q=&limit=50&after=acme/widget/01HX…"
+curl -H "Authorization: Bearer $WEFT_TOKEN" \
+  "https://spool.example.com/v1/search/repos?q=&limit=50&after=acme/widget/01HX…"
 ```
 
 Ordering is `(namespace, name, id)` — deterministic and stable under
@@ -127,7 +125,7 @@ Descriptions are the only free text search can find a repo by. Set one at
 creation, or afterwards:
 
 ```bash
-curl -X PATCH https://api.weft.sh/v1/orgs/acme/repos/widget \
+curl -X PATCH https://spool.example.com/v1/orgs/acme/repos/widget \
   -H "Authorization: Bearer $WEFT_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "description": "the fast one" }'
@@ -139,44 +137,41 @@ curl -X PATCH https://api.weft.sh/v1/orgs/acme/repos/widget \
   it alone, so an edit to one field never silently changes the other.
 - `repo:write` is enough.
 
-## Publishing a repository
+## There is no publishing a repository
 
-```bash
-curl -X PATCH https://api.weft.sh/v1/orgs/acme/repos/widget \
-  -H "Authorization: Bearer $WEFT_TOKEN" \
-  -H "Content-Type: application/json" \
-  -d '{ "public": true }'
+Every repository is private to its organization, and there is no switch
+that changes that. A create or a `PATCH` that sends `"public": true` is
+refused with `400`:
+
+```
+this server has no public repositories: every repository is private to its organization — omit "public" or set it to false
 ```
 
-Changing visibility needs **`org:admin`**, not `repo:write`: it is the
-one edit here with consequences outside the organization — it puts the
-code in front of anonymous search — and it is recorded in the
-[audit trail](audit-and-undo.md) as `repo.visibility`, which is the
-question asked after a leak.
+`"public": false`, or leaving the field out, is accepted. The refusal is
+there so that a script written for Weft's hosted service finds out,
+rather than being quietly handed a private repository it thought it had
+published.
 
-## Absent and private answer the same
+## Absent and unreadable answer the same
 
-Anonymously, a repository that does not exist and one that is private
-both answer **401**:
+With no credential, every repository answers **401**, whether it exists
+or not:
 
 ```console
-$ curl -si https://api.weft.sh/v1/orgs/acme/repos/payments | head -1
+$ curl -si https://spool.example.com/v1/orgs/acme/repos/payments | head -1
 HTTP/1.1 401 Unauthorized
-$ curl -si https://api.weft.sh/v1/orgs/acme/repos/no-such-repo | head -1
+$ curl -si https://spool.example.com/v1/orgs/acme/repos/no-such-repo | head -1
 HTTP/1.1 401 Unauthorized
 ```
 
-Two different answers would be an enumeration oracle: ask for a name,
-read the status code, and you have learned whether that private
-repository exists. The git wire has always answered `401` to both, and
-this is REST catching up — the two front doors now agree about the same
-repository.
+Once you *have* presented a credential, a repository you cannot read and
+one that does not exist both answer **404**. Having authenticated tells
+you nothing about repositories you cannot reach, so a token from another
+organization and a real absence are indistinguishable. Two different
+answers would be an enumeration oracle: ask for a name, read the status
+code, and you have learned whether somebody else's repository exists.
+The git wire answers the same way.
 
-Once you *have* presented a credential the answer is **404** for both
-instead. Having authenticated tells you nothing about repositories you
-cannot reach, so a foreign token and a real absence are indistinguishable
-as well.
-
-Namespace names are not masked. They are globally unique and claimed
-first-come, so signup already answers "does `acme` exist?" to anyone who
-asks; pretending otherwise here would be theatre.
+Namespace names are not masked. They are unique on the server and
+claimed first-come, so signup already answers "does `acme` exist?" to
+anyone who asks; pretending otherwise here would be theatre.

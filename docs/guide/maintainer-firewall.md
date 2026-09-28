@@ -5,11 +5,10 @@ no intake worker, no trust ladder and no style gate in the product today; a
 change reaching a repository today reaches review the moment it is
 registered. What *does* exist, and is unchanged by any of this, is the
 machinery the design sits in front of: [changes, patchsets, `OWNERS`
-approval sufficiency and the land queue](code-review.md). We publish the
-design ahead of the build for the same reason this site publishes what the
-land queue cannot do as plainly as what it can — a maintainer deciding where
-to host a project is better served by a plan they can argue with than by
-silence.
+approval sufficiency and the land queue](code-review.md). The design is
+written down ahead of the build for the same reason these pages say what
+the land queue cannot do as plainly as what it can — a plan you can argue
+with is more use than silence.
 
 Read every "would" below as load-bearing.
 
@@ -108,31 +107,32 @@ today.
 ## Two things this deliberately will not do
 
 These are cuts, not gaps waiting to be filled. The first is about what
-we will execute on behalf of a stranger; the second is about the rule
-that every test in this repository is hermetic.
+the server will execute on behalf of somebody who is not a contributor;
+the second is about the rule that every test in this repository is
+hermetic.
 
-**The firewall will not run your lint command against a stranger's
+**The firewall will not run your lint command against an untrusted
 diff.** Executable gates on an *untrusted* patch — project-supplied
-commands, run on our servers, on code a person who is not a contributor
+commands, run on the server, on code a person who is not a contributor
 just sent you — is a sandboxing product, not a forge feature, and
 shipping a half-built one is how a forge becomes an
 arbitrary-code-execution surface. This is why a change whose commits come from
 another repository is recorded as `blocked` and its
 [workflows](workflows.md) do not start: they were written by the
-contributor, and running them would hand a stranger a repository token
-and a machine. There is no approval button yet. Branches in the
-repository itself are a different question, and their workflows do run
-here.
+contributor, and running them would hand somebody who may only read the
+repository a token and one of your runners, until a maintainer presses
+**Approve and run workflows** for that tip. Branches in the repository
+itself are a different question, and their workflows do run on push.
 
 **The server will never call a model.** There is to be no outbound model
 call anywhere in intake. An outbound call could not be tested hermetically,
 could not be reasoned about when the far end is slow or wrong, and would put
-your diffs in front of a third party — which would contradict
-[what we say about AI](/ai-policy).
+your diffs in front of a third party — which a self-hosted forge exists
+not to do.
 
 The design's replacement is an inbound seam: a triage report **posted to**
 the change by an agent principal holding a token, exactly like a CI check,
 landing as a gate row on the change. Model-assisted triage would then be an
 agent you run, under your policy, with your model, reporting in like any
 other machine — a deployment decision you make, rather than one made on your
-behalf inside our worker.
+behalf inside the server.

@@ -1,20 +1,21 @@
 # Service limits
 
 These are the v1 limits, stated plainly. Each traces to a measured or
-designed bound in the engine, not to a guess.
+designed bound in the engine, not to a guess. None of them is a quota:
+Spool counts nothing against a plan, and how much you store is limited
+by your own bucket.
 
 | Limit | Value | Notes |
 |-------|-------|-------|
 | Push / request body | 64 MB | oversized pushes get `413`; large-object offload (LFS-class) is on the roadmap |
 | Concurrent pushers per repo | ~16 | measured burst ceiling; beyond it pushes are politely rejected with a retry hint, never corrupted |
-| Batch create/delete | 1,000 repos per call | pipeline batches for larger fleets |
-| Repo listing page | 1,000 | keyset pagination; fleets of millions list fine |
+| Batch create/delete | 1,000 repos per call | split larger sets into several calls |
+| Repo listing page | 1,000 | keyset pagination; millions of repositories list fine |
 | Commit operations per request | 10,000 | one commit = one atomic ref transaction |
 | Object ids | SHA-1 | layouts are format-versioned; SHA-256 repos are recognized and rejected loudly today |
 | Shallow clones | `--depth 1` fast path | deeper `--depth N` falls back with an explicit error rather than degrading silently |
 | Partial clone filters | not yet advertised | stock git therefore never sends them; full clones serve instead |
 | CDN offload | opt-in, current-tip only | needs `fetch.uriprotocols` on the client (git ≥ 2.34) and a pack at the current tip; otherwise the clone is served inline, correct either way |
-| Free plan | repo-count capped | creation past the cap returns `402`; reads keep working |
 
 ## Behavioral guarantees behind the numbers
 

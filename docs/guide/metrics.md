@@ -1,13 +1,13 @@
-# Metrics & usage
+# Metrics and usage
 
 ## Per-repo serving metrics
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://api.weft.sh/v1/orgs/acme/repos/widget/metrics?from=$FROM_MS&to=$TO_MS"
+  "https://spool.example.com/v1/orgs/acme/repos/widget/metrics?from=$FROM_MS&to=$TO_MS"
 ```
 
-Returns, per kind:
+It needs `repo:read` on the repository. It returns, per kind:
 
 | Kind | Meaning |
 |------|---------|
@@ -19,8 +19,7 @@ Returns, per kind:
 
 Percentiles come from log-scale latency histograms recorded per minute, so
 p99 is a real tail measurement, not an average in disguise. Add
-`&format=csv` for the spreadsheet-ready version — the artifact your renewal
-conversation wants.
+`&format=csv` for the spreadsheet-ready version.
 
 The metrics response also carries the mirror's current sync state
 (`last_sync_at`, `sync_error`), so one call answers "is it healthy and how
@@ -29,23 +28,24 @@ fast is it".
 ## Org usage
 
 ```bash
-curl -H "Authorization: Bearer $TOKEN" https://api.weft.sh/v1/orgs/acme/usage
+curl -H "Authorization: Bearer $TOKEN" https://spool.example.com/v1/orgs/acme/usage
 ```
 
-Daily rows of `active_repos` (repos that did any work), `total_repos`,
-`requests`, `bytes_out`, `hosted_minutes`, `private_bytes_out` and
-`private_bytes_stored`, plus your plan. `bytes_out` is everything served,
-public included; only `private_bytes_out`, `hosted_minutes` and
-`private_bytes_stored` reach the bill, and they do so through the
-organization's [pool](/docs/billing/#what-a-seat-brings): the three
-`meters` on the billing view are these rows summed over the billing
-period. `private_bytes_stored` is the day's average, not its peak.
-**Dormant repos never appear in `active_repos`, and dormant repos are
-free** — what they store is the one thing a dormant private repository
-still counts for.
+```json
+{ "days": [ { "day": "2026-09-27", "active_repos": 4, "total_repos": 31,
+              "requests": 18230, "bytes_out": 2143290112 } ] }
+```
 
-## Prometheus
+Up to 90 daily rows, newest first: `active_repos` (repositories that did
+any work that day), `total_repos`, `requests` and `bytes_out` (everything
+served). It needs `org:read`. **Dormant repositories never appear in
+`active_repos`** — a repository nobody touched that day did no work.
+
+## Prometheus and health checks
 
 `GET /metrics` exposes process-level counters
 (`stratum_requests_total`, `stratum_bytes_out_total`) for your own
-monitoring stack, alongside `GET /healthz` for liveness checks.
+monitoring stack. `GET /healthz` answers while the process is up, for
+liveness. `GET /readyz` answers `200 ready` only when the node can reach
+both PostgreSQL and the object store, and `503` naming the one that
+failed otherwise — gate traffic on that one.

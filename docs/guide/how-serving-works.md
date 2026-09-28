@@ -1,6 +1,6 @@
 # How serving works
 
-Weft's nodes hold no repositories. Everything lives in S3-compatible
+A Spool server's nodes hold no repositories. Everything lives in S3-compatible
 object storage as immutable, precomputed artifacts; serving a clone is
 choosing byte ranges, not building packs.
 
@@ -36,7 +36,7 @@ hold. Single-commit fetches are routinely 40× smaller on the wire than what
 bitmap-serving git ships.
 
 Every produced clone must pass `git fsck --full --strict`; that gate runs in
-our CI on every change and has never been waived.
+the project's CI on every change and has never been waived.
 
 ## Writes
 

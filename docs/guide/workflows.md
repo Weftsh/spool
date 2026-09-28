@@ -6,7 +6,7 @@ you can read while it is still being written, and its verdict arrives on
 the commit's **Checks** tab as a check named after the job, where it
 gates landing exactly like a check posted by any other CI.
 
-There is no hosted fleet behind a spool server. Every job runs on a
+There is no hosted fleet behind a Spool server. Every job runs on a
 runner somebody in your organization registered with `weft-runner`, and
 a push with no runner that can take its jobs fails at once and says so.
 [Running a self-hosted runner](self-hosted-runners.md) is the operator's
@@ -58,7 +58,7 @@ a workflow change is tested by the push that contains it, and a branch
 that has not landed yet runs its own version of the file.
 
 `.weft/site.yml` and `.weft/site.yaml` are skipped. They configure a
-static site on Weft's hosted service, which spool does not serve, and a
+static site on Weft's hosted service, which Spool does not serve, and a
 repository moved here keeps them without seeing them refused as broken
 workflows.
 
@@ -783,7 +783,7 @@ approved: recomposing does not put it back behind the button.
 
 A runner executes a `run:` line somebody wrote, on a machine you pay
 for, and the thing people most often do with somebody else's CPU is mine
-cryptocurrency. Three things stand in the way of that on a spool server.
+cryptocurrency. Three things stand in the way of that on a Spool server.
 Each can be walked around on its own, which is why there are several.
 
 **1 — the file is refused when you push it.** A workflow that names known
@@ -840,7 +840,7 @@ an admin can see what happened and whose change it was. Nothing is
 switched off: the machine is yours, and what to do next is your
 decision.
 
-What spool does not give you is network control. Where a runner's
+What Spool does not give you is network control. Where a runner's
 traffic may go is decided by the network you put it on — see
 [Isolating it](self-hosted-runners.md#isolating-it).
 
@@ -963,7 +963,7 @@ is up to whoever runs the server: the AWS reference deployment expires
 them after **90 days** (`ci_log_retention_days`). They are not permanent
 records.
 
-## How verdicts reach the rest of spool
+## How verdicts reach the rest of Spool
 
 Each job mirrors itself into one check row on its commit, named
 `<workflow name> / <job key>` and linking back to the run it came from

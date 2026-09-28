@@ -1,16 +1,15 @@
-# Stratum design system
+# Spool design system
 
-One system across the marketing site, docs, and dashboard. Tokens live in
-[`shared/tokens.css`](shared/tokens.css); the Tailwind utility mapping both
-apps import lives in [`shared/theme.css`](shared/theme.css). Change colors
-in tokens.css only — components never hardcode a hex.
+The system the dashboard is built on. Tokens live in
+[`shared/tokens.css`](shared/tokens.css); the Tailwind utility mapping the
+dashboard imports lives in [`shared/theme.css`](shared/theme.css). Change
+colors in tokens.css only — components never hardcode a hex.
 
-The look: **emerald-on-charcoal**, in the family of modern infra companies
-(Neon, Supabase, Render) without cloning any of them. Dark is the signature
-theme — the marketing pages always render it (`theme="dark"` on the Base
-layout → `data-theme` on `<html>`); docs and the dashboard follow the
-visitor's system preference. Every color token is written once as
-`light-dark(light, dark)`, so there is exactly one place a value can drift.
+The look: **emerald-on-charcoal**, in the family of modern infra tools
+without cloning any of them. Dark is the signature theme; the dashboard
+follows the person's system preference. Every color token is written once
+as `light-dark(light, dark)`, so there is exactly one place a value can
+drift.
 
 ## Palette
 
@@ -108,7 +107,7 @@ every highlighted line and no component carries a colour of its own.
   (weights used: 400/500/600/700). Mono: **JetBrains Mono**
   (`@fontsource/jetbrains-mono`) — code, stat values, eyebrows, chart
   labels. No runtime font CDNs; both apps bundle the woff2 at build.
-- Display headings tighten tracking: hero h1 `tracking-[-0.03em]`, section
+- Display headings tighten tracking: h1 `tracking-[-0.03em]`, section
   h2 `tracking-tight`. Body 16px / 1.65 in prose; UI copy `text-sm`.
 - Numbers always render in mono.
 
@@ -118,7 +117,6 @@ every highlighted line and no component carries a colour of its own.
   card that **is a link** takes the hover `hover:border-brand/40
   transition`; a static panel has no hover state at all, because a card
   that lights up and then does nothing when clicked is a broken promise.
-  The built-site suite fails any non-link element carrying that hover.
 - Primary button: `rounded-lg bg-brand px-5 py-2.5 font-medium
   text-brand-ink hover:bg-brand-strong hover:shadow-[var(--glow-brand)]
   transition`.
@@ -129,37 +127,17 @@ every highlighted line and no component carries a colour of its own.
 - A grid that gains columns at a breakpoint states its base column:
   `grid grid-cols-1 md:grid-cols-2`, never `grid md:grid-cols-2`. An
   implicit column sizes to its widest child's min-content, so one `<pre>`
-  in a card made two product pages scroll sideways on a phone. The
-  built-site suite holds every page to it.
+  in a card made two pages scroll sideways on a phone.
 - A border with no colour of its own is the hairline: `tokens.css` sets
   `border-color: var(--border)` in the base layer, because Tailwind v4
   otherwise draws a bare `border` in `currentColor` (the dashboard
   sidebar's edge was a white line in dark until it did).
 
-### On the marketing site, these are components
-
-The patterns above are spelled once, in `site/src/components/`, and the
-pages compose them — the button class string had been copied twenty-odd
-times and had started to drift.
-
-| Component | What it is |
-|---|---|
-| `Button` | `variant="primary" \| "secondary"`, `size="md" \| "sm"`; always a link |
-| `Eyebrow` | `tone="brand" \| "accent" \| "muted"` |
-| `Card` | a static panel, or with `href` a link card with the hover |
-| `Arrow` | the → every onward link carries, in `currentColor` |
-| `Logo` | the mark and wordmark (the favicon data-URI is the one other copy) |
-| `PageHeader` | a product page's top: eyebrow, h1, lede slot, sign-up + quickstart |
-| `CtaBand` | the closing call to action every marketing page ends on |
-
-A product page is `PageHeader` → its sections → `CtaBand`. The primary
-action on both is sign-up; the secondary is the page's own quickstart.
-- Containers: marketing `max-w-6xl px-5`; dashboard content column
-  `max-w-5xl px-5` (intentionally denser), centered inside the sidebar
-  shell; **forge `max-w-[1280px] px-4`** — the public repository and
-  profile pages, which carry a file tree and an About panel side by side
-  and cannot be read at the dashboard's width. Three containers, and they
-  are never mixed within a page. All of them take `min-w-0`: without it a
+- Containers: dashboard content column `max-w-5xl px-5` (intentionally
+  denser), centered inside the sidebar shell; **forge `max-w-[1280px]
+  px-4`** — the repository and profile pages, which carry a file tree and
+  an About panel side by side and cannot be read at the dashboard's
+  width. Two containers, and they are never mixed within a page. All of them take `min-w-0`: without it a
   wide table or a long branch name widens the page instead of
   ellipsising, and the walkthrough audits `documentElement.scrollWidth`.
   Anything full-bleed — the tab strip's hairline crossing the viewport —
@@ -175,23 +153,14 @@ action on both is sign-up; the secondary is the page's own quickstart.
   `min-w-0` on the flex child so wide tables ellipsise instead of
   widening the page. The top bar is collapse trigger + breadcrumb only;
   navigation lives in the sidebar. Settings are two groups in the rail,
-  by whose setting it is — **Organization** (members, billing, runners,
-  teams, activity) and **Your account** (tokens, SSH keys, email
-  addresses, password) — each entry with an icon no other entry shares,
+  by whose setting it is — **Organization** (members, runners, teams,
+  activity) and **Your account** (tokens, SSH keys, email addresses,
+  password) — each entry with an icon no other entry shares,
   because the collapsed rail is icons alone.
 - Inline code: `rounded bg-surface-2 px-1.5 py-0.5 font-mono` (+ hairline
   border in prose).
 
-## Signature moves — and their limits
-
-- The landing hero is two columns from `lg`: the promise on the left, and
-  on the right a static terminal card showing the change each door asks
-  for (a clone URL, a REST call, a `runs-on` line). Developers decide on
-  what they would type, not on adjectives.
-- A subtle radial emerald glow behind the hero:
-  `radial-gradient(ellipse 60% 50% at 50% -10%, rgb(62 207 142 / 0.13), transparent 70%)`.
-- **At most one gradient-text usage on the whole site.**
-- An optional dot-grid texture band on at most one section.
+## Links
 
 **Links.** Structural links — repo names, issue titles, usernames, file
 names, breadcrumb segments — are `text-ink`/`text-ink-2` and reveal
@@ -201,7 +170,7 @@ sentence, carry `--brand`. GitHub paints all of them blue, and doing that
 with emerald would put brand color on forty elements of a page. Focus is
 always a visible `ring-2 ring-brand` on both kinds: hover-only affordance
 is not an affordance for a keyboard. The classes are spelled once in
-`dashboard/src/lib/links.ts`; see [`FORGE-UX.md`](FORGE-UX.md) §9.
+`dashboard/src/lib/links.ts`.
 
 **Do:** mono for every number · let charcoal stay neutral and emerald carry
 identity · hover states move border color before anything glows.
@@ -212,14 +181,10 @@ shadows in dark · emerald body text · more than two accent hues in a view.
 ## Changing the palette
 
 1. Edit `shared/tokens.css` (both halves of each `light-dark()`).
-2. Update the favicon data-URIs in `site/src/layouts/Base.astro` and
-   `dashboard/index.html` (the one place hexes are hardcoded).
+2. Update the favicon data-URI in `dashboard/index.html` (the one place
+   hexes are hardcoded).
 3. Re-validate the series palette (dataviz validator) against both
    `--surface-1` values.
-4. Regenerate the landing-page dashboard screenshots (the landing page is
-   pinned dark, so it shows only `overview-dark.png` — never a
-   `prefers-color-scheme` swap):
-   `cd web/dashboard && SCREENSHOT_DIR=../site/public/screenshots npx playwright test screenshots`.
 
 ## Dashboard components
 

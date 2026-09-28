@@ -1,6 +1,6 @@
 # Changes, OWNERS & the land queue
 
-Review on Weft is per commit, not per branch. A **change** is one
+Review on Spool is per commit, not per branch. A **change** is one
 commit's review identity; its content moves through numbered
 **patchsets**; approvals attach to a patchset; and landing goes through a
 queue that only ever fast-forwards your target branch — through the same
@@ -136,9 +136,9 @@ Approvals attach to the **latest patchset**. Push a revision and the
 count starts over: an approval of yesterday's patchset says nothing about
 today's. Approving takes a person (session or personal token); a service
 token is refused with `403`. Anyone who can read the change may approve
-it, including somebody with no role in the org reading a public
-repository — but sufficiency counts write access, so an outsider's
-approval is recorded and moves nothing.
+it, including a `viewer` or somebody reading through a per-repo grant —
+but sufficiency counts write access, so a reader's approval is recorded
+and moves nothing.
 
 ```
 POST   …/changes/{change}/approve     approve the latest patchset
@@ -218,7 +218,8 @@ back on.
 Two terms are about a person, so `author:@me` and `needs:my-approval`
 need one: anonymous is `401` and a service token is `403`. An address
 that names no account here is an empty page rather than a refusal — this
-list is readable by strangers, and it is not an address oracle. `?state=`
+list is readable by everybody who can read the repository, and it is not
+an address oracle. `?state=`
 still works and is the same filter as `is:`; given both, they must agree.
 
 ### `needs:my-approval`
@@ -296,7 +297,8 @@ Landing takes `repo:write`. Abandoning takes `repo:write` **or** being the
 change's author: somebody who proposed from a [fork](forks.md) holds
 only read access on the repository they proposed to, and a change they
 could open but never close would be theirs to leave lying around. Anyone
-else without write access gets the same `404` a stranger does.
+else without write access gets the same `404` as somebody who cannot read
+the repository at all.
 
 A change that is a member of a [changeset](changesets.md) — one
 review unit spanning several repositories — refuses to land or be
@@ -382,12 +384,10 @@ patchset (`line` is 1-based and needs `path`). A comment may name a
 can both comment (CI saying "the perf suite regressed" is review too),
 and every comment is attributed honestly: a person as themselves, a
 service principal as `service`, never borrowing a human name. Bodies
-are bounded at 4,000 characters; anonymous readers of public repos may
-read a conversation, not join it. Signed in is enough: a person with no
-role in the org comments on a public repository's change as themselves —
-that is the outside contributor answering a review of their own fork's
-change — while a service token from another organisation reads as
-anonymous and is refused. In the dashboard, line comments sit
+are bounded at 4,000 characters. Reading the repository is enough to
+comment: a `viewer`, or a contributor whose change came from their fork,
+comments as themselves. With no credential the answer is `401`, and a
+credential that cannot read the repository gets the masked `404`. In the dashboard, line comments sit
 inside the diff under the exact line, and the conversation records the
 anchor as `path:line`. A comment can also be **drafted** rather than
 posted — see [A review is one act](#a-review-is-one-act-and-it-can-say-no).
@@ -477,8 +477,8 @@ carries no `Change-Id` is refused for exactly the reason
 [above](#change-identity-the-change-id-trailer): a commit built from it
 would open a new change rather than a revision of this one.
 
-**Applying commits, so it takes write access.** A reader of a public
-repository is told, in words, that the change's author applies it. A
+**Applying commits, so it takes write access.** A reader without write
+access is told, in words, that the change's author applies it. A
 "commit suggestion" button in front of somebody who cannot push is a
 control that leads nowhere.
 
@@ -528,8 +528,7 @@ POST   …/changes/{change}/review/withdraw take back a standing "no"
 
 A comment posted with `pending: true` is **yours alone** until you
 submit. Not visible to the author, not to another reviewer, not to an
-admin, not to a service token, and not to an anonymous reader of a
-public repository. `GET …/comments` shows everybody the published
+admin, and not to a service token. `GET …/comments` shows everybody the published
 conversation and shows *you* your own drafts, flagged `pending: true`;
 that filter lives in one query, deliberately, because a leaked draft is
 the worst thing this feature could do. Discarding a review takes its
@@ -576,7 +575,7 @@ up the change when the repository would have counted your approval —
 because you own one of the touched paths, or, where OWNERS says `*` or
 governs nothing, because you have write access. Everyone else's is
 **recorded, rendered, and advisory**. GitHub lets any passer-by wedge a
-pull request; we can do better precisely because the reviewer set is
+pull request; this can do better precisely because the reviewer set is
 computed rather than nominated.
 
 The verdict endpoint says which is which:
@@ -640,7 +639,8 @@ steps, using systems you already run:
    fires on every branch update, `change.landed` / `change.ejected` on
    queue outcomes.
 2. **Run whatever you run** — GitHub Actions, Buildkite, Jenkins, a
-   shell script. Weft does not care who does the computing.
+   shell script, or a [workflow](workflows.md) on your own runners.
+   The server does not care who does the computing.
 3. **Report the verdict as a check** on the change:
 
 ```

@@ -1,7 +1,7 @@
 # Audit & undo
 
 Agent platforms need two answers on demand: *"what did the agent change and
-when?"* and *"put it back."* Weft treats both as first-class API surface.
+when?"* and *"put it back."* Spool treats both as first-class API surface.
 
 ## The audit trail
 
@@ -19,7 +19,7 @@ Query it per repo, per person, per action, or by time:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://api.weft.sh/v1/orgs/acme/audit?repo=session-8412&limit=100"
+  "https://spool.example.com/v1/orgs/acme/audit?repo=session-8412&limit=100"
 ```
 
 | Parameter | What it narrows to |
@@ -41,9 +41,9 @@ cursor back on the next request until a page comes back short:
 ```bash
 # Newest first, then the page before it.
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://api.weft.sh/v1/orgs/acme/audit?order=desc&limit=100"
+  "https://spool.example.com/v1/orgs/acme/audit?order=desc&limit=100"
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://api.weft.sh/v1/orgs/acme/audit?order=desc&limit=100&before=<next_before>"
+  "https://spool.example.com/v1/orgs/acme/audit?order=desc&limit=100&before=<next_before>"
 ```
 
 `format=csv` returns the same rows for a spreadsheet or a ticket. Every
@@ -52,7 +52,7 @@ stay inside their cell:
 
 ```bash
 curl -H "Authorization: Bearer $TOKEN" \
-  "https://api.weft.sh/v1/orgs/acme/audit?format=csv&since=1735689600000" \
+  "https://spool.example.com/v1/orgs/acme/audit?format=csv&since=1735689600000" \
   -o activity.csv
 ```
 

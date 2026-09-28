@@ -1,4 +1,4 @@
-# Contributing to stratum-core
+# Contributing to Spool
 
 [`CLAUDE.md`](CLAUDE.md) is the companion to this file: the gates a
 change has to survive, the thresholds as numbers, and what to do the
@@ -21,10 +21,10 @@ The engine's correctness model is written down and enforced, not folklore:
   layout and the two-mutable-pointers rule (everything else in the bucket
   is immutable; the manifest moves only by compare-and-swap).
 
-The research repo's dead-ends ledger also still applies: commit-order
-segments, bitmap-assisted ingest walks, sparse walks, interleaved per-ref
-emissions, and `index-pack --strict` on pushes were all tried and
-rejected — don't reintroduce them.
+Some designs were tried in the research that produced the engine and
+rejected: commit-order segments, bitmap-assisted ingest walks, sparse
+walks, interleaved per-ref emissions, and `index-pack --strict` on
+pushes. Don't reintroduce them.
 
 ## Vendored code
 
@@ -33,7 +33,51 @@ research repo and stay byte-close to it. Every intentional change carries
 a `// STRATUM-CORE DIVERGENCE:` comment explaining why. Don't refactor
 these crates for style.
 
+## Layout
+
+| | |
+|---|---|
+| `crates/stratum-store` | the object-store client (SigV4, conditional PUT), manifest, locator plane |
+| `crates/stratum-proto` | git protocol v2 serving and receive-pack |
+| `crates/stratum-engine` | ingest, locator build, compaction, GC |
+| `crates/stratum-control` | the control plane on PostgreSQL: orgs, repos, people, tokens, audit, review, workflows, runners |
+| `crates/stratum-server` | the server binary: git over HTTP and SSH, the REST API, the dashboard, background workers |
+| `crates/stratum-runner` | the runner agent, built as `weft-runner` |
+| `crates/stratum-testkit` | hermetic test harnesses: MinIO, PostgreSQL, the fakes |
+| `web/dashboard` | the web UI (React, Vite) |
+| `web/shared` | design tokens and the Tailwind theme |
+| `deploy/` | the container image's companions and the AWS reference deployment |
+| `docs/` | operations, deployment, the user guide and `openapi.json` |
+| `reference/` | the storage model, formats and invariants |
+
+The crate names are the engine's original ones; the binaries are
+`stratum-server` and `weft-runner`.
+
 ## Checks to run before pushing
+
+```sh
+scripts/ci-local.sh            # everything CI runs, in CI's order
+scripts/ci-local.sh --fast     # without the chaos suite
+scripts/ci-local.sh --only web # one job
+```
+
+CI has four jobs, and the script runs the same four from the same
+commands:
+
+| Job | What it runs |
+|---|---|
+| `correctness-gate` | `cargo fmt --all --check`, `cargo clippy --workspace --all-targets -- -D warnings`, `cargo test --workspace --release` |
+| `chaos` | `cargo test -p stratum-server --test chaos_e2e --release -- --ignored` |
+| `web` | the dashboard's unit tests (`npx vitest run`), its production build, and Playwright e2e with `CI=true` |
+| `terraform-validation` | `terraform fmt -check` and `validate` on `deploy/terraform`, its bootstrap and the env-lock module, and the env-lock module's own test, all credential-free |
+
+The script also names two manual gates it cannot run for you —
+`s3-contract` and `github-signin-contract` — as **SKIP**s. A skip is not
+a pass; the summary refuses to say "good to push" while there is one.
+`docs_e2e::the_local_ci_script_covers_every_job_the_workflow_declares`
+fails if the workflow grows a job the script has not been taught.
+
+For a quicker loop while you work, the same checks by hand:
 
 ```sh
 cargo fmt --all --check
@@ -58,15 +102,16 @@ Two machine-wide singletons are why it exists.
 
 *MinIO.* The tests need one, and MinIO no longer publishes prebuilt
 binaries: `dl.min.io` answers `410 Gone` for every platform of the
-pinned release and the GitHub release carries no assets — the same
-withdrawal that took `minio/minio` off Docker Hub. The container image is
-the only artifact left, `scripts/fetch-minio.sh` pulls the binary out of
-it over the registry API (no daemon, because the `weft-2x` runners
-deliberately have none), and that binary is Linux. So on a Mac there is
-nothing to fetch and the answer is a container. `STRATUM_MINIO_URL` makes
-the testkit *attach* to a MinIO it did not start — it never spawns or
-kills that one. The suite is still hermetic: nothing reaches the real
-network, the store is just on the other side of a socket.
+pinned release and the GitHub release carries no assets. The container
+image is the only artifact left. `scripts/fetch-minio.sh` pulls the
+binary out of it over the registry API, with no container runtime — the
+jobs that need MinIO must not depend on a docker daemon — and that binary
+is Linux. So on a Mac there is nothing to fetch and the answer is a
+container. `STRATUM_MINIO_URL` makes the testkit *attach* to a MinIO it
+did not start — it never spawns or kills that one. The suite is still
+hermetic: nothing reaches the real network, the store is just on the
+other side of a socket. `.minio-version` pins the release, and both the
+script and the testkit read it.
 
 *The preview port.* Playwright previews on `--strictPort` and
 `ci-local.sh` sets `CI=true` on purpose, which also turns off
@@ -82,145 +127,97 @@ Without the `eval`, the first test that needs a store fails with the
 command that fixes it in the message rather than leaving you to find it.
 
 Tests need PostgreSQL binaries on the machine (`apt install postgresql`;
-GitHub runners ship them). The testkit spawns its own throwaway cluster
+GitHub's runners ship them). The testkit spawns its own throwaway cluster
 per test process — `initdb` + `postgres` on a random port, one database
 per test — nothing touches a system or docker Postgres. Running as root
 (dev containers), it drops to the `postgres` system user automatically.
-`docker-compose.yml` at the repo root provides Postgres + MinIO for
-running the *server* locally; the test suite never uses it.
+`docker-compose.yml` at the repo root runs Spool itself with Postgres and
+MinIO, for trying the server on one machine; the test suite never uses
+it.
 
-Web surfaces:
+The dashboard:
 
 ```sh
-cd web/site && npm ci && npm run build          # also regenerates llms.txt
+nvm use                                   # the Node .nvmrc pins
 cd web/dashboard && npm ci && npx vitest run && npm run build
-CHROMIUM_PATH=$(which chromium) npx playwright test   # or let playwright install
+npx playwright install chromium           # once per machine
+npx playwright test
 ```
+
+Playwright previews the production build in `dist/`, so run `npm run
+build` after a source edit or you are testing the previous bundle.
 
 Design: tokens live in `web/shared/tokens.css` (one `light-dark()` pair
 per color), the Tailwind mapping in `web/shared/theme.css`, and the whole
-system — palette, patterns, do/don'ts — in `web/DESIGN.md`. Never
-hardcode a hex in a component. After a dashboard restyle, regenerate the
-landing-page screenshots (command in DESIGN.md).
+system — palette, patterns, do/don'ts — in `web/DESIGN.md`. Component
+conventions are in `web/dashboard/COMPONENTS.md`. Never hardcode a hex in
+a component.
 
-## Coverage
+## The manual gates
 
-CI runs `cargo llvm-cov` across the workspace — unit, integration, and
-e2e together — and enforces **100% of coverable lines** through
-`scripts/coverage_gate.py`: every product line is either executed by the
-test suite or listed in `coverage-ledger.toml` with the reason it is
-exempt — unreachable by construction (fork/exec child code,
-`unreachable!()` guards), not deterministically triggerable from outside
-the process (TOCTOU windows, exact buffer boundaries), or an
-equivalence-class member whose behavior is pinned by sibling tests. The gate fails in
-both directions — an uncovered line missing from the ledger, and a
-ledger entry whose lines have become covered (stale entries must be
-pruned) — so the ledger can only shrink truthfully. `stratum-testkit`
-(the test harness itself) is excluded from the metric. Adding a ledger
-entry is a code-review event: prefer a test.
-
-Two mechanics make e2e coverage real, keep
-them intact when adding suites:
-
-- Test harnesses that spawn the server binary re-export
-  `LLVM_PROFILE_FILE` through their `env_clear()` so the instrumented
-  child writes its profile.
-- Harness `Drop` impls send SIGINT first (graceful shutdown flushes the
-  profile); SIGKILL is only the bounded fallback.
-
-Run it locally with:
-
-```sh
-rustup component add llvm-tools-preview && cargo install cargo-llvm-cov
-cargo llvm-cov --workspace --lcov --output-path coverage.lcov
-python3 scripts/coverage_gate.py coverage.lcov coverage-ledger.toml
-```
-
-New code arrives with the tests that cover it; a change that leaves an
-unledgered uncovered line (or strands a stale ledger entry) won't merge.
-
-The gate is also two-way, which is the part that surprises people: a new
-test that happens to cover a currently-ledgered line fails CI as a *stale
-entry* until the entry is pruned. Budget for ledger edits in the same
-commit as the tests.
-
-Editing a file also shifts every ledger entry below the edit, which
-surfaces as a stale entry plus an unledgered line — the same exemption,
-reported twice in two places. Remap rather than re-deriving:
-
-```sh
-python3 scripts/remap_ledger.py <last-green-commit> --dry-run
-python3 scripts/remap_ledger.py <last-green-commit>
-```
-
-It walks the diff and moves each entry to where its line went. Entries
-whose source line was deleted or rewritten are dropped and named — those
-are the ones that need a decision, and re-adding a reason from memory
-next to a line nobody looked at is the failure mode the ledger exists to
-prevent. Re-run the gate afterwards; what it still reports is genuinely
-new.
-
-## Before you push
-
-```sh
-scripts/ci-local.sh
-```
-
-It runs all four CI jobs' checks in CI's own order. Two of them are easy
-to run by habit; the other two — the coverage gate, and the
-design-system contract over the *built* site — are the ones that fail on
-work that felt finished, because nothing about editing a page suggests
-they exist. The script names anything it had to skip instead of counting
-a skip as a pass, and `docs_e2e::the_local_ci_script_covers_every_job_the_workflow_declares`
-fails if the workflow grows a job the script has not been taught.
-
-`ci-local.sh` covers the CI jobs and nothing else. Four gates are
-**manual**, because each needs credentials for something we do not
-control, and those do not belong in CI:
+`ci-local.sh` covers the CI jobs and nothing else. Five gates are
+**manual**, because each needs credentials for something the project
+does not control, and those do not belong in CI:
 
 | | |
 |---|---|
-| the browser pass | `scripts/manual-stack.sh up`, then `node web/dashboard/tools/walkthrough.mjs` — 0 problems, **and no stage threw** |
-| the store contract | `scripts/manual-s3.sh check --both-addressing-styles`, under the deploy role |
-| the CI-provider contract | `scripts/manual-ci.sh all`, under the App installation and token you deploy with |
-| the ECS contract | `scripts/manual-ecs.sh all`, under the dispatch credential the app boots with; `stop <task-arn>` on a task running a real job |
+| the browser pass | `scripts/manual-stack.sh up`, `eval "$(scripts/manual-stack.sh env)"`, then `node web/dashboard/tools/walkthrough.mjs` — 0 problems, **and no stage threw** |
+| the store contract | `scripts/manual-s3.sh check --both-addressing-styles`, under the deployment's role |
+| the CI-provider contract | `scripts/manual-ci.sh all`, under a real App installation and token |
+| the GitHub sign-in contract | `scripts/manual-github-signin.sh all`, then `fixtures` |
+| the mirror-push contract | `scripts/manual-mirror-push.sh all`, then `fixtures` |
 
-Run the CI-provider one whenever a change touches the Actions poller, the
-signed check intake, the Checks tab or the land gate, and the ECS one
-whenever a change touches how a job is launched or stopped — the
-dispatcher, `workflow/executor.rs`, the runner task definition or the
-signal path. The argument for both is the same one: every automated
-test of the checks feature runs against `stratum-testkit`'s fake GitHub,
-and every automated test of dispatch runs against its `FakeEcs`, and both
-encode what we *believe* the provider does — and when that belief is
-wrong the suite is green exactly where the product is broken.
-`manual-ci.sh` and `manual-ecs.sh` each read their own header for what a
-subcommand costs, what it proves, and what it deliberately does not:
-`--exhaust-rate-limit` spends an installation's entire hourly budget, so
-do not point it at one anything else depends on, and `manual-ecs.sh`
-starts real Fargate tasks that exit in seconds.
+[`CLAUDE.md`](CLAUDE.md) says when each is required. The argument for
+all of them is the same: every automated test of those features runs
+against a fake in `stratum-testkit`, and a fake encodes what we
+*believe* the provider does — when that belief is wrong the suite is
+green exactly where the product is broken. Each script's header says
+what a subcommand costs, what it proves, and what it deliberately does
+not: `manual-ci.sh --exhaust-rate-limit` spends an installation's entire
+hourly budget, so do not point it at one anything else depends on.
 
-The local half of the same loop runs with no credentials at all:
+The local half of the CI loop runs with no credentials at all:
 `scripts/manual-stack.sh up` starts a real CI provider
 (`scripts/manual-stack/ci-runner.py`) against the private `acme/pipeline`
 repository, and the walkthrough's `ci /` stages push to it with the stock
 `git` CLI and wait for its verdict to reach the Checks tab and the land
-gate. That fixture is also the worked example a maintainer copies for
-their own receiver, so keep it small and keep the comments honest.
+gate. That fixture is also the worked example somebody copies for their
+own receiver, so keep it small and keep the comments honest.
 
 ## Test layout
 
 - Unit tests live beside the code.
-- Integration tests (MinIO + fakes, in-process) live in each crate's
-  `tests/`.
-- End-to-end suites — `git_e2e`, `mirror_e2e`, `repos_e2e`, `workers_e2e`,
-  `hardening_e2e` under `crates/stratum-server/tests/` — spawn the
-  compiled binary against MinIO and drive it with the stock `git` CLI.
-  Latency regressions are asserted as **store round-trip counts** through
-  `stratum_testkit::CountingProxy`, not wall-clock.
+- Integration tests live in each crate's `tests/`: the store's
+  (`format_edges`, `store_faults`), the engine's (`ingest_roundtrip`,
+  `forks`, `gc_forks`, …), the protocol's, and the testkit's own
+  (`store_contract` holds the object-store semantics the engine depends
+  on).
+- End-to-end suites live in `crates/stratum-server/tests/`, one per
+  surface — `git_e2e`, `repos_e2e`, `mirror_e2e`, `changes_e2e`,
+  `changesets_e2e`, `workflow_e2e`, `self_hosted_e2e`, `runner_e2e`,
+  `ssh_e2e`, `search_e2e` and the rest. Each spawns the compiled server
+  against MinIO and a throwaway PostgreSQL and drives it over HTTP, SSH
+  and the stock `git` CLI. Latency regressions are asserted as **store
+  round-trip counts** through `stratum_testkit::CountingProxy`, not
+  wall-clock.
+- `crates/stratum-runner/tests/binary_e2e.rs` drives the built
+  `weft-runner` through registration, claiming and running jobs.
+- `docs_e2e` holds the docs to the code: the Repos quickstart
+  (`docs/guide/quickstart-repos.md`) is executed verbatim against a live
+  server, every route in the router must be in `docs/openapi.json` and
+  every documented route must exist, and the CI and mirror guides must
+  quote what the code actually accepts and sends.
+- `chaos_e2e` is `#[ignore]`d and runs only in the `chaos` job; see
+  `CLAUDE.md` for why it may never be the only test of a behaviour.
+- `web/dashboard` has its unit tests beside the code (vitest) and its
+  Playwright suite in `web/dashboard/tests/`.
 
 Tests must be hermetic: MinIO, PostgreSQL, and the fake GitHub/origin
 servers come from `stratum-testkit`; nothing may reach the real network.
+
+Harnesses that spawn the server stop it with SIGINT first, which takes
+its graceful-shutdown path, and SIGKILL only as a bounded fallback. Keep
+that order when you add one.
 
 ## Conventions
 
@@ -231,9 +228,11 @@ servers come from `stratum-testkit`; nothing may reach the real network.
 - Multi-tenant isolation: S3 prefixes come only from
   `stratum_control::registry::RepoPrefix`, constructed after the
   token→org→repo check. Never format a bucket path by hand.
-- Existence masking: cross-tenant probes answer 404, missing credentials
-  answer 401. `hardening_e2e::isolation_matrix_cross_org_and_cross_repo`
-  is the gate.
+- Every repository is private to its organization. There is no public
+  read path and no anonymous one: a request with no credential answers
+  401, and a credential with no access answers the same 404 an absent
+  repository gets. `hardening_e2e::isolation_matrix_cross_org_and_cross_repo`
+  is the gate. A token acts only in the organization it was minted in.
 - Identifier lookups (`org_by_name`, `repo_by_name`) short-circuit to
   "not found" for any name that fails `valid_name` — an invalid-shaped
   name is definitionally absent, and hostile bytes (NUL, control chars,
@@ -253,22 +252,26 @@ servers come from `stratum-testkit`; nothing may reach the real network.
   the server is still healthy and serving — a wedged server that refuses
   everything is a failure, not a pass. New attack surfaces get a matching
   negative suite.
+- A change to the API updates `docs/openapi.json` and the guide in the
+  same commit; `docs_e2e` fails on route drift.
 
 ## Disk hygiene
 
-A full local cycle (build → test → `cargo llvm-cov` → a docker image
-build) writes well over 30 GB, and `cargo llvm-cov` keeps a *second*
-build tree (`target/llvm-cov-target`) rather than reusing `target/debug`.
-Test scratch under `$TMPDIR` (on macOS a `/var/folders/…` path, not
-`/tmp`) also accumulates across killed runs. Run:
+A full local cycle (a release build of the workspace, its test binaries,
+MinIO's store, and perhaps a docker image build) writes tens of GB. Test
+scratch under `$TMPDIR` (on macOS a `/var/folders/…` path, not `/tmp`)
+also accumulates across killed runs. Run:
 
 ```bash
 scripts/clean-build-artifacts.sh          # scratch only; rebuilds stay fast
 scripts/clean-build-artifacts.sh --deep   # also target/debug and docker images
 ```
 
+Never clean while another build or agent is compiling against the same
+`target/`.
+
 `scripts/ci-local.sh` refuses to start when there is not room for the
-run it was asked for — about 30 GiB for a full cycle, 12 for `--fast` or
+run it was asked for — about 20 GiB for a full run, 12 for `--fast` or
 `--only`. That is a precondition rather than a warning on purpose:
 running out happens *mid-job*, and the shape it takes is a compiler or a
 test process dying with an I/O error somewhere unrelated to whatever is

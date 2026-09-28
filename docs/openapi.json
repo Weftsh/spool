@@ -1,13 +1,14 @@
 {
   "openapi": "3.1.0",
   "info": {
-    "title": "Weft Platform API",
+    "title": "Spool API",
     "version": "1.0.0",
-    "description": "Control-plane and Repos API for Weft: git-shaped storage served from object storage. Git smart-HTTP endpoints (clone/fetch/push at /{org}/{repo}.git) speak the standard git wire protocol and are not described here. Errors return JSON {\"error\": \"…\"} with the matching status. Optimistic-concurrency conflicts return 409 with the current tip."
+    "description": "The REST API of a Spool server: a self-hosted git forge that keeps every repository in object storage. Git smart-HTTP endpoints (clone/fetch/push at /{org}/{repo}.git) speak the standard git wire protocol and are not described here. Every repository is private to the organization that owns it: a request with no credential answers 401 on every repository, changeset, search and profile route, and a credential that may not read a repository gets the same 404 a repository that does not exist gets. The exceptions are the sign-in routes under /v1/auth, the health and metrics probes, the inbound webhook receiver, the runner routes (which take their own credentials) and the signed CDN pack URL. Errors return JSON {\"error\": \"…\"} with the matching status. Optimistic-concurrency conflicts return 409 with the current tip."
   },
   "servers": [
     {
-      "url": "https://api.stratum.dev"
+      "url": "https://spool.example.com",
+      "description": "Your server; set by STRATUM_PUBLIC_URL."
     }
   ],
   "security": [
@@ -20,26 +21,19 @@
       "bearer": {
         "type": "http",
         "scheme": "bearer",
-        "description": "Token of the form weft_<id>_<secret>. Scopes: org:admin, org:read, repo:read, repo:write. Repo-bound tokens are restricted to one repo."
+        "description": "Token of the form weft_<id>_<secret>. Scopes: org:admin, org:read, repo:read, repo:write. A token acts only in the organization it was minted in: presented anywhere else it has no access, and a repository there answers 404. Repo-bound tokens are restricted to one repository and cannot search."
       },
       "session": {
         "type": "apiKey",
         "in": "cookie",
         "name": "stratum_session",
-        "description": "Browser session from POST /v1/auth/login. An alternative to a bearer token for the dashboard; a bearer token wins when both are presented. Routes under /v1/auth use this scheme."
+        "description": "Browser session from POST /v1/auth/login. An alternative to a bearer token for the dashboard; a bearer token wins when both are presented. A session spans every organization its person belongs to, which is why anything that crosses two namespaces — forking, opening a change from a fork — takes one. Routes under /v1/auth use this scheme."
       }
     },
     "schemas": {
       "RunnerPolicy": {
         "type": "object",
         "properties": {
-          "hosted": {
-            "type": "string",
-            "enum": [
-              "allowed",
-              "disabled"
-            ]
-          },
           "self_hosted": {
             "type": "string",
             "enum": [
@@ -72,10 +66,6 @@
               "all",
               "selected"
             ]
-          },
-          "allow_public": {
-            "type": "boolean",
-            "description": "Whether public repositories may reach the machines in this group. False by default, and that default is the security property rather than a preference: a public repository can be forked, and a fork's change carries its own `run:` lines."
           },
           "is_default": {
             "type": "boolean"
@@ -212,12 +202,9 @@
               "mirror"
             ]
           },
-          "public": {
-            "type": "boolean"
-          },
           "stored_bytes": {
             "type": "integer",
-            "description": "What this repository holds in the object store, in bytes, as of the last push or storage sweep. For a private repository it is what the organization's storage meter counts, averaged over the billing period; a public repository's storage is never counted. Precision is one push: the push gate checks the bytes it is about to write against the pool and the spend limit before it writes."
+            "description": "What this repository holds in the object store, in bytes, as of the last push or storage sweep. Shown on the repository page; nothing is metered or capped by it."
           },
           "default_branch": {
             "type": "string"
@@ -293,11 +280,11 @@
           },
           "fork_count": {
             "type": "integer",
-            "description": "Public repositories forked directly from this one. The count a caller may see, not a stored total — a fork can be made private after the fact, so publishing the stored number would reveal how many private forks exist."
+            "description": "Repositories forked directly from this one that the caller may read. The count a caller may see, not a stored total — forks live in other namespaces, and publishing the stored number would say how many exist that the caller cannot see."
           },
           "watcher_count": {
             "type": "integer",
-            "description": "People subscribed to everything that happens here. Counts only the \"all\" watch level: the default subscription is stored as no row at all, so counting the table would rise when somebody chose to be left alone. Public, and on this view rather than on .../watch — that endpoint is the caller's own setting and refuses a stranger, so a masthead reading it would have no number to draw until sign-in and then grow one."
+            "description": "People subscribed to everything that happens here. Counts only the \"all\" watch level: the default subscription is stored as no row at all, so counting the table would rise when somebody chose to be left alone. On this view rather than on .../watch — that endpoint is the caller's own setting, so a masthead reading it would have a number for some readers and not others."
           },
           "fork_state": {
             "type": [
@@ -343,22 +330,15 @@
           },
           "viewer_admin": {
             "type": "boolean",
-            "description": "Whether the caller may administer this repository — visibility, default branch, branch protections, access. Answered by the server because the two authorities differ: patch and the protections routes accept a per-repo admin grant, while the access listing requires org-wide admin, so a client inferring one from the other hides the settings surface from somebody entitled to it. false for an anonymous reader."
+            "description": "Whether the caller may administer this repository — default branch, branch protections, access. Answered by the server because the two authorities differ: patch and the protections routes accept a per-repo admin grant, while the access listing requires org-wide admin, so a client inferring one from the other hides the settings surface from somebody entitled to it."
           },
           "viewer_member": {
             "type": "boolean",
-            "description": "Whether the caller holds a role on this repository — an organization membership or a per-repo grant — as opposed to reading it because it is public. The distinction only exists on a public repository and is what the Insights tab turns on: a repository's traffic belongs to the people who own it. Weaker than `viewer_write`: the `viewer` role is a member who may not push. false for an anonymous reader and for a signed-in stranger alike."
+            "description": "Whether the caller holds a role on this repository — an organization membership or a per-repo grant. Every caller who can read the repository at all has one, so this is true for every reader; it is kept because the Insights tab and older clients read it. Weaker than `viewer_write`: the `viewer` role is a member who may not push."
           },
           "viewer_write": {
             "type": "boolean",
-            "description": "Whether the caller may push here, and so whether they may open a change whose commits are already in this repository. Distinct from viewer_admin: a member writes without administering, and an outside contributor reads without either. Answered by the server because it is the scope POST /changes actually checks before refusing a change that names no source — a client guessing it either hides the form from somebody who may use it, or offers one to a stranger and refuses them after they have filled it in. false for an anonymous reader."
-          },
-          "write_blocked": {
-            "type": [
-              "string",
-              "null"
-            ],
-            "description": "Why nobody may write to this repository right now — the sentence a push is refused with, beginning `quota:` — or null when writes are allowed. About the repository and not the caller, so a page can say read-only to a reader too, and folded into viewer_write, which is false whenever this is set. The case is a private repository on an organization whose subscription has ended, or one with no card on file yet: it used to look exactly like any other repository until git push answered 402 with a sentence nobody had seen."
+            "description": "Whether the caller may push here, and so whether they may open a change whose commits are already in this repository. Distinct from viewer_admin: a member writes without administering, and a `viewer` or a contributor proposing from a fork reads without either. Answered by the server because it is the scope POST /changes actually checks before refusing a change that names no source — a client guessing it either hides the form from somebody who may use it, or offers one to a reader and refuses them after they have filled it in."
           },
           "push": {
             "type": [
@@ -555,8 +535,8 @@
   "paths": {
     "/v1/orgs/{org}/runner-policy": {
       "get": {
-        "summary": "What kinds of runner this organisation allows (org:read)",
-        "description": "Two independent switches, because they answer opposite questions. `hosted` is \"may our work run on Weft's machines\"; `self_hosted` is \"may our work run on machines we registered\". An organisation that only trusts its own hardware turns the first off; one that does not want a stranger's change near its build box turns the second off.",
+        "summary": "Whether this organization admits self-hosted runners, and for which repositories (org:read)",
+        "description": "Every workflow job on this server runs on a runner the organization registered, so this one switch decides where workflows run at all: `all` (the default) admits every repository, `selected` only those in `self_hosted_repos`, and `disabled` none. A repository the policy does not admit has its runs failed at trigger time with \"self-hosted runners are not allowed for this repository (organisation policy)\".",
         "responses": {
           "200": {
             "description": "The policy as it stands",
@@ -572,20 +552,13 @@
       },
       "patch": {
         "summary": "Change the runner policy (org:admin)",
-        "description": "Any subset of the three keys; an absent key is left alone. `self_hosted_repos` is a list of repository names and is replaced wholesale — `[]` clears it. Audited as `runner_policy.updated`. A refusal here is a refusal at trigger time rather than a job queued forever: a `runs-on: ubuntu-latest` file under `hosted: disabled` becomes a failed run reading \"hosted runners are disabled for this organisation; use runs-on: [self-hosted, …]\".",
+        "description": "Either key or both; an absent key is left alone. `self_hosted_repos` is a list of repository names and is replaced wholesale — `[]` clears it. Audited as `runner_policy.updated`. A refusal here is a refusal at trigger time rather than a job queued forever: a push to a repository the policy does not admit becomes a failed run reading \"self-hosted runners are not allowed for this repository (organisation policy)\".",
         "requestBody": {
           "content": {
             "application/json": {
               "schema": {
                 "type": "object",
                 "properties": {
-                  "hosted": {
-                    "type": "string",
-                    "enum": [
-                      "allowed",
-                      "disabled"
-                    ]
-                  },
                   "self_hosted": {
                     "type": "string",
                     "enum": [
@@ -653,7 +626,7 @@
       },
       "post": {
         "summary": "Create a runner group (org:admin)",
-        "description": "`repo_access` defaults to `all` and `allow_public` to false. Audited as `runner_group.created`.",
+        "description": "`repo_access` defaults to `all`. Audited as `runner_group.created`.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -673,10 +646,6 @@
                       "selected"
                     ],
                     "default": "all"
-                  },
-                  "allow_public": {
-                    "type": "boolean",
-                    "default": false
                   },
                   "repos": {
                     "type": "array",
@@ -732,9 +701,6 @@
                       "all",
                       "selected"
                     ]
-                  },
-                  "allow_public": {
-                    "type": "boolean"
                   },
                   "repos": {
                     "type": "array",
@@ -815,7 +781,7 @@
     "/v1/orgs/{org}/runners/registration-token": {
       "post": {
         "summary": "Mint a single-use registration token (org:admin)",
-        "description": "One hour, one machine. Hashed at rest like every other bearer secret here, because it travels through a shell history and a terminal scrollback on its way to the machine. `command` is the whole `weft-runner register` line spelled out — the alternative is a reader assembling it from three fields and getting `--url` wrong, which fails at registration with a network error that says nothing about which part was wrong. Audited as `runner.registration_token.created`.",
+        "description": "One hour, one machine. Hashed at rest like every other bearer secret here, because it travels through a shell history and a terminal scrollback on its way to the machine. `command` is the whole `weft-runner register` line spelled out, with the server's own public URL (STRATUM_PUBLIC_URL) — the alternative is a reader assembling it from three fields and getting `--url` wrong, which fails at registration with a network error that says nothing about which part was wrong. Audited as `runner.registration_token.created`.",
         "requestBody": {
           "content": {
             "application/json": {
@@ -981,7 +947,7 @@
     "/v1/runners/claim": {
       "post": {
         "summary": "Ask for work, and wait a while for some",
-        "description": "The bearer is the machine's own `weftr_…` credential. A long poll: the server holds the request open for `STRATUM_RUNNER_CLAIM_WAIT_MS` (20 s by default), re-running its claim every 500 ms, and answers 204 if nothing came. That is the whole scaling story — asking every second is one query per machine per second forever, almost all of it answering \"nothing\"; asking every thirty is half a minute of latency on every build. Set the client's HTTP timeout longer than the server's wait, so a 204 arrives as a 204 rather than as a client-side timeout. Every call touches `last_seen_at`, which is what the runner list's `online` reading is made of. A job is routed to this machine only if its `runs-on` labels are a subset of the machine's, the machine's group admits the repository (and `allow_public` if it is public), and the organisation's policy admits self-hosted runners for it — three different people's decisions, all re-read here and not only at trigger time, because a job can sit in the queue across a settings change. On 200 the machine then uses exactly the five per-job calls a hosted runner uses, with the `token` from here.",
+        "description": "The bearer is the machine's own `weftr_…` credential. A long poll: the server holds the request open for `STRATUM_RUNNER_CLAIM_WAIT_MS` (20 s by default), re-running its claim every 500 ms, and answers 204 if nothing came. That is the whole scaling story — asking every second is one query per machine per second forever, almost all of it answering \"nothing\"; asking every thirty is half a minute of latency on every build. Set the client's HTTP timeout longer than the server's wait, so a 204 arrives as a 204 rather than as a client-side timeout. Every call touches `last_seen_at`, which is what the runner list's `online` reading is made of. A job is routed to this machine only if its `runs-on` labels are a subset of the machine's, the machine's group admits the repository, and the organisation's policy admits self-hosted runners for it — three different people's decisions, all re-read here and not only at trigger time, because a job can sit in the queue across a settings change. On 200 the machine then makes the five per-job calls under /v1/runner/jobs/{id}, with the `token` from here.",
         "requestBody": {
           "required": false,
           "content": {
@@ -1031,15 +997,17 @@
     },
     "/v1/users/{handle}": {
       "get": {
-        "summary": "A person's public profile",
-        "description": "Display name, bio, location, company, pronouns, account kind (human or agent), links, and how many public repositories their namespace holds. Open to anonymous callers — this is the page a logged-out visitor lands on. It never carries an email address and never a private repository, and `public_repos` counts public repositories for every caller alike, so it cannot be watched to learn that a private one was created. A disabled account has no profile and answers 404; its namespace stays claimed so nobody can move in behind them.",
-        "security": [],
+        "summary": "A person's profile",
+        "description": "Display name, bio, location, company, pronouns, account kind (human or agent) and links: the directory entry for a person on this server. Needs a signed-in caller — a session or a personal token; with none the answer is 401. It never carries an email address and never lists repositories. A disabled account has no profile and answers 404; its namespace stays claimed so nobody can move in behind them.",
         "responses": {
           "200": {
-            "description": "{ handle, name, display_name, bio, location, company, pronouns, kind, contrib_private_optin, profile_repo, created_at, links: [{ label, url }], public_repos }"
+            "description": "{ handle, name, display_name, bio, location, company, pronouns, kind, profile_repo, created_at, links: [{ label, url }] }"
           },
           "404": {
             "description": "No such handle, or the account is disabled"
+          },
+          "401": {
+            "description": "Nobody is signed in"
           }
         }
       },
@@ -1068,7 +1036,7 @@
     "/v1/users/{handle}/emails": {
       "get": {
         "summary": "The addresses on your own account, proved or not",
-        "description": "Never public, and never readable by another account. This is the authorship-linkage surface — the set that decides which commits in the world count as this person's work — so publishing it would hand an impersonator the exact string to put in `git config user.email`, and a spammer a mailbox.",
+        "description": "Readable only by the account itself, never by another. This is the authorship-linkage surface — the set that decides which commits count as this person's work — so showing it to anybody else would hand an impersonator the exact string to put in `git config user.email`, and a spammer a mailbox.",
         "responses": {
           "200": {
             "description": "{ emails: [{ address, verified_at, private, primary, created_at }] }"
@@ -1148,21 +1116,23 @@
     },
     "/v1/orgs/{org}/profile": {
       "get": {
-        "summary": "An organization's public face",
-        "description": "Display name, description, location, website, contact address, and its public repository count. Open to anonymous callers. An org that has never been edited reads exactly like one whose fields were cleared — there is no second “no profile yet” state for a page to handle.",
-        "security": [],
+        "summary": "An organization's profile",
+        "description": "Display name, description, location, website and contact address. Needs a signed-in caller; with none the answer is 401. An org that has never been edited reads exactly like one whose fields were cleared — there is no second “no profile yet” state for a page to handle.",
         "responses": {
           "200": {
-            "description": "{ org, display_name, description, location, website, contact_email, public_repos }"
+            "description": "{ org, display_name, description, location, website, contact_email }"
           },
           "404": {
             "description": "No such org"
+          },
+          "401": {
+            "description": "Nobody is signed in"
           }
         }
       },
       "patch": {
         "summary": "Edit an organization's profile (org:admin)",
-        "description": "Optional fields; an explicit null clears one. `website` must be http or https and `contact_email` must be an address, for the same reason the personal profile holds them to it: both are rendered on a page anybody loads.",
+        "description": "Optional fields; an explicit null clears one. `website` must be http or https and `contact_email` must be an address, for the same reason the personal profile holds them to it: both are rendered on a page other people load.",
         "responses": {
           "200": {
             "description": "The profile as it now reads"
@@ -1250,7 +1220,7 @@
     },
     "/v1/auth/signup": {
       "post": {
-        "summary": "Create an account and its personal namespace, and mail a confirmation link. The handle is checked first and its refusals are plain — a namespace name is a public URL. Everything after that answers identically whether or not the address is already registered.",
+        "summary": "Create an account and its personal namespace, and mail a confirmation link. The handle is checked first and its refusals are plain — namespace names are unique on the server and appear in every clone URL, so \"that one is taken\" gives nothing away. Everything after that answers identically whether or not the address is already registered.",
         "responses": {
           "202": {
             "description": "{ status, detail } — always this, whether a message was sent, the address already has an account (its owner is mailed a note saying nothing was created), or the rate limit was hit"
@@ -1370,10 +1340,10 @@
     },
     "/v1/orgs": {
       "post": {
-        "summary": "Create an organization, owned by the signed-in person. It is `free` the moment it exists — public repositories, members, the free hosted minutes — and no card is asked for: the payment provider is the merchant of record and only meets a card on its own subscription page, which the first private repository leads to. Nothing at the provider exists for the org until then. Requires a confirmed email address; a service token has nobody to own the result and is refused.",
+        "summary": "Create an organization, owned by the signed-in person. Requires a confirmed email address; a service token has nobody to own the result and is refused.",
         "responses": {
           "201": {
-            "description": "{ id, name, plan: \"free\", billable_seats, detail }. `detail` says whether this deployment sells anything at all."
+            "description": "{ id, name }"
           },
           "400": {
             "description": "not a valid namespace name"
@@ -1386,22 +1356,6 @@
           },
           "409": {
             "description": "that name is taken or reserved"
-          }
-        }
-      }
-    },
-    "/webhooks/stripe": {
-      "post": {
-        "summary": "Stripe's webhook. Verifies the timestamped HMAC in `Stripe-Signature` within a five-minute tolerance, then reconciles checkout completion, subscription updates and failed payments. Replays are acknowledged without acting twice; event types and subscriptions it does not recognise are acknowledged and ignored.",
-        "responses": {
-          "200": {
-            "description": "{ org, plan } — or { duplicate | unknown_org | ignored }"
-          },
-          "400": {
-            "description": "missing, malformed, forged or stale signature"
-          },
-          "503": {
-            "description": "billing is not configured on this deployment"
           }
         }
       }
@@ -1615,7 +1569,10 @@
                   },
                   "public": {
                     "type": "boolean",
-                    "default": false
+                    "enum": [
+                      false
+                    ],
+                    "description": "Accepted only as false. Every repository is private to its organization; `true` is a 400."
                   },
                   "default_branch": {
                     "type": "string",
@@ -1624,7 +1581,7 @@
                   "description": {
                     "type": "string",
                     "maxLength": 512,
-                    "description": "One line about the repo. Searchable; visible to anyone who can see the repo."
+                    "description": "One line about the repo. Searchable; visible to everybody who can read the repo."
                   }
                 }
               }
@@ -1642,16 +1599,16 @@
               }
             }
           },
-          "402": {
-            "description": "`quota:` — this namespace may not hold what was asked for: a private repository in a personal namespace (private work lives in an organization; the sentence begins `quota: private repositories live in an organization`), a private repository in an organization on the free plan (subscribe from Billing and replay), an organization with no card on file, or a free namespace at the free-tier repository cap. Nothing is created."
-          },
           "409": {
             "description": "Name already exists"
+          },
+          "400": {
+            "description": "\"public\": true — `this server has no public repositories: every repository is private to its organization — omit \"public\" or set it to false` — or an invalid name or description. Nothing is created."
           }
         }
       },
       "get": {
-        "summary": "List repos (keyset pagination; fleets of millions list fine)",
+        "summary": "List repos (keyset pagination; millions list fine)",
         "parameters": [
           {
             "name": "after",
@@ -1684,8 +1641,12 @@
         "responses": {
           "200": {
             "description": "Per-item results, request order"
+          },
+          "400": {
+            "description": "More than 1000 repos, or an entry with \"public\": true"
           }
-        }
+        },
+        "description": "Body { repos: [{ name, default_branch?, description?, public? }] }, at most 1000. Refused as a whole, before anything is created, when any entry sends \"public\": true: a batch asking for public repositories is a script written for somewhere else, and half a batch is harder to clean up than none."
       }
     },
     "/v1/orgs/{org}/repos/batch/delete": {
@@ -1709,7 +1670,7 @@
       },
       "delete": {
         "summary": "Delete a repo (instant tombstone; storage swept by GC)",
-        "description": "The row is tombstoned at once and the storage is swept by GC later. Side effects that are not deferred: forks are detached and survive, and CI stops — every run still going is cancelled with \"the repository was deleted\", its jobs and their mirrored check runs settle as `cancelled`, tasks that were already launched are stopped and their job tokens revoked, and queued jobs are never handed out. Without that last part a deleted repository goes on holding slots of the organisation's CI concurrency until each job's timeout expires.",
+        "description": "The row is tombstoned at once and the storage is swept by GC later. Side effects that are not deferred: forks are detached and survive, and CI stops — every run still going is cancelled with \"the repository was deleted\", its jobs and their mirrored check runs settle as `cancelled`, running jobs have their job tokens revoked, so their runners learn to stop on their next call, and queued jobs are never handed out. Without that last part a deleted repository goes on occupying the organization's runners until each job's timeout expires.",
         "responses": {
           "204": {
             "description": "Deleted"
@@ -1717,8 +1678,8 @@
         }
       },
       "patch": {
-        "summary": "Edit a repo's description, homepage, visibility, default branch, or the installation a mirror pushes through",
-        "description": "One handler, four fields, three different authorities. `description` absent leaves it alone; `null` or \"\" clears it, and editing it needs only repo:write. `homepage` behaves identically and carries the same authority, with one extra rule: it must be an absolute http:// or https:// URL. It is rendered as an anchor on a page other people load, so `javascript:` and `data:` are refused for the same reason profile links are — and a scheme-less \"example.com\" is refused rather than repaired, since prepending one is wrong exactly when it produces a relative URL resolving against this host. Changing `public` requires org:admin and is recorded in the audit trail. `default_branch` requires org:admin and the branch must already exist; a mirror's default branch follows its origin and cannot be set here. `installation_id` attaches the GitHub App installation a mirror forwards pushes through — org:admin, GitHub mirrors only, and the organization must have connected it (an id it never earned is a 404, exactly as at creation).",
+        "summary": "Edit a repo's description, homepage, default branch, or the installation a mirror pushes through",
+        "description": "One handler, four fields, two different authorities. `description` absent leaves it alone; `null` or \"\" clears it, and editing it needs only repo:write. `homepage` behaves identically and carries the same authority, with one extra rule: it must be an absolute http:// or https:// URL. It is rendered as an anchor on a page other people load, so `javascript:` and `data:` are refused for the same reason profile links are — and a scheme-less \"example.com\" is refused rather than repaired, since prepending one is wrong exactly when it produces a relative URL resolving against this host. There is no visibility to change: `\"public\": true` is a 400, and `false` is accepted and changes nothing. `default_branch` requires org:admin and the branch must already exist; a mirror's default branch follows its origin and cannot be set here. `installation_id` attaches the GitHub App installation a mirror forwards pushes through — org:admin, GitHub mirrors only, and the organization must have connected it (an id it never earned is a 404, exactly as at creation).",
         "requestBody": {
           "content": {
             "application/json": {
@@ -1737,7 +1698,11 @@
                     "description": "Absolute http:// or https:// URL, or null/\"\" to clear. Absent leaves it alone."
                   },
                   "public": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ],
+                    "description": "Accepted only as false; `true` is a 400. Every repository is private to its organization."
                   },
                   "default_branch": {
                     "type": "string",
@@ -1764,7 +1729,7 @@
             }
           },
           "400": {
-            "description": "Description or homepage too long or not one line of text, a homepage that is not an absolute http(s) URL, an invalid branch name, or `installation_id` on something other than a GitHub mirror"
+            "description": "\"public\": true, a description or homepage too long or not one line of text, a homepage that is not an absolute http(s) URL, an invalid branch name, or `installation_id` on something other than a GitHub mirror"
           },
           "401": {
             "description": "No credentials — same answer as for a repo that does not exist"
@@ -1773,7 +1738,7 @@
             "description": "A mirror's default branch follows its origin"
           },
           "404": {
-            "description": "No such repo, not yours, an unknown branch, or publishing without org:admin"
+            "description": "No such repo, not yours, or an unknown branch"
           }
         }
       }
@@ -1793,17 +1758,14 @@
           },
           "409": {
             "description": "`org`/`name` is taken by a repository that is not a fork of this one; the body names it and says to fork under another name"
-          },
-          "402": {
-            "description": "`quota:` — the target namespace may not hold what the fork would be: a private source into a personal namespace (private work lives in an organization) or into an organization whose plan admits only public repositories, an organization with no card on file, or a `free` namespace (every personal namespace is one) already at the free-tier repository cap — forks count like created repositories. Nothing is created."
           }
         }
       },
       "get": {
-        "summary": "List the repositories forked directly from this one. `count` is the number of forks **this caller may see** and always equals the length of `forks` — never a stored total. A fork inherits its source's visibility but its owner may make it private afterwards, so publishing the stored number would tell every visitor exactly how many private forks exist. If this ever paginates, `count` stays \"total visible to you\" rather than becoming \"this page\".",
+        "summary": "List the repositories forked directly from this one. `count` is the number of forks **this caller may see** and always equals the length of `forks` — never a stored total. Forks live in other namespaces, most of which a caller cannot read, so publishing the stored number would say how many exist that they cannot see. A token sees only forks in its own organization; a session sees forks in every namespace its person belongs to. If this ever paginates, `count` stays \"total visible to you\" rather than becoming \"this page\".",
         "responses": {
           "200": {
-            "description": "{ forks: [{ org, name, public }], count }"
+            "description": "{ forks: [{ org, name }], count }"
           }
         }
       }
@@ -2274,7 +2236,7 @@
             "description": "Nobody is signed in"
           },
           "403": {
-            "description": "Approvals must come from a person, not a service token. Anyone who can read the change may approve it, a stranger to the org included; sufficiency reads write access, so an approval from outside it is recorded and counts for nothing"
+            "description": "Approvals must come from a person, not a service token. Anyone who can read the change may approve it — a `viewer` included; sufficiency reads write access, so an approval from somebody without it is recorded and counts for nothing"
           },
           "409": {
             "description": "The change is not open"
@@ -2489,7 +2451,7 @@
                   "pending": {
                     "type": "boolean",
                     "default": false,
-                    "description": "Draft this into the caller's pending review instead of publishing it. Invisible to every other reader — a second person, a service token, an admin, an anonymous reader of a public repo — until the review is submitted, and it notifies nobody. Refused for a service token: a draft belongs to a person, and there is no later in which a token submits it"
+                    "description": "Draft this into the caller's pending review instead of publishing it. Invisible to every other reader — a second person, a service token, an admin — until the review is submitted, and it notifies nobody. Refused for a service token: a draft belongs to a person, and there is no later in which a token submits it"
                   }
                 }
               }
@@ -2504,7 +2466,7 @@
             "description": "Empty or oversized body, an invalid path, a line without a path, a backwards or unanchored range, an unknown side, or a reply to a reply"
           },
           "401": {
-            "description": "Anonymous readers of public repos may read, not converse. A signed-in person comments as themselves whether or not they hold a role here; a service token from another organisation is anonymous here"
+            "description": "No credential. Anybody who can read the repository comments as themselves; a credential that cannot read it gets the masked 404"
           },
           "403": {
             "description": "pending was asked for by a service token"
@@ -2531,7 +2493,7 @@
             "description": "The id names a reply; resolve the thread it is in"
           },
           "401": {
-            "description": "Anonymous readers of public repos may read, not resolve"
+            "description": "No credential"
           },
           "403": {
             "description": "Neither the comment's author nor an owner of that path — or a service token, which has no judgement to offer about a remark"
@@ -2553,7 +2515,7 @@
             "description": "The id names a reply; resolve the thread it is in"
           },
           "401": {
-            "description": "Anonymous readers of public repos may read, not resolve"
+            "description": "No credential"
           },
           "403": {
             "description": "Neither the comment's author nor an owner of that path"
@@ -2691,7 +2653,7 @@
         "summary": "Revoke the CI intake secret",
         "responses": {
           "204": {
-            "description": "Revoked; deliveries signed with it are answered like any stranger's"
+            "description": "Revoked; deliveries signed with it are answered as if unsigned"
           }
         }
       }
@@ -2726,7 +2688,7 @@
                   "change": {
                     "type": "string",
                     "maxLength": 72,
-                    "description": "The change key, e.g. I1a2d0001 — `I` followed by hex, taken from the commit's own Change-Id trailer. OPTIONAL, and its presence selects the shape: with it the verdict attaches to the change's latest patchset; without it the verdict is about the commit alone, which is what a push can send and what fills the Checks tab, the badge and — through the merged read — the review page and the land gate. Never a branch name or a pull request title; either is answered 404."
+                    "description": "The change key, e.g. I1a2d0001 — `I` followed by hex, taken from the commit's own Change-Id trailer. OPTIONAL, and its presence selects the shape: with it the verdict attaches to the change's latest patchset; without it the verdict is about the commit alone, which is what a push can send and what fills the Checks tab and — through the merged read — the review page and the land gate. Never a branch name or a pull request title; either is answered 404."
                   },
                   "commit": {
                     "type": "string",
@@ -2826,10 +2788,10 @@
     },
     "/v1/orgs/{org}/repos/{repo}/changes/{change}/workflows/approve": {
       "post": {
-        "summary": "Let a fork's workflows run at this change's current tip (repo:write — the same authorization landing needs). A change from a fork is `blocked` rather than run, because its workflow file was written by the contributor and running it hands a stranger a repo:read token and a machine. Approval is **per tip**: a new patchset from the fork is blocked again, like GitHub's \"Approve and run\". The blocked placeholder run and its check row are replaced by the real run for the same commit and file.",
+        "summary": "Let a fork's workflows run at this change's current tip (repo:write — the same authorization landing needs). A change from a fork is `blocked` rather than run, because its workflow file was written by the contributor and running it hands somebody who may only read the repository a repo:read token and one of the organization's runners. Approval is **per tip**: a new patchset from the fork is blocked again, like GitHub's \"Approve and run\". The blocked placeholder run and its check row are replaced by the real run for the same commit and file.",
         "responses": {
           "202": {
-            "description": "{ runs } — the runs that now exist at this tip, in the shape the workflow-runs route returns. Read back rather than assumed: a run may legitimately be settled instead of started (an organization out of minutes, a `timeout-minutes:` over the fleet's cap)."
+            "description": "{ runs } — the runs that now exist at this tip, in the shape the workflow-runs route returns. Read back rather than assumed: a run may legitimately be settled instead of started — failed because a job names an image, asks for labels no registered runner has, or sets a `timeout-minutes:` over the server's ceiling."
           },
           "409": {
             "description": "the change is not open, or nothing is blocked at its current tip — including because somebody already approved it, or the tip's files ask for no `change` workflows. The cases are not distinguished: they are the same answer to the caller, that there is nothing for this button to start"
@@ -2859,7 +2821,7 @@
     },
     "/v1/orgs/{org}/repos/{repo}/changes/{change}/abandon": {
       "post": {
-        "summary": "Close the change without landing. repo:write, or the change's author — a contributor who proposed from a fork holds only read access here and may still withdraw what they opened. Anyone else without write access gets the 404 a stranger gets.",
+        "summary": "Close the change without landing. repo:write, or the change's author — a contributor who proposed from a fork holds only read access here and may still withdraw what they opened. Anyone else without write access gets the same masked 404 as somebody who cannot read the repository.",
         "responses": {
           "204": {
             "description": "Abandoned"
@@ -2919,10 +2881,10 @@
             "description": "{ patchset, since: integer|null, viewed: [path, …] }"
           },
           "401": {
-            "description": "Nobody is signed in — an anonymous reader of a public repository is told to sign in"
+            "description": "Nobody is signed in"
           },
           "403": {
-            "description": "A service token has no reviewer behind it. A signed-in person reads a public repository as themselves, role or no role, and their marks are their own"
+            "description": "A service token has no reviewer behind it. Marks belong to a person — a session or a personal token — and are their own"
           },
           "404": {
             "description": "No such change, or the repository is masked from this caller"
@@ -2962,10 +2924,10 @@
             "description": "Invalid path"
           },
           "401": {
-            "description": "Nobody is signed in — an anonymous reader of a public repository is told to sign in"
+            "description": "Nobody is signed in"
           },
           "403": {
-            "description": "A service token has no reviewer behind it. A signed-in person reads a public repository as themselves, role or no role, and their marks are their own"
+            "description": "A service token has no reviewer behind it. Marks belong to a person — a session or a personal token — and are their own"
           },
           "404": {
             "description": "No such change, or the change has no patchsets"
@@ -2999,7 +2961,7 @@
     },
     "/v1/orgs/{org}/changes": {
       "get": {
-        "summary": "Every change in the organization the caller may read, newest first — the org-wide list the changeset picker reads, so composing does not begin with a request per repository. No org-level scope is required: each repository is authorized exactly as its own changes list is, so a repo:read token sees its repository and a public repository is readable anonymously. A credential from another organization is masked with 404.",
+        "summary": "Every change in the organization the caller may read, newest first — the org-wide list the changeset picker reads, so composing does not begin with a request per repository. Needs a credential: with none the answer is 401. No org-level scope is required beyond that: each repository is authorized exactly as its own changes list is, so a token bound to one repository sees that repository, and a credential from another organization sees an empty list.",
         "parameters": [
           {
             "name": "q",
@@ -3053,13 +3015,13 @@
             "description": "Unknown state, an unrecognised or repeated q term (the message names it), a state and an is: that disagree, or an `after` this list did not mint"
           },
           "401": {
-            "description": "author:@me or needs:my-approval with nobody signed in"
+            "description": "No credential"
           },
           "403": {
             "description": "author:@me or needs:my-approval under a service token, which is nobody's reviewer"
           },
           "404": {
-            "description": "No such organization. A credential from another organization is not refused: it reads the public repositories' changes the way anyone does, anonymously"
+            "description": "No such organization"
           }
         }
       }
@@ -3730,7 +3692,7 @@
     },
     "/v1/orgs/{org}/repos/{repo}/metrics": {
       "get": {
-        "summary": "Serving metrics: counts, bytes, p50/p99 per kind (clone/fetch/push/api/freshness). Members only — a role on this repository, an org membership or a per-repo grant — including on a public repository: publishing the code does not publish how the code is used. An anonymous or non-member caller is refused whatever the visibility.",
+        "summary": "Serving metrics: counts, bytes, p50/p99 per kind (clone/fetch/push/api/freshness). Needs repo:read — a role on this repository, an org membership or a per-repo grant. With no credential the answer is 401; a caller who cannot read the repository gets the masked 404.",
         "parameters": [
           {
             "name": "from",
@@ -3820,10 +3782,10 @@
     },
     "/v1/orgs/{org}/usage": {
       "get": {
-        "summary": "Daily usage rows (active repos, requests, egress, hosted minutes, private transfer and storage) + plan",
+        "summary": "Daily usage rows: active repos, total repos, requests and bytes served (org:read)",
         "responses": {
           "200": {
-            "description": "{ plan, days: [{ day, active_repos, total_repos, requests, bytes_out, hosted_minutes, private_bytes_out, private_bytes_stored }] }. `bytes_out` is everything served, public included; only `hosted_minutes`, `private_bytes_out` and `private_bytes_stored` reach the bill — they are what the billing view's `meters` sum over the period. `private_bytes_stored` is the day's average, not its peak."
+            "description": "{ days: [{ day, active_repos, total_repos, requests, bytes_out }] } — up to 90 days, newest first. `active_repos` counts repositories that did any work that day; `bytes_out` is everything served. Nothing here is billed or capped."
           }
         }
       }
@@ -3963,10 +3925,14 @@
                   },
                   "installation_id": {
                     "type": "string",
-                    "description": "The GitHub App installation that can read the origin — one this organization connected through `POST /v1/orgs/{org}/github/install`. Omit it for a public origin: that one is fetched as itself, with no credential, and nothing needs installing."
+                    "description": "The GitHub App installation that can read the origin — one this organization connected through `POST /v1/orgs/{org}/github/install`. Omit it for an origin anybody can fetch: that one is fetched with no credential, and nothing needs installing. Either way the mirror is private to this organization."
                   },
                   "public": {
-                    "type": "boolean"
+                    "type": "boolean",
+                    "enum": [
+                      false
+                    ],
+                    "description": "Accepted only as false; `true` is a 400. A mirror is private to its organization."
                   }
                 }
               }
@@ -4078,14 +4044,17 @@
     },
     "/webhooks/{provider}": {
       "post": {
-        "summary": "Inbound origin webhook (github | generic); X-Hub-Signature-256 required. For `github`, `X-GitHub-Event` selects the path: `push` (or no header) syncs matching mirrors; `workflow_job` is the GitHub Actions runner intake — a `queued` job whose `runs-on` names a Weft size is recorded for the organization the installation is connected to (or recorded as refused, with the reason), `in_progress` and `completed` move the job the named runner is running; every other event is acknowledged and ignored",
+        "summary": "Inbound origin webhook (github | generic); X-Hub-Signature-256 required. For `github`, `X-GitHub-Event` selects the path: `push` (or no header) syncs matching mirrors and answers { matched }; every other event is acknowledged after the same signature check and ignored, answering { ignored: <event> }. A provider this server has not configured is a 404.",
         "security": [],
         "responses": {
           "202": {
-            "description": "{ matched }"
+            "description": "{ matched } for a push; { ignored: <event> } for any other GitHub event"
           },
           "401": {
             "description": "Bad signature"
+          },
+          "404": {
+            "description": "unknown webhook provider"
           }
         }
       }
@@ -4116,18 +4085,6 @@
       "get": {
         "summary": "GitHub sends a browser here after an App install or an edit to one. Two proofs, for two questions. Whose installation: the `code` GitHub appends when the App requests user authorization during installation is exchanged for that person's token, and the installation must be among the ones `GET /user/installations` lists for them — otherwise `connect=notyours` and nothing is bound. Which organization: the single-use `state` minted by `POST /v1/orgs/{org}/github/install`; without one (GitHub sends none after an edit, and an install begun on GitHub or from the Marketplace never had one) the signed-in person's own single pending connect stands in; otherwise the installation, already proved theirs, is parked and the browser is sent to `connect=claim` with a claim cookie, and `POST /v1/orgs/{org}/github/install/claim` binds it after sign-in. Answers a redirect back into the dashboard either way, carrying `connect=ok|claim|notyours|missing|expired|taken|error` — every dead state is `expired`, so a callback cannot be used to learn which flows exist.",
         "parameters": [
-          {
-            "name": "app",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "runners"
-              ]
-            },
-            "description": "Set when the Runners App's setup URL query survives; the Runners App's own callback path `/v1/github/setup/runners` sets it, and a redirect carrying a `state` is read for the App that state was minted for."
-          },
           {
             "name": "installation_id",
             "in": "query",
@@ -4193,20 +4150,7 @@
     },
     "/v1/orgs/{org}/github/install": {
       "post": {
-        "summary": "Begin connecting a GitHub App installation to this organization. Requires org:admin and a verified address. Answers the URL to send the person to, with a single-use state already in it. `?app=runners` asks for the Runners App on a deployment that has one (its installations are recorded under the provider `github-runners` and receive `workflow_job` on `/webhooks/github-runners`); otherwise, and on a one-App deployment, the mirror App, which then also runs jobs.",
-        "parameters": [
-          {
-            "name": "app",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "runners"
-              ]
-            }
-          }
-        ],
+        "summary": "Begin connecting a GitHub App installation to this organization. Requires org:admin and a verified address. Answers the URL to send the person to, with a single-use state already in it. 501 when the server has no GitHub App configured.",
         "responses": {
           "200": {
             "description": "{ url, state, expires_in }"
@@ -4219,24 +4163,11 @@
     },
     "/v1/orgs/{org}/github/installations": {
       "get": {
-        "summary": "Installations this organization has connected. An installation belongs to exactly one organization, so this never lists somebody else's. `?app=runners` lists the Runners App's installations where the deployment has one; the runner settings page asks that way.",
-        "parameters": [
-          {
-            "name": "app",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string",
-              "enum": [
-                "runners"
-              ]
-            }
-          }
-        ],
-        "description": "`detail` is what GitHub says about the installation right now — whose it is, whether that is a person or an organization, and whether it holds the two permissions the GitHub Actions runner feature needs (`Administration: write` to register a runner, `Actions: write` to cancel a run that was refused) and the one forwarding a push to a mirror's origin needs (`Contents: write`). `runners_ready` is the first two together; `push_ready` is the third; `approve_url` is where a person approves what is missing. `null` when GitHub could not be asked; `{ gone: true }` when the App has been uninstalled there.",
+        "summary": "Installations this organization has connected. An installation belongs to exactly one organization, so this never lists somebody else's.",
+        "description": "`detail` is what GitHub says about the installation right now — whose it is, whether that is a person or an organization, and whether it holds `Contents: write`, the permission forwarding a push to a mirror's origin needs. `push_ready` is that permission; `approve_url` is where a person approves it when it is missing. `null` when GitHub could not be asked; `{ gone: true }` when the App has been uninstalled there.",
         "responses": {
           "200": {
-            "description": "{ installations: [{ installation_id, provider, account, created_at, detail: { account, target_type, administration_write, actions_write, contents_write, runners_ready, push_ready, approve_url, suspended } | { gone } | null }] }"
+            "description": "{ installations: [{ installation_id, provider, account, created_at, detail: { account, target_type, contents_write, push_ready, approve_url, suspended } | { gone } | null }] }"
           }
         }
       }
@@ -4303,7 +4234,7 @@
     "/v1/search/topics": {
       "get": {
         "summary": "Topics in use, most-used first",
-        "description": "The topics maintainers have actually filed repositories under, with how many the caller can see carrying each. Ordered by count and then by name, so the order is stable between calls rather than reshuffling among equal counts. Scoped exactly as repo search is: a topic carried only by repositories the caller cannot see is not listed, because a list of topic names is an existence oracle for the work behind them. This is what the discovery page builds its topic chips from.",
+        "description": "The topics maintainers have actually filed repositories under, with how many the caller can see carrying each. Ordered by count and then by name, so the order is stable between calls rather than reshuffling among equal counts. Scoped exactly as repo search is: a topic carried only by repositories the caller cannot see is not listed, because a list of topic names is an existence oracle for the work behind them.",
         "parameters": [
           {
             "name": "limit",
@@ -4348,7 +4279,7 @@
     "/v1/search/repos": {
       "get": {
         "summary": "Search repos across namespaces",
-        "description": "Open to anonymous callers: they see public repos. Signed in (session or org token), the answer also includes repos in namespaces you belong to. Matching is a case-insensitive substring of the repo name, its namespace, its description, or any of its topics; an empty `q` returns everything visible, which is what the discovery page browses with. `topic` narrows to repositories carrying exactly that topic, and is separate from `q` on purpose: `q` is what somebody typed and matches a topic as loosely as it matches prose, while `topic` is what a topic pill means and has to be exact. Paging is keyset over `(namespace, name, id)` and the cursor is applied inside the visibility filter, so a tampered cursor moves the window and never widens it.",
+        "description": "Needs a signed-in person (a session or a personal token) or an organization token: no credential is 401, and a token bound to one repository is 403 \"a token bound to one repository cannot search; use a personal or organization token\". A person sees repositories in every namespace they belong to; an organization token sees its own organization's. A per-repo grant does not add a repository here. Matching is a case-insensitive substring of the repo name, its namespace, its description, or any of its topics; an empty `q` returns everything visible. `topic` narrows to repositories carrying exactly that topic, and is separate from `q` on purpose: `q` is what somebody typed and matches a topic as loosely as it matches prose, while `topic` is what a topic pill means and has to be exact. Paging is keyset over `(namespace, name, id)` and the cursor is applied inside the visibility filter, so a tampered cursor moves the window and never widens it.",
         "parameters": [
           {
             "name": "q",
@@ -4484,8 +4415,7 @@
     "/v1/orgs/{org}/repos/{repo}/commits/{sha}/checks": {
       "get": {
         "summary": "The check verdicts standing beside one commit — one row per workflow, the newest of each",
-        "description": "Not the commit's whole check history. A provider polls, so one build arrives as queued, then running, then failing, then passing after a re-run; returning all of them puts \"build: failing\" from twenty minutes ago above \"build: passing\" from two, and a reader who scans the first line concludes the commit is broken. Keyed on the workflow's name, because the name is what a reader recognises — the cost being that if two providers report a workflow of the same name for one commit, the newer wins and the other is not shown. Readable by anyone who may read the repository, a signed-out visitor included; a private repository answers exactly as one that does not exist. A commit with no runs, and a sha that could never have been stored, are both an empty list with 200: the 404 on this route belongs to the repository, and spending it on the commit too would make \"no such project\" and \"nothing has built this yet\" indistinguishable. The sha is deliberately not checked against a reachable object — a run can be reported for a commit since rewritten away, and refusing to show it would lose the only record that it happened.",
-        "security": [],
+        "description": "Not the commit's whole check history. A provider polls, so one build arrives as queued, then running, then failing, then passing after a re-run; returning all of them puts \"build: failing\" from twenty minutes ago above \"build: passing\" from two, and a reader who scans the first line concludes the commit is broken. Keyed on the workflow's name, because the name is what a reader recognises — the cost being that if two providers report a workflow of the same name for one commit, the newer wins and the other is not shown. Readable by anyone who may read the repository; with no credential the answer is 401, and a repository the caller cannot read answers exactly as one that does not exist. A commit with no runs, and a sha that could never have been stored, are both an empty list with 200: the 404 on this route belongs to the repository, and spending it on the commit too would make \"no such project\" and \"nothing has built this yet\" indistinguishable. The sha is deliberately not checked against a reachable object — a run can be reported for a commit since rewritten away, and refusing to show it would lose the only record that it happened.",
         "parameters": [
           {
             "name": "sha",
@@ -4502,6 +4432,9 @@
           },
           "404": {
             "description": "No such repository, or none you may see"
+          },
+          "401": {
+            "description": "No credential"
           }
         }
       }
@@ -4642,8 +4575,7 @@
     "/v1/orgs/{org}/repos/{repo}/checks/runs": {
       "get": {
         "summary": "This repository's CI runs, newest first",
-        "description": "Every row here is a verdict: reached by Weft's own hosted runner for a `.weft/*.yml` workflow (`provider` is `stratum`, and `detail_url` is that run's page on this forge, `/<org>/<repo>/checks/runs/<run id>` — a refused workflow file gets a row named for the file, and a `.weft/` directory the trigger could not read gets one named for the directory, each linking to the run that carries the reason), polled from the org's GitHub App installation, or posted to the signed intake at .../ci/checks. Which of the three is `provider`, and callers should not branch on it: the point of one shape is that a Buildkite project's runs read exactly like a GitHub Actions project's. `workflows` is the distinct set of names across the whole repository and rides along with every page, so a left rail can be drawn without a second request. `next_before` is the cursor for the next page and is null on the last one. Readable by anyone who may read the repository; a private repository answers a stranger exactly as one that does not exist. `state` outside the six is refused by name rather than ignored — a filter silently dropped shows rows that do not match what was asked for, which reads as the filter being broken. `limit` is clamped rather than refused. A repository nobody has reported a run for answers an empty list with 200.",
-        "security": [],
+        "description": "Every row here is a verdict: reached by a `.weft/*.yml` workflow on one of the organization's runners (`provider` is `weft`, and `detail_url` is that run's page on this forge, `/<org>/<repo>/checks/runs/<run id>` — a refused workflow file gets a row named for the file, and a `.weft/` directory the trigger could not read gets one named for the directory, each linking to the run that carries the reason), polled from the org's GitHub App installation, or posted to the signed intake at .../ci/checks. Which of the three is `provider`, and callers should not branch on it: the point of one shape is that a Buildkite project's runs read exactly like a GitHub Actions project's. `workflows` is the distinct set of names across the whole repository and rides along with every page, so a left rail can be drawn without a second request. `next_before` is the cursor for the next page and is null on the last one. Readable by anyone who may read the repository; with no credential the answer is 401, and a repository the caller cannot read answers exactly as one that does not exist. `state` outside the six is refused by name rather than ignored — a filter silently dropped shows rows that do not match what was asked for, which reads as the filter being broken. `limit` is clamped rather than refused. A repository nobody has reported a run for answers an empty list with 200.",
         "parameters": [
           {
             "name": "branch",
@@ -4712,6 +4644,9 @@
           },
           "404": {
             "description": "No such repository, or none you may see"
+          },
+          "401": {
+            "description": "No credential"
           }
         }
       }
@@ -4720,13 +4655,15 @@
       "get": {
         "summary": "One check run",
         "description": "Scoped to the repository in the path: a run belonging to another repository answers exactly as an id that was never issued, because the lookup filters on repo_id inside the query rather than fetching the row and comparing afterwards.",
-        "security": [],
         "responses": {
           "200": {
             "description": "The run"
           },
           "404": {
             "description": "No such run in this repository, or no such repository"
+          },
+          "401": {
+            "description": "No credential"
           }
         }
       }
@@ -4734,8 +4671,7 @@
     "/v1/orgs/{org}/repos/{repo}/contributors": {
       "get": {
         "summary": "Who has worked on this repository, most first",
-        "description": "Derived from the commits themselves rather than from activity on this platform, on the same rules as the profile heatmap — which is what makes a project that mirrored in yesterday show its real contributors instead of an empty grid. Readable by anyone who may read the repository, a signed-out visitor included; a private repository answers exactly as one that does not exist. `limit` is optional and clamped rather than refused — a large number is somebody wanting more of the answer than the rail shows — but a `limit` that is not a whole number is refused by name, because nobody meant it and quietly serving the default would answer a question that was not asked. A repository nobody has committed to answers an empty list with 200: that is a fact about a real repository, where a 404 would be a different and false statement.",
-        "security": [],
+        "description": "Derived from the commits themselves rather than from activity on this server — which is what makes a project that mirrored in yesterday show its real contributors instead of an empty grid. Readable by anyone who may read the repository; with no credential the answer is 401, and a repository the caller cannot read answers exactly as one that does not exist. `limit` is optional and clamped rather than refused — a large number is somebody wanting more of the answer than the rail shows — but a `limit` that is not a whole number is refused by name, because nobody meant it and quietly serving the default would answer a question that was not asked. A repository nobody has committed to answers an empty list with 200: that is a fact about a real repository, where a 404 would be a different and false statement.",
         "parameters": [
           {
             "name": "limit",
@@ -4754,13 +4690,16 @@
           },
           "404": {
             "description": "No such repository, or none you may see"
+          },
+          "401": {
+            "description": "No credential"
           }
         }
       }
     },
     "/v1/orgs/{org}/repos/{repo}/meta": {
       "get": {
-        "summary": "What the repository is, beside what is in it: the language mix by bytes, the detected licence, the community files (CONTRIBUTING / CODE_OF_CONDUCT / SECURITY) found at the root or in `.github/`, the path of the README, and the topics. Everything but the topics is derived from the tree at the default branch — no new git plumbing and nothing stored. Readable by anyone who may read the repository, a signed-out visitor included; masked exactly as the code is for anyone who may not. `license.spdx` is null with `recognised: false` when the file is there but the fingerprint table is not certain what it is — a wrong licence is materially worse than no licence, so it never guesses. Several licence files (`LICENSE-APACHE` beside `LICENSE-MIT`) is its own answer rather than silence: `path` and `spdx` are null and `files` lists them, because naming one would mislead and saying nothing makes a dual-licensed project read as unlicensed. `license` is null only when there is no licence file at all. `languages_truncated` is true when the tree walk hit its bound, in which case the byte counts are of what was measured rather than of the whole tree.",
+        "summary": "What the repository is, beside what is in it: the language mix by bytes, the detected licence, the community files (CONTRIBUTING / CODE_OF_CONDUCT / SECURITY) found at the root or in `.github/`, the path of the README, and the topics. Everything but the topics is derived from the tree at the default branch — no new git plumbing and nothing stored. Readable by anyone who may read the repository; 401 with no credential, and masked exactly as the code is for anyone who may not. `license.spdx` is null with `recognised: false` when the file is there but the fingerprint table is not certain what it is — a wrong licence is materially worse than no licence, so it never guesses. Several licence files (`LICENSE-APACHE` beside `LICENSE-MIT`) is its own answer rather than silence: `path` and `spdx` are null and `files` lists them, because naming one would mislead and saying nothing makes a dual-licensed project read as unlicensed. `license` is null only when there is no licence file at all. `languages_truncated` is true when the tree walk hit its bound, in which case the byte counts are of what was measured rather than of the whole tree.",
         "responses": {
           "200": {
             "description": "{ topics: [string], languages: [{ name, bytes }] (biggest first), languages_truncated: bool, license: { path: string|null, spdx: string|null, name: string|null, recognised: bool, files: [string] } | null, community: [{ kind, path }], readme: string|null }. `readme` is the path of the project's README (root before `.github/`, and `.md` / `.txt` / `.rst` / no extension all recognised), or null when there is none — a scalar rather than a fourth `community` kind because the client fetches and renders its bytes rather than linking to it, and null rather than \"\" because absence is a fact the About rail renders rather than a file named nothing. Carries an ETag over the HEAD commit and the topics, and `Cache-Control: private, no-cache`: a conditional request that matches answers 304 without walking the tree — the README path is a function of the tree, which is a function of the commit already in the tag, so it needs no extra input."
@@ -5163,7 +5102,7 @@
     "/v1/orgs/{org}/repos/{repo}/workflow-runs": {
       "get": {
         "summary": "This repository's workflow runs, newest first, each with its jobs",
-        "description": "What `.weft/` actually ran — as opposed to `/workflows`, which is what it *would* run. Run JSON is `{ id, file, name, commit_sha, ref_name, event, change_key, state, error, blocked_reason, created_at, updated_at, completed_at, changeset, composition, jobs: [...] }`; `event` is `push`, `change` or `changeset`, and on a `changeset` run `changeset` is `{ key }` and `composition` is the hex composition it was started for — both null otherwise; `state` is one of running, passed, failed, cancelled, blocked — a run that exists, is not running and has no verdict: a fork's change waiting for a maintainer to let it run, an organization out of hosted-runner minutes, or one whose hosted workflows are suspended. The sentence is in `error` and the machine-readable reason is in `blocked_reason` — `fork`, `budget` or `suspended`, and null unless the run is blocked. Branch on `blocked_reason`, never on the words in `error`: only a `fork` run can be started by `POST …/changes/{change}/workflows/approve`, and the sentences are written for a person and get rewritten. The run's mirrored check row is `queued` rather than failing, because nothing is wrong with the commit. Job JSON is `{ id, job_id, key, matrix, state, attempts, error, detail_url, log_chunks, started_at, completed_at }`; `key` is the expanded cell name and `matrix` is an object, already parsed. Every job also mirrors itself into `check_runs` as `<workflow> / <cell>`, so a run's verdicts appear on the Checks tab and in the land gate without asking here at all — except a `changeset` run, whose jobs mirror onto the changeset instead (`checks` on `GET …/changesets/{changeset}`) and never onto the commit. `limit` defaults to 20 and is clamped to 100 rather than refused: a limit is a hint about how much the renderer wants, and a 400 turns a harmless over-request into a broken page whose only recovery is guessing a maximum the caller cannot see.",
+        "description": "What `.weft/` actually ran — as opposed to `/workflows`, which is what it *would* run. Run JSON is `{ id, file, name, commit_sha, ref_name, event, change_key, state, error, blocked_reason, created_at, updated_at, completed_at, changeset, composition, jobs: [...] }`; `event` is `push`, `change` or `changeset`, and on a `changeset` run `changeset` is `{ key }` and `composition` is the hex composition it was started for — both null otherwise; `state` is one of running, passed, failed, cancelled, blocked — a run that exists, is not running and has no verdict: a fork's change waiting for a maintainer to let it run. The sentence is in `error` and the machine-readable reason is in `blocked_reason` — `fork`, and null unless the run is blocked. Branch on `blocked_reason`, never on the words in `error`: a `fork` run is started by `POST …/changes/{change}/workflows/approve`, and the sentences are written for a person and get rewritten. The run's mirrored check row is `queued` rather than failing, because nothing is wrong with the commit. Job JSON is `{ id, job_id, key, matrix, state, attempts, error, detail_url, log_chunks, pool, labels, runner, started_at, completed_at }`; `pool` is always `self_hosted` (kept for clients written for the hosted edition), `labels` is what the job's `runs-on` asked for, and `runner` is `{ id, name }` once a runner has claimed it, null before; `key` is the expanded cell name and `matrix` is an object, already parsed. Every job also mirrors itself into `check_runs` as `<workflow> / <cell>`, so a run's verdicts appear on the Checks tab and in the land gate without asking here at all — except a `changeset` run, whose jobs mirror onto the changeset instead (`checks` on `GET …/changesets/{changeset}`) and never onto the commit. `limit` defaults to 20 and is clamped to 100 rather than refused: a limit is a hint about how much the renderer wants, and a 400 turns a harmless over-request into a broken page whose only recovery is guessing a maximum the caller cannot see.",
         "parameters": [
           {
             "name": "limit",
@@ -5217,7 +5156,7 @@
     "/v1/orgs/{org}/repos/{repo}/workflow-runs/{id}": {
       "get": {
         "summary": "One workflow run with its jobs",
-        "description": "Scoped to the repository in the path. A run belonging to another repository answers 404 rather than 403 — an id that resolves differently for a stranger is an existence oracle. Run JSON is `{ id, file, name, commit_sha, ref_name, event, change_key, state, error, blocked_reason, created_at, updated_at, completed_at, changeset, composition, jobs: [...] }`; `event` is `push`, `change` or `changeset`, and on a `changeset` run `changeset` is `{ key }` and `composition` is the hex composition it was started for — both null otherwise; `state` is one of running, passed, failed, cancelled, blocked — a run that exists, is not running and has no verdict: a fork's change waiting for a maintainer to let it run, an organization out of hosted-runner minutes, or one whose hosted workflows are suspended. The sentence is in `error` and the machine-readable reason is in `blocked_reason` — `fork`, `budget` or `suspended`, and null unless the run is blocked. Branch on `blocked_reason`, never on the words in `error`: only a `fork` run can be started by `POST …/changes/{change}/workflows/approve`, and the sentences are written for a person and get rewritten. The run's mirrored check row is `queued` rather than failing, because nothing is wrong with the commit. Job JSON is `{ id, job_id, key, matrix, state, attempts, error, detail_url, log_chunks, started_at, completed_at }`; `key` is the expanded cell name and `matrix` is an object, already parsed. Every job also mirrors itself into `check_runs` as `<workflow> / <cell>`, so a run's verdicts appear on the Checks tab and in the land gate without asking here at all — except a `changeset` run, whose jobs mirror onto the changeset instead (`checks` on `GET …/changesets/{changeset}`) and never onto the commit.",
+        "description": "Scoped to the repository in the path. A run belonging to another repository answers 404 rather than 403 — an id that resolves differently for somebody who cannot read it is an existence oracle. Run JSON is `{ id, file, name, commit_sha, ref_name, event, change_key, state, error, blocked_reason, created_at, updated_at, completed_at, changeset, composition, jobs: [...] }`; `event` is `push`, `change` or `changeset`, and on a `changeset` run `changeset` is `{ key }` and `composition` is the hex composition it was started for — both null otherwise; `state` is one of running, passed, failed, cancelled, blocked — a run that exists, is not running and has no verdict: a fork's change waiting for a maintainer to let it run. The sentence is in `error` and the machine-readable reason is in `blocked_reason` — `fork`, and null unless the run is blocked. Branch on `blocked_reason`, never on the words in `error`: a `fork` run is started by `POST …/changes/{change}/workflows/approve`, and the sentences are written for a person and get rewritten. The run's mirrored check row is `queued` rather than failing, because nothing is wrong with the commit. Job JSON is `{ id, job_id, key, matrix, state, attempts, error, detail_url, log_chunks, pool, labels, runner, started_at, completed_at }`; `pool` is always `self_hosted` (kept for clients written for the hosted edition), `labels` is what the job's `runs-on` asked for, and `runner` is `{ id, name }` once a runner has claimed it, null before; `key` is the expanded cell name and `matrix` is an object, already parsed. Every job also mirrors itself into `check_runs` as `<workflow> / <cell>`, so a run's verdicts appear on the Checks tab and in the land gate without asking here at all — except a `changeset` run, whose jobs mirror onto the changeset instead (`checks` on `GET …/changesets/{changeset}`) and never onto the commit.",
         "responses": {
           "200": {
             "description": "the run and its jobs"
@@ -5262,7 +5201,7 @@
     "/v1/orgs/{org}/repos/{repo}/workflow-jobs/{id}/log/stream": {
       "get": {
         "summary": "A job's build log as it arrives (server-sent events)",
-        "description": "`text/event-stream`. Emits `event: chunk` carrying `{ \"text\": ... }` for each new log chunk, in order, `event: queued` once for a job that has not started, and `event: done` carrying `{ \"state\": ... }` when the job leaves running/queued, after which the stream closes. The chunk is JSON rather than the raw bytes because an SSE `data:` field cannot carry a newline — the wire format splits a multi-line payload across several `data:` lines and loses the payload's trailing one, which would run the last line of each chunk into the first line of the next. Held open for at most six hours. The feed reads the same stored chunk objects the plain log route does rather than an in-memory fan-out from the runner: in a fleet, the node a runner posts to is not the node a reader is connected to, and an in-process channel would show the log to whoever happened to land on the right one and a spinner to everybody else.",
+        "description": "`text/event-stream`. Emits `event: chunk` carrying `{ \"text\": ... }` for each new log chunk, in order, `event: queued` once for a job that has not started, and `event: done` carrying `{ \"state\": ... }` when the job leaves running/queued, after which the stream closes. The chunk is JSON rather than the raw bytes because an SSE `data:` field cannot carry a newline — the wire format splits a multi-line payload across several `data:` lines and loses the payload's trailing one, which would run the last line of each chunk into the first line of the next. Held open for at most six hours. The feed reads the same stored chunk objects the plain log route does rather than an in-memory fan-out from the runner: on a server of several nodes, the node a runner posts to is not the node a reader is connected to, and an in-process channel would show the log to whoever happened to land on the right one and a spinner to everybody else.",
         "responses": {
           "200": {
             "description": "an event stream of chunk, queued and done events"
@@ -5276,7 +5215,7 @@
     "/v1/runner/jobs/{id}": {
       "get": {
         "summary": "Everything a runner needs to check out and execute one job",
-        "description": "For hosted runners; not a route a person calls. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before asking the platform to stop the container — is still answered **410 with the state** when it is the token this job was dispatched with and the job has stopped running. Anything else is 401. Without it the container being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: there is no channel into the container, so \"stop\" is something a runner learns by being told on its next call. The answer is the job's frozen JobSpec (`image`, `timeout_minutes`, `env`, `steps`) plus `id`, `run_id`, `attempt`, `key`, `job`, `clone_url`, `fetch_ref`, `commit_sha`, `ref_name`, `event`, `change_key` and `matrix`. `clone_url` is built from the runner URL the runner already reached this API on rather than the public host — they are the same behind a CDN and differ on a private network — and never carries a credential — the token goes in a header the runner sets itself, so it cannot end up in a remote's config, a reflog, or a `ps` listing. `fetch_ref` is `refs/heads/<branch>` for a push and `refs/patchsets/<sha>` for a change, because a change's commits are not on a branch. When `event` is `changeset` the answer also carries `changeset`: `{ key, members: [{ repo, change, clone_url, fetch_ref, commit_sha, token }] }` in member order, every member of the changeset at the head it proposes, which the runner checks out side by side under a workspace directory and runs the steps in this job's own repository. The job's own member has `token: null` — it is checked out with the job token — and every other member carries a **plaintext `repo:read` token minted for that one repository**, expiring with the job token and revoked with it when the job finishes or is stopped; a re-fetch of the spec mints a fresh set and revokes the previous one. It is deliberately not one org-wide token: a member's CI script is code its author wrote, and an org-wide read would let it read repositories the author cannot see. The top-level `fetch_ref`, `commit_sha` and `change_key` stay this job's own member's.",
+        "description": "Called by `weft-runner`; not a route a person calls. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before the runner next calls in — is still answered **410 with the state** when it is the token this job was claimed with and the job has stopped running. Anything else is 401. Without it the runner being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: nothing listens on the runner's machine, so \"stop\" is something a runner learns by being told on its next call. The answer is the job's frozen JobSpec (`image`, always `default` — a job naming another is refused before it is queued — `timeout_minutes`, `labels`, `env`, `steps`) plus `id`, `run_id`, `attempt`, `key`, `job`, `clone_url`, `fetch_ref`, `commit_sha`, `ref_name`, `event`, `change_key` and `matrix`. `clone_url` is built from the runner URL the runner already reached this API on rather than the public host — they are the same behind a CDN and differ on a private network — and never carries a credential — the token goes in a header the runner sets itself, so it cannot end up in a remote's config, a reflog, or a `ps` listing. `fetch_ref` is `refs/heads/<branch>` for a push and `refs/patchsets/<sha>` for a change, because a change's commits are not on a branch. When `event` is `changeset` the answer also carries `changeset`: `{ key, members: [{ repo, change, clone_url, fetch_ref, commit_sha, token }] }` in member order, every member of the changeset at the head it proposes, which the runner checks out side by side under a workspace directory and runs the steps in this job's own repository. The job's own member has `token: null` — it is checked out with the job token — and every other member carries a **plaintext `repo:read` token minted for that one repository**, expiring with the job token and revoked with it when the job finishes or is stopped; a re-fetch of the spec mints a fresh set and revokes the previous one. It is deliberately not one org-wide token: a member's CI script is code its author wrote, and an org-wide read would let it read repositories the author cannot see. The top-level `fetch_ref`, `commit_sha` and `change_key` stay this job's own member's.",
         "responses": {
           "200": {
             "description": "the job spec plus its identity and checkout fields"
@@ -5299,7 +5238,7 @@
     "/v1/runner/jobs/{id}/log": {
       "post": {
         "summary": "Upload one chunk of a running job's log",
-        "description": "For hosted runners. Body `{ seq: integer >= 1, text: string }`, at most 262144 bytes of text. The object is written before the counter moves, so a chunk the database knows about is always one the store has — the other order leaves a hole a reader can see. A `seq` at or below what has already been recorded is a retry: the object is overwritten and the answer is still 200, because the counter only moves forward and a re-sent chunk must not hide chunks a reader has already been shown. Answering also renews the job's lease: a job producing output is a job that is alive, so a build that logs steadily never needs a separate heartbeat. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before asking the platform to stop the container — is still answered **410 with the state** when it is the token this job was dispatched with and the job has stopped running. Anything else is 401. Without it the container being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: there is no channel into the container, so \"stop\" is something a runner learns by being told on its next call.",
+        "description": "Called by `weft-runner`. Body `{ seq: integer >= 1, text: string }`, at most 262144 bytes of text. The object is written before the counter moves, so a chunk the database knows about is always one the store has — the other order leaves a hole a reader can see. A `seq` at or below what has already been recorded is a retry: the object is overwritten and the answer is still 200, because the counter only moves forward and a re-sent chunk must not hide chunks a reader has already been shown. Answering also renews the job's lease: a job producing output is a job that is alive, so a build that logs steadily never needs a separate heartbeat. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before the runner next calls in — is still answered **410 with the state** when it is the token this job was claimed with and the job has stopped running. Anything else is 401. Without it the runner being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: nothing listens on the runner's machine, so \"stop\" is something a runner learns by being told on its next call.",
         "responses": {
           "200": {
             "description": "{ lease_until: epoch millis }"
@@ -5326,7 +5265,7 @@
       },
       "put": {
         "summary": "Upload a job's complete log",
-        "description": "For hosted runners. Raw `text/plain`, at most 16777216 bytes. This is the authoritative copy: a chunk POST that failed twice is dropped by the runner rather than retried forever, so the chunk sequence may have holes and this object does not, and reads prefer it the moment it exists. Refused with 413 rather than truncated — a silently truncated log is worse than a refused one, because it looks complete. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before asking the platform to stop the container — is still answered **410 with the state** when it is the token this job was dispatched with and the job has stopped running. Anything else is 401. Without it the container being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: there is no channel into the container, so \"stop\" is something a runner learns by being told on its next call.",
+        "description": "Called by `weft-runner`. Raw `text/plain`, at most 16777216 bytes. This is the authoritative copy: a chunk POST that failed twice is dropped by the runner rather than retried forever, so the chunk sequence may have holes and this object does not, and reads prefer it the moment it exists. Refused with 413 rather than truncated — a silently truncated log is worse than a refused one, because it looks complete. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before the runner next calls in — is still answered **410 with the state** when it is the token this job was claimed with and the job has stopped running. Anything else is 401. Without it the runner being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: nothing listens on the runner's machine, so \"stop\" is something a runner learns by being told on its next call.",
         "responses": {
           "200": {
             "description": "{}"
@@ -5352,7 +5291,7 @@
     "/v1/runner/jobs/{id}/lease": {
       "post": {
         "summary": "Heartbeat for a job that is working and not talking",
-        "description": "For hosted runners. A long compile produces nothing to log for minutes at a time, and without this its lease would expire and the dispatcher would hand the work to a second runner while the first was still doing it. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before asking the platform to stop the container — is still answered **410 with the state** when it is the token this job was dispatched with and the job has stopped running. Anything else is 401. Without it the container being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: there is no channel into the container, so \"stop\" is something a runner learns by being told on its next call.",
+        "description": "Called by `weft-runner`. A long compile produces nothing to log for minutes at a time, and without this its lease would expire and a second runner could claim the work while the first was still doing it. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before the runner next calls in — is still answered **410 with the state** when it is the token this job was claimed with and the job has stopped running. Anything else is 401. Without it the runner being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: nothing listens on the runner's machine, so \"stop\" is something a runner learns by being told on its next call.",
         "responses": {
           "200": {
             "description": "{ lease_until: epoch millis }"
@@ -5370,522 +5309,12 @@
             "description": "{ error, state } — the job is no longer running; stop and exit"
           }
         }
-      },
-      "/v2/": {
-        "get": {
-          "summary": "The OCI distribution API's version probe, which every container client makes first. Answers 200 with `Docker-Distribution-API-Version: registry/2.0` to a caller with a credential, and 401 with a `WWW-Authenticate: Basic` challenge to one without — which is what makes `docker login` work. This API lives at the host root and not under `/v1/` because it has to: a container client parses `host/path/image` as registry `host` and repository `path/image`, so there is nowhere to put a base path. The organization is therefore the first component of the repository name: `docker push weft.sh/acme/service:v1`.",
-          "responses": {
-            "200": {
-              "description": "{}"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            }
-          }
-        }
-      },
-      "/v2/{path}": {
-        "get": {
-          "summary": "Pull. `{path}` is one of `<name>/manifests/<tag-or-digest>`, `<name>/blobs/<digest>` or `<name>/tags/list`. A repository name may contain slashes, so the marker that ends it is found from the right. Requires package:read. A layer is served block by block, so a five-hundred-megabyte pull holds one block in memory rather than the layer.",
-          "responses": {
-            "200": {
-              "description": "the manifest, the blob, or the tags document; `Docker-Content-Digest` names what was served"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such org, containers are not enabled for it, or no such repository, manifest or blob"
-            }
-          }
-        },
-        "head": {
-          "summary": "The same lookups without the body, which is how a client checks whether it needs to push a layer at all."
-        },
-        "post": {
-          "summary": "`<name>/blobs/uploads/` — open an upload session. Requires package:write. Answers 202 with a `Location` to PATCH into and a `Docker-Upload-UUID`. The repository row is created here, so a push against a name the organization's policy forbids is refused before a single byte moves.",
-          "responses": {
-            "202": {
-              "description": "session opened"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "409": {
-              "description": "the name is cached from an upstream registry and cannot be pushed to"
-            }
-          }
-        },
-        "patch": {
-          "summary": "Write to an upload session. The body is read as a **stream** and cut into blocks as it arrives, so a layer never becomes resident — `ObjectStore::put` takes a slice, and `docker push` sends a layer as one body. Requires package:write.",
-          "responses": {
-            "202": {
-              "description": "accepted, with the session's byte range so far"
-            },
-            "404": {
-              "description": "no such upload"
-            },
-            "413": {
-              "description": "over the blob ceiling"
-            }
-          }
-        },
-        "put": {
-          "summary": "Finish an upload (`?digest=sha256:…`, which may carry the last chunk), or push a manifest. A manifest is refused unless **every blob it names is already here** — otherwise this registry serves an image nobody can pull and the client's error is about the missing layer rather than about the push that was wrong. An upload's digest is checked by re-reading its blocks: a session may be finished on a different node than opened it, so no hasher is carried across requests. A tag **moves** — that is what a tag is for, and it is the one place the “a version never changes” rule does not apply, because what never changes is the manifest, addressed by its digest.",
-          "responses": {
-            "201": {
-              "description": "stored; `Docker-Content-Digest` names it"
-            },
-            "400": {
-              "description": "no digest, a digest that is not the bytes', or a document that is not a manifest"
-            },
-            "404": {
-              "description": "no such upload, or a blob the manifest names has not been pushed"
-            }
-          }
-        },
-        "delete": {
-          "summary": "Cancel an upload session, or delete a **tag**. A manifest by digest is refused: it may be referenced by tags the caller cannot see, and the spec permits a registry to refuse. Requires package:write.",
-          "responses": {
-            "202": {
-              "description": "the tag is gone"
-            },
-            "204": {
-              "description": "the upload session is cancelled"
-            },
-            "404": {
-              "description": "no such tag or upload"
-            },
-            "405": {
-              "description": "a manifest addressed by digest"
-            }
-          }
-        }
-      },
-      "/v1/registry/maven/{org}/{path}": {
-        "get": {
-          "summary": "The Maven repository. `{path}` is a coordinate laid out the way Maven lays one out — `groupId/as/directories/artifactId/version/filename` — read from the right, because a groupId has any number of segments and reading it from the left is ambiguous. `{group}/{artifact}/maven-metadata.xml` and its `.sha1` are generated from our own rows and never stored. Requires package:read; a Basic challenge is sent to an anonymous caller, because that is the dialect `mvn` speaks.",
-          "responses": {
-            "200": {
-              "description": "the file, or the generated maven-metadata.xml"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such org, Maven is not enabled for it, the path is not a coordinate, or no such file"
-            }
-          }
-        },
-        "put": {
-          "summary": "Deploy one file of one release. Requires package:write. `mvn deploy` sends each file of a release as its own request in an order nobody promises, so the first file creates the version and each later one is added to it — with a second upload of a filename that is already there refused rather than overwritten. **SNAPSHOT versions are refused**: a snapshot is a version whose bytes are meant to change, which is the opposite of the invariant this registry rests on. An uploaded `maven-metadata.xml` is accepted and discarded, because we generate that document ourselves.",
-          "responses": {
-            "201": {
-              "description": "stored"
-            },
-            "200": {
-              "description": "a maven-metadata.xml upload, accepted and discarded"
-            },
-            "400": {
-              "description": "not a coordinate, a snapshot version, or a version string that cannot be stored"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "409": {
-              "description": "that file is already deployed at that version, or the name is a proxied package"
-            }
-          }
-        }
-      },
-      "/v1/registry/pypi/{org}": {
-        "post": {
-          "summary": "twine's upload: `multipart/form-data` with `:action=file_upload`, the artifact in the `content` field and the metadata in fields beside it. Requires package:write. If twine sends a `sha256_digest` it is checked against the bytes that arrived, because a mismatch is a truncated upload rather than a policy question. The licence is read from PEP 639's `License-Expression` first, then from a trove classifier, and only then from the free-text `License` field — and only through an exact table, so an unmapped spelling is `unknown` rather than a guess. `twine upload dist/*` posts the sdist and the wheel separately; both land on one version.",
-          "responses": {
-            "200": {
-              "description": "stored"
-            },
-            "400": {
-              "description": "not a multipart upload, not a file_upload, a filename that is not a distribution filename, or bytes that do not match the digest twine sent"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "409": {
-              "description": "that filename is already uploaded for that version, or the name is a proxied package"
-            }
-          }
-        }
-      },
-      "/v1/registry/pypi/{org}/": {
-        "post": {
-          "summary": "The same upload, for a `.pypirc` whose `repository` carries a trailing slash. Registered rather than redirected, because a client does not re-POST a body after a redirect."
-        }
-      },
-      "/v1/registry/pypi/{org}/{path}": {
-        "get": {
-          "summary": "pip's Simple API and the files it links to. `simple/` is the root index, `simple/{name}/` is one project's page — PEP 503, with a `#sha256=` fragment on every link, which is what pip verifies a download against — and `files/{name}/{filename}` is one artifact. Asking for `simple/{name}` without the trailing slash answers 301: pip resolves a link relative to the page it read, so without the slash every filename would resolve one directory up. Requires package:read. A project nobody has published is an **empty page**, not a 404, because pip has read a 404 from an index as the index being broken.",
-          "responses": {
-            "200": {
-              "description": "the index page as text/html, or the artifact as application/octet-stream"
-            },
-            "301": {
-              "description": "a project page asked for without its trailing slash"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such org, PyPI is not enabled for it, or no such file"
-            }
-          }
-        }
-      },
-      "/v1/registry/cargo/{org}/api/v1/crates/new": {
-        "put": {
-          "summary": "`cargo publish`. The body is framed rather than JSON: a little-endian u32 length, the metadata document, a second length, and the `.crate` bytes. Every length is checked against what is actually left before it is used. Requires package:write. Cargo sends its credential as a **bare** `Authorization` value with no scheme, which this registry reads; `license` in the metadata is already an SPDX expression by Cargo's own rule, so it is stored as it stands. A published version is immutable.",
-          "responses": {
-            "200": {
-              "description": "{ warnings: { invalid_categories, invalid_badges, other } } — Cargo prints whatever is in here, so an empty set is the quiet success"
-            },
-            "400": {
-              "description": "a malformed frame, metadata that is not what cargo sends, or a crate name that cannot be stored"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "409": {
-              "description": "that version is already uploaded, or the name is a proxied package"
-            }
-          }
-        }
-      },
-      "/v1/registry/cargo/{org}/api/v1/crates/{name}/{version}/{verb}": {
-        "get": {
-          "summary": "`{verb}` is `download`: the `.crate` bytes, at the URL Cargo builds by appending `/{crate}/{version}/download` to the `dl` in config.json. Requires package:read. A yanked version still downloads — a yank means “do not resolve to this unless a lockfile already names it”, and removing the bytes would break every build that pinned it.",
-          "responses": {
-            "200": {
-              "description": "the .crate file"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such org, Cargo is not enabled for it, no such crate or version, or a verb other than download"
-            }
-          }
-        },
-        "delete": {
-          "summary": "`cargo yank`. `{verb}` is `yank`. Requires package:write. The index is assembled from rows on every read, so this is visible to the next resolve rather than after something rewrites a file.",
-          "responses": {
-            "200": {
-              "description": "{ ok: true }"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such crate or version"
-            }
-          }
-        },
-        "put": {
-          "summary": "`cargo yank --undo`. `{verb}` is `unyank`. Requires package:write.",
-          "responses": {
-            "200": {
-              "description": "{ ok: true }"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such crate or version"
-            }
-          }
-        }
-      },
-      "/v1/registry/cargo/{org}/{path}": {
-        "get": {
-          "summary": "Cargo's sparse index. `index/config.json` names the download and API bases and sets `auth-required`, without which Cargo never sends a credential and every request arrives anonymous. `index/{prefix}/{name}` is one crate as newline-delimited JSON, one object per version, in publication order — and the prefix must be the one Cargo's own length rule produces (`1/a`, `2/ab`, `3/a/abc`, `ab/cd/abcd`), so one crate has exactly one URL. Requires package:read.",
-          "responses": {
-            "200": {
-              "description": "config.json, or the crate's index file as text/plain"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such org, Cargo is not enabled for it, no such crate, or a prefix that is not the one Cargo would ask for"
-            }
-          }
-        }
-      },
-      "/v1/registry/npm/{org}/{path}": {
-        "get": {
-          "summary": "The npm registry. `{path}` is the package — a scoped name arrives as two segments or percent-encoded, and both reach the same package — or, when it contains npm's `/-/` marker, the tarball the packument named. Requires package:read, which org:read carries. A 401 here carries a `WWW-Authenticate: Basic` challenge, unlike the rest of this API, because a registry client has no other way to learn it should send the token from its `.npmrc`. An organization that has not switched npm on answers 404 for everything, indistinguishably from one that does not exist.",
-          "responses": {
-            "200": {
-              "description": "the packument — `{ name, _id, versions, dist-tags }`, where each version is the manifest as published with a `dist` block naming a tarball URL, its sha1 `shasum` and its `sha512-` `integrity`, both computed from the stored bytes — or, for a tarball path, the artifact as `application/octet-stream`."
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such org, npm is not enabled for it, or no such package or tarball"
-            }
-          }
-        },
-        "put": {
-          "summary": "Publish one version, in npm's publish-document shape: the version manifest under `versions` and the tarball base64 in `_attachments`. Requires package:write, which repo:write deliberately does **not** carry. A published version is immutable — republishing one answers 409 and changes nothing — and the attachment's declared `length` and `dist.shasum` are checked against the decoded bytes before anything is stored.",
-          "responses": {
-            "201": {
-              "description": "{ ok, id, rev }"
-            },
-            "400": {
-              "description": "the document is malformed, names a different package than the URL, carries more than one version or attachment, or the attachment disagrees with its own declared length or shasum"
-            },
-            "401": {
-              "description": "no credential, with a Basic challenge"
-            },
-            "404": {
-              "description": "no such org, or npm is not enabled for it"
-            },
-            "409": {
-              "description": "that version is already published, or the name is one this org caches from an upstream registry"
-            },
-            "413": {
-              "description": "the artifact is over the size limit"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages/ecosystems": {
-        "get": {
-          "summary": "Which package ecosystems this organization admits. Requires org:read. Always returns a row for every ecosystem the deployment knows, including the ones nobody has configured — those read `off`, which is the default and means the registry answers for nothing.",
-          "responses": {
-            "200": {
-              "description": "{ ecosystems: [{ ecosystem, label, mode, license_unknown }], registry_base } — `mode` is one of `off`, `private`, `proxy`; `license_unknown` says what to do with a package whose licence cannot be determined, and is per ecosystem because most container images declare none. `registry_base` is the URL a client configures against."
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or it is not visible to this caller"
-            }
-          }
-        },
-        "put": {
-          "summary": "Switch one ecosystem on or off. Requires org:admin, and deliberately not package:write: this changes what an organization's builds may reach. Omitting `license_unknown` leaves the existing disposition alone, so enabling an ecosystem does not quietly reset a policy somebody set.",
-          "responses": {
-            "200": {
-              "description": "{ ecosystem, label, mode, license_unknown }"
-            },
-            "400": {
-              "description": "unknown ecosystem, mode, or disposition"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or the caller is not an admin of it"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages/policy": {
-        "get": {
-          "summary": "The admission policy: what may enter this organization's builds from an upstream registry, and what happens when something may not. Requires org:read — a developer whose install was refused has to be able to read why without an admin in the room. The optional `ecosystem` query parameter selects which reserved-namespace list is returned and defaults to `npm`.",
-          "responses": {
-            "200": {
-              "description": "{ ecosystem, mode, cooldown_days, license_mode, license_rules: [{ spdx_id, disposition }], reserved: [pattern] } — `mode` is `audit` (record what would have been refused and serve anyway) or `block`; `cooldown_days` holds an upstream release younger than that many days, with 0 disabling it; `license_mode` is `allow_list` (only what is listed enters) or `deny_list` (everything except)."
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or it is not visible to this caller"
-            }
-          }
-        },
-        "put": {
-          "summary": "Set the mode, the cooldown and the licence mode. Requires org:admin. New organizations start at `audit` with no cooldown and a deny list, which admits everything and records nothing: a policy that blocks from day one meets a deadline in week one and gets switched off.",
-          "responses": {
-            "200": {
-              "description": "the policy, as GET returns it"
-            },
-            "400": {
-              "description": "unknown mode or licence mode, or a cooldown outside 0..=3650 days"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or the caller is not an admin of it"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages/policy/licenses": {
-        "put": {
-          "summary": "Add, change or remove one licence rule. Requires org:admin. Body is { spdx_id, disposition } where `disposition` is `allow`, `deny`, or absent to remove the rule. Removing is not the same as denying: under a deny list an absent rule admits, and under an allow list it refuses. Identifiers are compared case-insensitively, as SPDX defines them.",
-          "responses": {
-            "200": {
-              "description": "the policy, as GET /packages/policy returns it"
-            },
-            "400": {
-              "description": "an empty identifier, or a disposition other than allow or deny"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or the caller is not an admin of it"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages/policy/namespaces": {
-        "post": {
-          "summary": "Claim a name prefix that is never fetched from an upstream registry. Requires org:admin. Body is { ecosystem, pattern }. This closes the hole the “private always wins” rule leaves: that rule protects a name already published here, so without a reservation somebody who registers `@acme/new-service` upstream first answers for it. Matched on a segment boundary, so `@acme` covers `@acme/widget` and not `@acmecorp/widget`.",
-          "responses": {
-            "200": {
-              "description": "the policy, as GET /packages/policy returns it"
-            },
-            "400": {
-              "description": "unknown ecosystem, or an empty or over-long prefix"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or the caller is not an admin of it"
-            }
-          }
-        },
-        "delete": {
-          "summary": "Release a reserved prefix, named by the `ecosystem` and `pattern` query parameters. Requires org:admin — this is the widening direction, since the name becomes proxyable again.",
-          "responses": {
-            "204": {
-              "description": "released"
-            },
-            "400": {
-              "description": "unknown ecosystem"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, the caller is not an admin of it, or that prefix was never reserved"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages/findings": {
-        "get": {
-          "summary": "What the admission policy has caught, most recent first. Requires org:read. Deduplicated to one row per (ecosystem, name, version) with a hit count, so a CI run resolving eight hundred dependencies does not write eight hundred rows. `limit` is an optional query parameter, clamped to 500.",
-          "responses": {
-            "200": {
-              "description": "{ findings: [{ ecosystem, name, version, disposition, rule, reason, hits, first_at, last_at }] } — `disposition` is `blocked` when the package was refused and `would_block` when audit mode served it anyway; `rule` is `reserved`, `cooldown` or `license`; `reason` is the sentence the client printed."
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or it is not visible to this caller"
-            }
-          }
-        },
-        "delete": {
-          "summary": "Forget one finding, named by the `ecosystem`, `name` and `version` query parameters. Requires org:admin. This does not admit the package — the rule that produced the row is still in force and the next fetch writes it again. Allowing something is a change to the rule, and clearing the row afterwards is what makes a cleared row mean somebody acted rather than somebody tidied.",
-          "responses": {
-            "204": {
-              "description": "forgotten"
-            },
-            "400": {
-              "description": "unknown ecosystem"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, the caller is not an admin of it, or there is no such finding"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages": {
-        "get": {
-          "summary": "What this organization holds, newest activity first. Requires package:read. `ecosystem`, `limit` and `offset` are optional query parameters.",
-          "responses": {
-            "200": {
-              "description": "{ packages: [{ id, ecosystem, name, private, origin, created_at, updated_at }] } — `origin` is `local` for a package published here and `proxied` for one cached from an upstream registry."
-            },
-            "400": {
-              "description": "unknown ecosystem"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, or it is not visible to this caller"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages/{package}": {
-        "get": {
-          "summary": "One package, its versions and its tags. Requires package:read. Each version carries the repository, commit and job that produced it, which is the question asked during an incident and the reason this registry sits beside the code.",
-          "responses": {
-            "200": {
-              "description": "the package, plus `versions: [{ id, version, yanked, yank_reason, license, license_source, size_bytes, repo_id, commit_sha, job_id, published_by, published_at }]` and `tags: [{ tag, version }]`. `license_source` is `declared`, `detected` or `unknown`."
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org or package, or it is not visible to this caller"
-            }
-          }
-        },
-        "delete": {
-          "summary": "Take the whole package down. Requires org:admin, not package:write — unpublishing something everybody depends on is the one irreversible act here, and a CI token that may publish should not also be able to do it. The bytes stay until the collector has proved nothing else references them.",
-          "responses": {
-            "204": {
-              "description": "gone"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org or package, or the caller is not an admin of it"
-            }
-          }
-        }
-      },
-      "/v1/orgs/{org}/packages/{package}/versions/{version}/yank": {
-        "post": {
-          "summary": "Hide a version from resolution, or put it back — `{ yanked, reason }`. Requires package:write. Not a delete, and there is no delete: a yanked version still downloads by exact version, so a lockfile that already names it keeps building. Removing it outright would break every pipeline that pinned it.",
-          "responses": {
-            "200": {
-              "description": "the version, as `GET …/packages/{package}` returns it"
-            },
-            "400": {
-              "description": "that is not a version string this registry could have stored"
-            },
-            "401": {
-              "description": "no credential"
-            },
-            "404": {
-              "description": "no such org, package or version, or it is not visible to this caller"
-            }
-          }
-        }
       }
     },
     "/v1/runner/jobs/{id}/finish": {
       "post": {
         "summary": "Report a job's verdict",
-        "description": "For hosted runners. Body `{ state: \"passed\" | \"failed\", error: string | null, abuse?: \"mining\" }`. `abuse` is how a runner reports that it stopped the job because of what it was doing rather than because the steps failed, and it **suspends the organization**: every later trigger for it is `blocked` with the reason, and everything it has running is cancelled. It is a report, not an instruction — it is accepted from a credential that untrusted `run:` lines were executing next to, so the only thing it can cause is that organization's own work being stopped, and there is no value of it that turns anything back on. Clearing a suspension is an operator action by SQL: there is no operator role on this server to hang a route off. `cancelled` is deliberately not accepted: a runner reports what its steps did, and letting a job announce itself cancelled would let a build escape a red verdict by claiming it was stopped. Recording the verdict also cascades skips to everything downstream, settles the run if that was the last job, updates every job's mirrored check row, deletes this attempt's log chunks, and revokes the job's own token: the verdict is the last call that credential is entitled to make, and it was minted to outlive the whole timeout, so a later call with it answers 401 rather than 410. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before asking the platform to stop the container — is still answered **410 with the state** when it is the token this job was dispatched with and the job has stopped running. Anything else is 401. Without it the container being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: there is no channel into the container, so \"stop\" is something a runner learns by being told on its next call.",
+        "description": "Called by `weft-runner`. Body `{ state: \"passed\" | \"failed\", error: string | null, abuse?: \"mining\" }`. `abuse` is how a runner reports that it stopped the job because of what it was doing rather than because the steps failed — its mining watch killed the step. The job is failed as reported, and the organization's audit log gains a `workflow.abuse` entry naming the runner, the job and the run. It is a report, not an instruction: it is accepted from a credential that untrusted `run:` lines were executing next to, so it switches nothing off. `cancelled` is deliberately not accepted: a runner reports what its steps did, and letting a job announce itself cancelled would let a build escape a red verdict by claiming it was stopped. Recording the verdict also cascades skips to everything downstream, settles the run if that was the last job, updates every job's mirrored check row, deletes this attempt's log chunks, and revokes the job's own token: the verdict is the last call that credential is entitled to make, and it was minted to outlive the whole timeout, so a later call with it answers 401 rather than 410. The credential is a **job token**: minted for one attempt of one job, `repo:read` on one repository, with an expiry, and recorded on the job row. A token that is valid for the repository but was not minted for this job is 403 — otherwise one build could report another's verdict. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (wrong job), 410, so a job's state is only ever disclosed to the credential that owns it. One deliberate exception, and it is what makes cancellation work: a token that no longer authenticates — cancelling a job revokes its token before the runner next calls in — is still answered **410 with the state** when it is the token this job was claimed with and the job has stopped running. Anything else is 401. Without it the runner being cancelled is refused at the door with a 401, which a runner retries, and it runs every remaining step before finding out. **410** `{ error, state }` means the job is no longer running — cancelled, superseded, already reported, or its repository deleted — and the runner's contract is to kill what it is doing and exit 0. That is the whole cancellation mechanism: nothing listens on the runner's machine, so \"stop\" is something a runner learns by being told on its next call.",
         "responses": {
           "200": {
             "description": "{}"

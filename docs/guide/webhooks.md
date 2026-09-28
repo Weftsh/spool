@@ -2,15 +2,15 @@
 
 ## Inbound: keeping mirrors fresh
 
-Point your origin's push webhook at Weft:
+Point your origin's push webhook at your server:
 
 ```
-POST https://api.weft.sh/webhooks/github     (GitHub App deliveries)
-POST https://api.weft.sh/webhooks/generic    (anything else)
+POST https://spool.example.com/webhooks/github     (GitHub App deliveries)
+POST https://spool.example.com/webhooks/generic    (anything else)
 ```
 
 Deliveries must carry `X-Hub-Signature-256: sha256=<hmac>` computed over the
-raw body with your webhook secret; unsigned or mis-signed deliveries are
+raw body with the webhook secret your server was configured with; unsigned or mis-signed deliveries are
 rejected with `401`. A verified push event fans out background syncs to
 every mirror of that origin, and the receipt-to-servable lag is recorded as
 the `freshness` metric.
@@ -26,10 +26,10 @@ Generic-provider payloads identify the origin by URL:
 Subscribe a URL to a repo:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/repos/session-8412/webhooks \
+curl -X POST https://spool.example.com/v1/orgs/acme/repos/session-8412/webhooks \
   -H "Authorization: Bearer $TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{ "url": "https://app.example.com/hooks/stratum" }'
+  -d '{ "url": "https://app.example.com/hooks/spool" }'
 ```
 
 The response includes the delivery `secret` — shown once. Every delivery is
@@ -71,6 +71,6 @@ go and look" and fetch to find out what.
 `included_in` in place of `patchset` when it landed by inclusion), and
 `change.ejected` carries `{ change, verdict }`.
 
-Failed deliveries retry three times with backoff; delivery outcomes are
-recorded and visible to support. List subscriptions with `GET …/webhooks`,
+Failed deliveries retry three times with backoff, and every outcome is
+recorded on the server. List subscriptions with `GET …/webhooks`,
 remove them with `DELETE …/webhooks/{id}`.

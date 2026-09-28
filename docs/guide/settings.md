@@ -1,11 +1,13 @@
 # Org settings vs repo settings
 
-Weft has two rings of authority, and every setting lives in exactly
+Spool has two rings of authority, and every setting lives in exactly
 one of them. **Org settings** shape the organization: who is in it,
 what they may do everywhere, and which credentials exist. **Repo
 settings** shape one repository: where its trunk is, what is fenced,
 who is raised or held down *here*. Nothing is configured in both
-places, so there is never a question of which copy wins.
+places, so there is never a question of which copy wins. There is no
+visibility setting in either: every repository is private to its
+organization.
 
 ## The roles, and where they reach
 
@@ -39,9 +41,8 @@ an org admin anywhere, or whoever a grant raised to admin right there.
 | Teams and their rosters | org | org admin | `team.*` |
 | Service + personal tokens | org | admin; anyone for their own personal token | `token.*` |
 | SSH keys | org | admin; owners of the key's token | `sshkey.*` |
-| Plan and billing | org | org admin | `billing.*` |
+| Runners, runner groups, runner policy | org | org admin | `runner.*`, `runner_group.*`, `runner_policy.updated` |
 | Repo create / delete | repo (born in the org) | writer creates; repo admin deletes | `repo.create`, `repo.delete` |
-| Visibility (public) | repo | set at creation | `repo.create` |
 | **Default branch** | repo | repo admin | `repo.default_branch` |
 | **Branch protections** | repo | repo admin | `repo.protect`, `repo.unprotect` |
 | Access grants (people, teams) | repo | repo admin | `grant.*` |
@@ -56,8 +57,9 @@ it governs — see [Changes, OWNERS & landing](code-review.md).
 
 ## Where each ring lives in the dashboard
 
-- **Settings** (top right) is the org ring: Members, Teams, Tokens,
-  SSH keys, Activity, Password.
+- **Settings** holds both groups, by whose setting it is:
+  **Organization** (Members, Runners, Teams, Activity) and **Your
+  account** (Tokens, SSH keys, Email addresses, Password).
 - **A repo's overview** is the repo ring: clone URLs, metrics, the
   Access panel (grants), and Branch policy (default branch and
   protections). Mutating forms appear only for people whose effective

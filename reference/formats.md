@@ -1,17 +1,18 @@
 # On-storage formats
 
-Normative spec for every byte Stratum writes to the object store. The
+Normative spec for every byte Spool writes to the object store. The
 code is the implementation; this is the contract. If code and this
 document disagree, one of them has a bug — fix whichever is wrong and
-say so in STATUS.md. Verified against the tree at the commit that adds
-this file (`bench/ingest_segments.py`, `bench/build_locator.py`,
+say so in the commit. The implementation is
 `crates/stratum-store/src/{manifest,plane}.rs`,
-`crates/stratum-cgi/src/receive.rs`). The `SLH4` locator header was added
-for zero-copy forks; `SLH3` and `SLH2` read exactly as before.
+`crates/stratum-proto/src/{receive,serve}.rs` and `crates/stratum-engine`.
+The `SLH4` locator header was added for zero-copy forks; `SLH3` and
+`SLH2` read exactly as before.
 
 All multi-byte integers are **big-endian**. All OIDs are **SHA-1
 (20 bytes binary / 40 hex)** — every fixed-width field below bakes this
-in; see `docs/HANDOFF.md` on the SHA-256 consequence.
+in, which is why a SHA-256 repository is recognised and refused rather
+than served.
 
 ## Key layout
 
@@ -51,7 +52,7 @@ loads it once per request, the write path CASes it.
 |---|---|---|
 | `schema` | u32 | `3` |
 | `repo`, `layout` | string | identity; `layout` ∈ {`tiered`,`flat`} |
-| `object_format` | string | git object format of every OID in the layout; default `"sha1"`; readers reject formats they don't speak (docs/design-notes/sha256-plan.md) |
+| `object_format` | string | git object format of every OID in the layout; default `"sha1"`; readers reject formats they don't speak |
 | `refs` | [(refname, oid)] | unpaged repos: all advertised refs, push-updated. Paged repos: only serving-critical tips (HEAD's branch) |
 | `ref_pages` | [{first, last, key, count, bytes}] | schema 4, sharded ref store: sorted non-overlapping refname ranges, each an immutable content-addressed page of "oid SP refname LF" lines. `ls-refs` loads only prefix-overlapping pages; a push rewrites one page (split at STRATUM_REF_PAGE_MAX, default 1000) and commits it via the manifest CAS. Measured: 100k refs → 34 KB manifest, 0.36 s full advert |
 | `head` | string | symref target for HEAD |
@@ -82,7 +83,7 @@ manifests keep working mid-swap). Stream-plan rules implemented in
 ## locator.hdr (magic `SLH4`; `SLH3` and `SLH2` still readable)
 
 The point-read plane's atomically-swapped pointer, written by
-`bench/build_locator.py` (and by incremental compaction), parsed by
+`crates/stratum-engine/src/locator.rs::build_locator` (and by incremental compaction), parsed by
 `crates/stratum-store/src/plane.rs`. All three magics are decoded and
 encoded by `plane::parse_header` / `plane::write_header` — one decoder,
 shared by the plane loader, the fork writer and epoch GC.
@@ -202,10 +203,10 @@ Every `.seg` object is a **stripped pack**: a `git pack-objects` v2
 pack with the 12-byte `PACK` header and 20-byte SHA-1 trailer removed —
 raw entries only. Consequences:
 
-- Serving concatenates: the CGI writes a fresh 12-byte header with the
+- Serving concatenates: the server writes a fresh 12-byte header with the
   summed entry count, streams the planned payload byte-ranges verbatim,
   and appends a freshly computed SHA-1 trailer
-  (`stratum-cgi/src/main.rs::stream_pack`). No pack parsing on the
+  (`crates/stratum-proto/src/serve.rs::stream_pack`). No pack parsing on the
   clone path.
 - Cold segments: OFS deltas only, **strictly intra-segment** (H1
   invariant). Hot emissions and WAL payloads: thin — REF_DELTA bases
@@ -232,7 +233,7 @@ body on its own. Built at ingest; stale (and therefore unused) whenever
 - **Ingest / compaction**: write the full new epoch directory, then swap
   `manifest.json`, then `locator.hdr` — each a conditional PUT
   (create-only via `If-None-Match: *` on first ingest, `If-Match` on the
-  previously-current etag otherwise; bench/s3util.py). The compactor
+  previously-current etag otherwise; `crates/stratum-store`). The compactor
   CASes against the etag it read *before* cloning, so a concurrent push
   forces a retry rather than being dropped. The two pointers may lag
   each other briefly; each is internally consistent on its own (I15).
@@ -257,6 +258,6 @@ body on its own. Built at ingest; stale (and therefore unused) whenever
   failed; a racing pair can even see 409 first and 412 on the retry.
   MinIO never emits 409, so nothing in the suite had ever produced one,
   and the store client mapped it to a generic error — which meant that on
-  the multi-node fleet the design exists to support, the loser of a
+  the multi-node deployment the design exists to support, the loser of a
   manifest CAS fell out of the retry loop and failed the user's push.
   Both statuses now map to `PutError::Conflict`.

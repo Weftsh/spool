@@ -2,7 +2,7 @@
 
 Real S3 (Standard and Express One Zone) is not reachable from the current dev
 box, so experiments 003+ run against local MinIO with **latency injected in
-the Stratum storage client**, not in the network stack (deterministic,
+the storage client** (`crates/stratum-store`), not in the network stack (deterministic,
 per-backend, no root tricks). The client is a trait with three impls:
 `local-minio` (no injection, for correctness tests), `modeled-standard`,
 `modeled-express`. Every results file records which one produced it; modeled

@@ -2,7 +2,7 @@
 
 The contract has one invariant: **never a silent stale miss.** Every case
 where the mirror could serve you something old is explicit, on the wire, in a
-way your runbook and your vendor-risk audit can quote.
+way your runbook and your audit can quote.
 
 ## The cases
 
@@ -10,9 +10,9 @@ way your runbook and your vendor-risk audit can quote.
 storage. Webhooks keep the mirror seconds behind your origin (p50 < 10 s
 delivery-to-servable); a 60-second poll backstops webhook loss.
 
-**You fetch a commit the mirror doesn't have yet.** Weft synchronously
+**You fetch a commit the mirror doesn't have yet.** The server synchronously
 fetches from your origin *before responding*, within a bounded budget
-(default 8 s, configurable per deployment). If the sync lands your commit,
+(default 8 s, set by whoever runs the server). If the sync lands your commit,
 the response is fresh — CI racing a push just works. Concurrent requests for
 the same repo coalesce into one origin fetch.
 
@@ -24,7 +24,7 @@ exceeded and to retry shortly. Your job fails fast with a quotable reason
 instead of hanging on a slow origin.
 
 **Your origin is unreachable.** Everything already mirrored keeps serving —
-that's the continuity pitch — and every response carries:
+that is the point of having a mirror — and every response carries:
 
 ```
 X-Weft-Staleness: <seconds since last successful sync>
@@ -50,6 +50,6 @@ git fetch mirror $NEW_SHA        # triggers a synchronous sync
 
 # staleness: check the headers during an origin incident
 curl -sI -H "Git-Protocol: version=2" \
-  "https://api.weft.sh/acme/widget.git/info/refs?service=git-upload-pack" \
+  "https://spool.example.com/acme/widget.git/info/refs?service=git-upload-pack" \
   | grep -i x-weft
 ```

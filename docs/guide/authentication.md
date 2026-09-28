@@ -17,7 +17,9 @@ pasting it into a request and get *that* token's authority.
 
 ## People, roles and orgs
 
-A person belongs to one or more orgs, at one role in each:
+Every repository belongs to one organization and is private to it.
+There are no public repositories and nothing is readable without a
+credential. A person belongs to one or more orgs, at one role in each:
 
 | Role | Can |
 |------|-----|
@@ -35,7 +37,7 @@ granting `viewer` to an admin holds them down on exactly that repo, and
 nowhere else. One call can name several people at once:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/repos/widget/grants \
+curl -X POST https://spool.example.com/v1/orgs/acme/repos/widget/grants \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "user_ids": ["01hx…", "01hy…"], "role": "member" }'
@@ -52,15 +54,15 @@ Saying it person by person means it drifts the moment somebody joins, so
 a **team** can be granted a role on a repo directly:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/teams \
+curl -X POST https://spool.example.com/v1/orgs/acme/teams \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "name": "payments", "description": "the squad" }'
 
-curl -X PUT https://api.weft.sh/v1/orgs/acme/teams/$TEAM/members/$USER \
+curl -X PUT https://spool.example.com/v1/orgs/acme/teams/$TEAM/members/$USER \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 
-curl -X POST https://api.weft.sh/v1/orgs/acme/repos/widget/grants \
+curl -X POST https://spool.example.com/v1/orgs/acme/repos/widget/grants \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "team_id": "'"$TEAM"'", "role": "member" }'
@@ -89,7 +91,7 @@ repo, their role there, and where it came from:
 
 ```bash
 curl -H "Authorization: Bearer $ADMIN_TOKEN" \
-  https://api.weft.sh/v1/orgs/acme/repos/widget/access
+  https://spool.example.com/v1/orgs/acme/repos/widget/access
 ```
 
 ```json
@@ -102,11 +104,14 @@ curl -H "Authorization: Bearer $ADMIN_TOKEN" \
 In the dashboard the same two things are **Settings → Teams** and the
 **Access** panel on a repo.
 
-People join by invitation, which is **emailed** when a mail transport is
-configured. The link works once and expires after seven days:
+People join an organization by invitation, which is **emailed** when a
+mail transport is configured. The link works once and expires after
+seven days. Only an organization takes members: inviting somebody into a
+personal namespace is a `400`, `a personal namespace cannot have members
+— create an organization`.
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/invites \
+curl -X POST https://spool.example.com/v1/orgs/acme/invites \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "email": "dev@acme.dev", "role": "member" }'
@@ -129,7 +134,7 @@ The link lands on a screen that says what is being joined. It asks the
 server first:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/auth/invite/preview \
+curl -X POST https://spool.example.com/v1/auth/invite/preview \
   -H "Content-Type: application/json" \
   -d '{ "invite": "stinv_01hx…_…" }'
 ```
@@ -169,24 +174,31 @@ self-hosting arrangement (a relay on `localhost`, or a sidecar on a
 private network) and fine until credentials are involved. Setting
 `STRATUM_MAIL_SMTP_USER` and `STRATUM_MAIL_SMTP_PASSWORD` for a
 **non-loopback** host is refused at boot unless you state that the link
-is already private with `STRATUM_MAIL_SMTP_ALLOW_CLEARTEXT_AUTH=1`. For
-hosted deployments use `ses`, which is HTTPS.
+is already private with `STRATUM_MAIL_SMTP_ALLOW_CLEARTEXT_AUTH=1`. On
+AWS, use `ses`, which is HTTPS.
 
 ## Signing yourself up
 
+Anybody who can reach your server can sign up. An account starts with
+its own personal namespace and no organizations: it sees nothing of
+anybody else's until an organization invites it.
+
 ```bash
-curl -X POST https://api.weft.sh/v1/auth/signup \
+curl -X POST https://spool.example.com/v1/auth/signup \
   -H "Content-Type: application/json" \
   -d '{ "email": "you@example.dev", "name": "Your Name",
         "password": "a long enough password", "handle": "you" }'
 ```
 
-The **handle** is your personal namespace — the `you` in `/you/repo`. It
-is asked for rather than derived from your address, because it appears in
-every clone URL you ever hand out. It is validated and its refusals are
-plain (`400` for a bad shape or a reserved word, `409` for one already
-taken): a namespace name is a public URL, so "that one is taken" is not a
-secret.
+The **handle** is your personal namespace — the `you` in `/you/repo`.
+It holds repositories of your own, such as your [forks](forks.md), and
+nobody else: a personal namespace cannot have members, so a team's work
+belongs in an organization. The handle is asked for rather than derived
+from your address, because it appears in every clone URL you hand out.
+It is validated and its refusals are plain (`400` for a bad shape or a
+reserved word, `409` for one already taken): namespace names are unique
+on the server and are not secrets, so "that one is taken" gives nothing
+away.
 
 Everything after the handle is **uniform**. Signup always answers `202`
 with the same body, whether a confirmation message was sent, the address
@@ -202,17 +214,18 @@ this server does not see a peer address it can trust, and a limit that
 
 ### Signing up with GitHub instead
 
-Press **Continue with GitHub** on the sign-in screen and there is no
+When your server has a GitHub App configured, the sign-in screen offers
+**Continue with GitHub**. Press it and there is no
 confirmation message at all. The round trip is the ordinary OAuth one —
 `GET /v1/auth/github/start` sends you to GitHub's authorization screen
 and GitHub returns you to `GET /v1/auth/github/callback` — and what
-makes it safe to skip our own mail is that GitHub has already done the
+makes it safe to skip the server's own mail is that GitHub has already done the
 work: `GET /user/emails` reports which of your addresses GitHub itself
 sent a link to and saw clicked.
 
 **Only that flag is trusted.** The address has to be your **primary**
 one and GitHub has to report it **verified**; anything else — an
-unproved primary, or a Weft installation that was never granted the
+unproved primary, or a GitHub App that was never granted the
 *Email addresses* permission — lands you back on the sign-in screen
 saying so, with the password path still open. We never read `GET
 /user`'s own `email` field: that is whatever you chose to publish,
@@ -242,7 +255,7 @@ whoever claims your old login next gets nothing.
 ### Confirming, and what is blocked until you do
 
 ```bash
-curl -X POST https://api.weft.sh/v1/auth/verify \
+curl -X POST https://spool.example.com/v1/auth/verify \
   -H "Content-Type: application/json" -d '{ "token": "weftv_…" }'
 ```
 
@@ -263,9 +276,9 @@ colleague has not read their email.
 ### Forgotten passwords
 
 ```bash
-curl -X POST https://api.weft.sh/v1/auth/forgot-password \
+curl -X POST https://spool.example.com/v1/auth/forgot-password \
   -H "Content-Type: application/json" -d '{ "email": "you@example.dev" }'
-curl -X POST https://api.weft.sh/v1/auth/reset-password \
+curl -X POST https://spool.example.com/v1/auth/reset-password \
   -H "Content-Type: application/json" \
   -d '{ "token": "weftrs_…", "new_password": "a different long password" }'
 ```
@@ -280,8 +293,8 @@ reverse too: the token's row says what it is for.
 A disabled account gets no reset link. Recovering an account an operator
 switched off would undo the switching off.
 
-The very first account is created from the command line, because there is
-nobody yet to invite it:
+The very first account is created from the command line on the server,
+because there is nobody yet to invite it:
 
 ```bash
 stratum-server admin user-create --org acme \
@@ -294,7 +307,7 @@ A signed-in person mints a **personal access token** for themselves — no
 administrator needed:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/tokens \
+curl -X POST https://spool.example.com/v1/orgs/acme/tokens \
   -b "$COOKIE_JAR" -H "Content-Type: application/json" \
   -d '{ "scopes": ["repo:write"], "label": "laptop" }'
 ```
@@ -324,7 +337,7 @@ An org **service token** belongs to nobody and is the right shape for CI.
 Minting one needs `org:admin`:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/tokens \
+curl -X POST https://spool.example.com/v1/orgs/acme/tokens \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d '{ "scopes": ["repo:read"], "repo": "widget", "label": "ci-runner" }'
@@ -334,7 +347,7 @@ Revocation is instant — every request verifies against the control plane, so
 a revoked token fails on its very next use:
 
 ```bash
-curl -X DELETE https://api.weft.sh/v1/orgs/acme/tokens/$TOKEN_ID \
+curl -X DELETE https://spool.example.com/v1/orgs/acme/tokens/$TOKEN_ID \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
@@ -350,40 +363,44 @@ to discover which token ids exist.
 | `repo:read` | clone/fetch and all read endpoints |
 | `repo:write` | everything in `repo:read`, plus push, commits, refs, repo create/delete |
 | `org:read` | listings, metrics, usage, audit queries |
-| `repo:cache` | read and write the [build cache](/docs/actions-cache/) from anywhere, naming the GitHub repository in a header; nothing else |
 | `org:admin` | everything, including token management |
 
-A token minted with `"repo": "<name>"` is **bound to that repo**: it can't
-touch any other repo and can't perform org-level operations. This is the
-right shape for per-runner and per-agent credentials.
+**Every token acts in the one organization it was minted in.** The route
+you mint it on names the org, and presented anywhere else it is as good
+as no access: another organization's repositories answer `404`. A person
+who belongs to several organizations has a token per organization, and
+a browser session, which spans every organization they belong to. What
+crosses two namespaces — [forking](forks.md) from one into another or
+into your personal namespace, and opening a change from that fork —
+therefore takes a session. The one exception is [search](search.md): a
+personal token searches every organization its person belongs to.
+
+A token minted with `"repo": "<name>"` is also **bound to that repo**: it
+can't touch any other repo, can't perform org-level operations, and
+can't search. This is the right shape for per-runner and per-agent
+credentials.
 
 ## On the git wire
 
 git sends credentials over HTTP Basic; put the token in either field:
 
 ```bash
-git clone https://x:weft_…@api.weft.sh/acme/widget.git
+git clone https://x:weft_…@spool.example.com/acme/widget.git
 ```
 
-Unauthenticated requests to private resources answer `401` (so git retries
-with credentials); valid credentials without access answer `404` — one org
-can never learn what exists in another.
+A request with no credential answers `401` (so git retries with
+credentials) — for every repository, and for a name that does not exist.
+A valid credential without access answers `404`, exactly as a repository
+that does not exist does: one organization can never learn what exists
+in another. A push by somebody who can read a repository but not write
+to it is refused with the reason — `you can read acme/widget but not
+push to it; fork it and open a change from your fork, or ask an owner
+for write access` — as an in-band error on the advert (git prints it as
+`remote error:`) and as `403` on the RPC itself. Only a repository you
+cannot read at all is masked as `404`.
 
-Repos created with `"public": true` allow anonymous reads, and reads with
-**any** valid credential: a token minted in your own namespace clones and
-fetches a public repository in somebody else's, which is how a
-[fork](forks.md) is kept current with its upstream. The REST API keeps
-the same promise, and a *person* reads as themselves: a browser session or
-personal token with no role in the org still holds `repo:read` on a public
-repository, so what they do there — open a change from their fork, comment
-on it, tick the files they have read — is attributed to them rather than
-to nobody. A service token from another organisation reads a public
-repository the way anyone does, anonymously. A push by somebody
-who can read a repository but not write to it is refused with the reason —
-`you can read acme/widget but not push to it; fork it and open a change
-from your fork, or ask an owner for write access` — as an in-band error on
-the advert (git prints it as `remote error:`) and as `403` on the RPC
-itself. Only a repository you cannot read at all is masked as `404`.
+The REST API answers the same way: `401` with no credential, `404` for a
+repository you cannot read, whether or not it exists.
 
 ## SSH keys
 
@@ -396,7 +413,7 @@ A **personal key** names you. Add it from the dashboard's Settings → SSH
 keys, or over the API while signed in — no token id anywhere:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/ssh-keys \
+curl -X POST https://spool.example.com/v1/orgs/acme/ssh-keys \
   -b "$COOKIE_JAR" -H "Content-Type: application/json" \
   -d "{ \"public_key\": \"$(cat ~/.ssh/id_ed25519.pub)\", \"label\": \"laptop\" }"
 ```
@@ -411,7 +428,7 @@ machine wants. It inherits that token's scopes and repo binding, and
 creating one needs `org:admin`:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/ssh-keys \
+curl -X POST https://spool.example.com/v1/orgs/acme/ssh-keys \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{ \"public_key\": \"$(cat deploy.pub)\", \"token_id\": \"$TOKEN_ID\", \"label\": \"ci\" }"

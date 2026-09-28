@@ -7,7 +7,11 @@ session or agent, written and read without a checkout anywhere.
 import os
 from weftsh import Weft
 
-weft = Weft(token=os.environ["WEFT_TOKEN"], org="acme")
+weft = Weft(
+    token=os.environ["WEFT_TOKEN"],
+    org="acme",
+    base_url="https://spool.example.com",  # your Spool server
+)
 
 repo = weft.create_repo()
 
@@ -17,13 +21,14 @@ repo.create_commit(message="agent step 1") \
     .send()
 
 repo.read_file("src/app.py")  # "print('hello')\n"
-repo.get_remote_url()         # https://x:weft_…@api.weft.sh/acme/repo-….git
+repo.get_remote_url()         # https://x:weft_…@spool.example.com/acme/repo-….git
 ```
 
 There is a sync client, `Weft`, and an identical one for `asyncio`,
 `AsyncWeft`. It needs Python 3.10+ and has one dependency, `httpx`. It is
-fully typed, and every result is a frozen dataclass. The source and the full
-reference are on [GitHub](https://github.com/weftsh/python-sdk); the same API
+fully typed, and every result is a frozen dataclass. It was written for
+Weft's hosted service and defaults to it, so **always pass `base_url`** with
+your Spool server's URL. The source and the full reference are on [GitHub](https://github.com/weftsh/python-sdk); the same API
 is in the [TypeScript SDK](sdk.md).
 
 ## Quickstart
@@ -31,8 +36,8 @@ is in the [TypeScript SDK](sdk.md).
 From nothing to a repository you have committed to over HTTP and cloned with
 `git`, in about five minutes.
 
-**1. Get a token.** [Create an account](/login?mode=signup) (free, no card)
-and an organization, then mint a token under **Settings → Tokens** with
+**1. Get a token.** Sign in to your Spool server, in an organization you
+belong to, and mint a token under **Settings → Tokens** with
 `org:read` and `repo:write`. `repo:write` creates and commits; `org:read` lets
 the SDK mint the short-lived clone credential in the last step. An `org:admin`
 token does both. See [authentication](authentication.md) for the rest.
@@ -40,6 +45,7 @@ token does both. See [authentication](authentication.md) for the rest.
 ```bash
 export WEFT_TOKEN=weft_…     # the token you just minted
 export WEFT_ORG=acme         # your organization's name
+export WEFT_URL=https://spool.example.com   # your server
 ```
 
 **2. Install.**
@@ -57,12 +63,12 @@ import subprocess
 import tempfile
 from pathlib import Path
 
-from weftsh import DEFAULT_BASE_URL, Weft
+from weftsh import Weft
 
 weft = Weft(
     token=os.environ["WEFT_TOKEN"],
     org=os.environ["WEFT_ORG"],
-    base_url=os.environ.get("WEFT_URL", DEFAULT_BASE_URL),  # optional
+    base_url=os.environ["WEFT_URL"],  # your Spool server
 )
 
 # 1. A repository of its own: a real git remote, made in well under a second.
@@ -72,7 +78,7 @@ print("created   ", repo.name)
 # 2. A commit, straight over HTTP. No clone, no checkout, no disk.
 result = (
     repo.create_commit(message="first commit")
-    .put("hello.txt", "hello from the Weft SDK\n")
+    .put("hello.txt", "hello from the SDK\n")
     .send()
 )
 print("committed ", result.commit[:7])
@@ -94,12 +100,12 @@ name and commit will differ):
 ```text
 created    repo-75f21a56-2e6d-445f-bcde-09a7f20d0bfb
 committed  889ba6d
-read back  'hello from the Weft SDK\n'
-cloned     hello from the Weft SDK
+read back  'hello from the SDK\n'
+cloned     hello from the SDK
 ```
 
-That repository is yours: it is in the dashboard, you can `git push` to it,
-and it costs nothing while it sits there.
+That repository is yours: it is in the dashboard, and you can `git push` to
+it.
 
 ## Set up the client
 
@@ -111,7 +117,7 @@ anything else.
 weft = Weft(
     token=os.environ["WEFT_TOKEN"],  # weft_<id>_<secret>
     org="acme",                      # your organization, or your personal namespace
-    # base_url="https://api.weft.sh",  # the default
+    base_url="https://spool.example.com",  # your server; the default is Weft's hosted service
     # http_client=httpx.Client(...),   # for retries, proxies or logging
 )
 ```
@@ -268,7 +274,9 @@ What each event carries is in [webhooks](webhooks.md#the-events).
 ```python
 from weftsh import AsyncWeft
 
-async with AsyncWeft(token=os.environ["WEFT_TOKEN"], org="acme") as weft:
+async with AsyncWeft(
+    token=os.environ["WEFT_TOKEN"], org="acme", base_url="https://spool.example.com"
+) as weft:
     repo = await weft.create_repo()
     await repo.create_commit(message="step 1").put("a.txt", "a").send()
     async for commit in repo.iterate_commits():

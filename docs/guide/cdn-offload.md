@@ -1,7 +1,9 @@
 # CDN-offloaded clones
 
-A clone normally streams every byte through a Weft node. With offload,
+A clone normally streams every byte through a server node. With offload,
 the bulk comes straight from a CDN instead, and the node streams nothing.
+It is available when whoever runs your server has put a CDN in front of
+it — the AWS reference deployment uses CloudFront.
 
 This uses git's own **`packfile-uri`** capability (git ≥ 2.34) — no
 custom client, no wrapper, no plugin.
@@ -12,7 +14,7 @@ It is **opt-in per client**, because git only follows an advertised pack
 URL when you have told it which protocols are acceptable:
 
 ```bash
-git -c fetch.uriprotocols=https clone https://api.weft.sh/acme/session-8412.git
+git -c fetch.uriprotocols=https clone https://spool.example.com/acme/session-8412.git
 ```
 
 To make it the default for yourself:
@@ -22,17 +24,18 @@ git config --global fetch.uriprotocols https
 ```
 
 For a CI image, set it once in the image's global git config and every
-job in the fleet inherits it.
+job that uses the image inherits it.
 
 **Nothing changes for clients that have not opted in.** They clone exactly
 as before and never contact the CDN. There is no flag day and no
-compatibility risk to a fleet you do not control.
+compatibility risk to machines you do not control.
 
 ## What you get
 
-The pack is immutable — named by tip and content hash — so the edge caches
-it. A CI fleet cloning the same repo all day fetches it from the nearest
-edge location rather than assembling it at origin every time.
+The pack is immutable — named by tip and content hash. Where the CDN
+reads it straight from the bucket, the edge caches it, and a CI fleet
+cloning the same repo all day fetches it from the nearest edge location
+rather than assembling it at the server every time.
 
 Offloaded clones are metered separately as `cdn_clone`, so you can see the
 split on the [metrics endpoint](metrics.md).
@@ -44,7 +47,7 @@ Offload engages while the repo's CDN pack covers the **current tip**.
 After a push the pack lags, and until the background packer catches up
 (seconds) clones are served inline — correct, just not offloaded. So the
 pattern that benefits most is **clone-heavy and push-light**: mirrors,
-release repositories, anything a CI fleet pulls constantly. A repo under
+release repositories, anything your CI pulls constantly. A repo under
 continuous push churn spends most of its time lagging and offloads rarely.
 
 Serving a lagging pack is deliberately *not* attempted. The remainder
@@ -56,13 +59,16 @@ whether your commits happen to touch similar files, which makes it
 exactly the kind of bug that passes a test suite and breaks in
 production. We do not go near it.
 
-## Private repos
+## Authorization
 
-Private repos offload too. git sends **no credentials at all** when it
-fetches an advertised pack URL, so authorization lives in the URL itself:
-a short-lived signed URL that the edge validates before it serves a byte.
-URLs expire (an hour by default), and a public repo's pack is additionally
-marked cacheable so it can be shared at the edge.
+Every repository is private, and git sends **no credentials at all** when
+it fetches an advertised pack URL, so authorization lives in the URL
+itself: a short-lived signed URL that the edge (or the server) validates
+before it serves a byte. URLs expire (an hour by default). A signature
+that is wrong, expired or for another pack is answered `404`. When the
+CDN's origin is the server rather than the bucket, the pack is served
+`Cache-Control: private, no-store`, so no shared cache in between keeps
+a copy past the signature's life.
 
 ## Failure behaviour
 
@@ -72,8 +78,8 @@ marked cacheable so it can be shared at the edge.
 - **A corrupt or truncated pack fails loudly.** git verifies what it
   downloads; you get a failed clone and no repository, never a
   silently-incomplete one.
-- **Operators can turn it off fleet-wide** without a redeploy
-  (`STRATUM_CDN_ENABLED=0`); clones keep working, served inline.
+- **Whoever runs the server can turn it off everywhere** with
+  `STRATUM_CDN_ENABLED=0`; clones keep working, served inline.
 
 ## Over SSH
 

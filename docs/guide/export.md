@@ -1,19 +1,20 @@
-# Export & the escape hatch
+# Export
 
-No lock-in is a stated product principle, so leaving has first-class API
-support. Two doors are always open:
+Everything on your server is ordinary git, and getting it out — for a
+backup, an archive, or a move — has first-class API support. Two doors
+are always open:
 
 ## Door one: it's git
 
-Every repo — including every fleet repo your agents created — is a standard
+Every repo — including every repo your agents created — is a standard
 git remote:
 
 ```bash
-git clone https://x:$TOKEN@api.weft.sh/acme/session-8412.git
+git clone https://x:$TOKEN@spool.example.com/acme/session-8412.git
 ```
 
-Whatever you clone is verified history; our CI gates every serving change on
-`git fsck --full --strict` of the produced clone.
+Whatever you clone is verified history; the project's CI gates every
+serving change on `git fsck --full --strict` of the produced clone.
 
 ## Door two: bundles
 
@@ -42,11 +43,10 @@ layout, so an export is also an integrity check.
 ## The whole org at once
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/export \
+curl -X POST https://spool.example.com/v1/orgs/acme/export \
   -H "Authorization: Bearer $ADMIN_TOKEN"
 ```
 
 starts one export job per active repo and returns all job ids. Point a
 script at the job list and you have a complete, standard-format copy of
-everything — which is exactly the position we want you negotiating renewals
-from.
+everything.

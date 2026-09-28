@@ -1021,7 +1021,7 @@ pub fn rest_repo_auth(
     org_name: &str,
     repo_name: &str,
     need: Scope,
-) -> Result<(Org, Repo, Option<stratum_control::auth::Principal>), Response> {
+) -> Result<(Org, Repo, stratum_control::auth::Principal), Response> {
     let (org, repo) = repo_or_masked(state, headers, org_name, repo_name)?;
     let principal = match authx::principal_opt(&state.db, headers, authx::Challenge::None)? {
         // A personal token carries the person, so its authority on *this*
@@ -1052,7 +1052,7 @@ pub fn rest_repo_auth(
     if principal.org_id != org.id || !principal.allows(need, Some(&repo.id)) {
         return Err(authx::not_found());
     }
-    Ok((org, repo, Some(principal)))
+    Ok((org, repo, principal))
 }
 
 /// Why a wire request from an AUTHENTICATED principal is denied —

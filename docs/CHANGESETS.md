@@ -104,8 +104,8 @@ composed check is required for the changeset land gate whenever any
 member repo declares one. Per-repo `on: change` runs continue unchanged
 and remain required for each member.
 
-Minutes for composed runs are metered against the org like every other
-hosted job.
+Composed jobs run on the organization's own runners, like every other
+job; nothing is metered.
 
 ## Slices, in order
 

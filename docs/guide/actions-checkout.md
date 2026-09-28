@@ -1,32 +1,37 @@
-# Weft Checkout for GitHub Actions
+# Checking out from a mirror in GitHub Actions
 
 `weftsh/checkout` is a drop-in for `actions/checkout` that fetches the
-commit from a [mirror on Weft](quickstart-mirror.md) instead of from
-github.com. Developers keep pushing to GitHub; only the read path CI takes
-moves. If the mirror cannot serve the commit, `actions/checkout` runs
-instead and the job says why. Adopting it is one line, not a decision.
+commit from a [mirror on your Spool server](quickstart-mirror.md) instead
+of from github.com. Developers keep pushing to GitHub; only the read path
+CI takes moves. If the mirror cannot serve the commit, `actions/checkout`
+runs instead and the job says why. Adopting it is one line, not a
+decision.
 
 ```yaml
 - uses: weftsh/checkout@v1
   with:
-    repository: acme/widget          # the mirror on Weft, org/repo
-    token: ${{ secrets.WEFT_TOKEN }}  # repo:read; omit for a public mirror
+    api-url: https://spool.example.com  # your Spool server
+    repository: acme/widget             # the mirror, org/repo
+    token: ${{ secrets.WEFT_TOKEN }}    # repo:read on the mirror
 ```
 
 The action is open source at
-[github.com/weftsh/checkout](https://github.com/weftsh/checkout).
+[github.com/weftsh/checkout](https://github.com/weftsh/checkout). It was
+written for Weft's hosted service, so its `api-url` defaults to that;
+against your own server, always set it.
 
 ## What you need
 
-1. A mirror. [Mirror in 5 minutes](quickstart-mirror.md) covers both
-   a public origin (paste the URL) and a private one (install the Weft app
-   and pick the repository).
-2. For a private mirror, a token with `repo:read`, stored as a repository
-   secret. [Minting one](authentication.md#minting-and-revoking-tokens)
-   is a single request or a click in Settings; restrict it to the one
-   mirror if this is the only thing the token is for.
-
-A public mirror needs no token at all.
+1. A mirror. [Mirror a GitHub repository](quickstart-mirror.md) covers
+   connecting your server's GitHub App and creating one.
+2. A token with `repo:read`, stored as a repository secret. Every
+   repository on your server is private, so there is no checkout without
+   one. [Minting one](authentication.md#minting-and-revoking-tokens) is
+   a single request or a click in Settings; restrict it to the one mirror
+   if this is the only thing the token is for.
+3. A route from the job to your server. GitHub's own hosted runners reach
+   it only if it is on the internet; a GitHub runner you host inside your
+   network reaches it wherever it is.
 
 ## What it does
 
@@ -48,13 +53,13 @@ by name. There is no way to get a stale tree.
 
 | Input | Default | Meaning |
 |---|---|---|
-| `repository` | `<org>/<this repo's name>` | The mirror on Weft, as `org/repo`. |
-| `org` | | The Weft organization, used when `repository` is not given. |
+| `api-url` | Weft's hosted service | Your Spool server's URL. Set it. |
+| `repository` | `<org>/<this repo's name>` | The mirror, as `org/repo`. |
+| `org` | | The organization, used when `repository` is not given. |
 | `token` | | A token with `repo:read` on the mirror. |
 | `ref` | `${{ github.sha }}` | The commit to check out, as a commit id. |
 | `fetch-depth` | `1` | `1` for the commit alone, `0` for full history. |
 | `path` | | Where to put the repository, relative to the workspace. |
-| `api-url` | `https://api.weft.sh` | The Weft deployment. |
 | `fallback` | `true` | Run `actions/checkout` when the mirror cannot serve. |
 | `timeout-seconds` | `10` | How long to wait for the mirror's answer to the probe. |
 
@@ -66,7 +71,8 @@ fallback ran.
 Each of these is a notice on the job with the reason in it:
 
 - The mirror did not answer within `timeout-seconds`, or the token cannot
-  see it. A private mirror with no token answers as if it did not exist.
+  see it. A mirror the token cannot read answers as if it did not exist,
+  and so does a request with no token.
 - The commit is not on the mirror and a synchronous sync of the origin did
   not surface it, or the sync exceeded the freshness budget. The mirror's
   own sentence is in the notice.
@@ -83,6 +89,7 @@ Each of these is a notice on the job with the reason in it:
   ```yaml
   - uses: weftsh/checkout@v1
     with:
+      api-url: https://spool.example.com
       repository: acme/widget
       token: ${{ secrets.WEFT_TOKEN }}
       ref: ${{ github.event.pull_request.head.sha }}
@@ -93,10 +100,3 @@ Each of these is a notice on the job with the reason in it:
 
 Set `fallback: false` on a workflow whose purpose is to prove the mirror;
 then any of the above fails the job with the reason instead.
-
-## On a Weft runner
-
-The action works the same on `runs-on: weft`
-([GitHub Actions runners](/docs/github-runners/)) as on a GitHub-hosted
-runner. On a Weft runner the mirror is in the same region as the job, so
-the clone is served from object storage without leaving the network.

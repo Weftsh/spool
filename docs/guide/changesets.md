@@ -67,7 +67,6 @@ anything is written, and each names the member it is about:
 | `400` | bad key or title; no members, or more than sixteen; the same change listed twice; two members from one repository; an edge that names a non-member, a change before itself, or a cycle |
 | `404` | `no change web/Inope0001` — a member that is not a change, or one the caller may not write to |
 | `409` | the key exists; a member is not open; `api/Iaa000001 is already in changeset Ic5000001` |
-| `402` | the organization is read-only and a member is in a private repository |
 
 Finding the changes to compose is a request of its own:
 
@@ -83,10 +82,11 @@ changes a compose would refuse. This is what the dashboard's changeset
 picker reads; asking each repository's own change list in turn is a round
 trip per repository before anyone can see what there is to compose.
 
-Authority is per repository, not org-wide: a `repo:read` token sees its
-own repository's changes here, a public repository's are readable with no
-credential at all, and a private one's are not — the same answers
+Authority is per repository, not org-wide: a token bound to one
+repository sees that repository's changes here, and a person sees the
+changes of every repository they may read — the same answers
 `GET /v1/orgs/{org}/repos/{repo}/changes` gives one repository at a time.
+With no credential the answer is `401`.
 
 ## Shaping an open changeset
 
@@ -132,22 +132,17 @@ Authority is per member, and comes from the repositories:
 - **Reading** a changeset needs read on **every** member. If any member
   is in a repository you cannot read, the changeset does not exist for
   you — `404`, the same answer whether or not it exists — and it is left
-  out of the list. A changeset over public repositories reads
-  anonymously, like the repositories do.
+  out of the list. With no credential at all, every changeset route
+  answers `401`.
 - **Composing and shaping** need write on every member, the one being
   added included. So do landing, reverting and abandoning. Every
   changeset you read says whether you hold that — `"viewer_write": true`
   or `false` — so a client can withhold the controls rather than offer
-  them and be answered with the masked `404` a stranger gets; each row of
+  them and be answered with the masked `404`; each row of
   `GET /v1/orgs/{org}/changes` says the same about its own repository, for
   the picker.
-- A credential from **another organization** reads a changeset over
-  public repositories the way anyone does — anonymously, as it reads the
-  repositories themselves — and may shape nothing.
-- A [read-only organization](/docs/billing/) — no card yet, or a
-  subscription that has ended — can still read its changesets and shape
-  those over public repositories; anything touching a private repository
-  answers `402` with the sentence that says what to do.
+- A credential from **another organization** reads nothing and shapes
+  nothing: it gets the same `404` as a changeset that does not exist.
 
 Every composition, membership change, edge change and abandonment is in
 the org's [audit trail](audit-and-undo.md) as `changeset.create`,
@@ -225,7 +220,7 @@ workspace answers it with one git repository, served for the changeset,
 that you can clone:
 
 ```sh
-git clone --recurse-submodules https://weft.example/acme/changesets/Ic5000001.git
+git clone --recurse-submodules https://spool.example.com/acme/changesets/Ic5000001.git
 ```
 
 That checkout has one directory per member repository, named after it,
@@ -247,14 +242,14 @@ The response says the same thing in JSON:
   "state": "open",
   "composition": "3f9c2b…",
   "tip": "8ad14e…",
-  "clone_url": "https://weft.example/acme/changesets/Ic5000001.git",
-  "ssh_clone_url": "ssh://git@weft.example/acme/changesets/Ic5000001.git",
+  "clone_url": "https://spool.example.com/acme/changesets/Ic5000001.git",
+  "ssh_clone_url": "ssh://git@spool.example.com:2222/acme/changesets/Ic5000001.git",
   "members": [
     {
       "repo": "api", "change": "Iaa000001", "title": "Add the field",
       "path": "api", "commit": "e0d37a…", "fetch_ref": "refs/patchsets/e0d37a…",
-      "clone_url": "https://weft.example/acme/api.git",
-      "ssh_clone_url": "ssh://git@weft.example/acme/api.git"
+      "clone_url": "https://spool.example.com/acme/api.git",
+      "ssh_clone_url": "ssh://git@spool.example.com:2222/acme/api.git"
     }
   ],
   "note": null
@@ -284,8 +279,8 @@ The response says the same thing in JSON:
   patchsets of the member changes.
 - **Who may clone it** is who may read every member — the rule for the
   changeset itself. A member you cannot read makes the whole workspace
-  `404`, and anonymous clones work only when every member repository is
-  public. The `.gitmodules` URLs carry nothing you did not already hold.
+  `404`, and a clone with no credential is refused. The `.gitmodules`
+  URLs carry nothing you did not already hold.
 - `note` is `null` except while the changeset is `landing`, when it warns
   that some members may already be on their trunks while others are not,
   and that the workspace is the proposed state, not the trunks. That
@@ -650,10 +645,10 @@ before and still gate their own member.
 comes from a fork and its workflows have not been approved yet, every
 member's composed run is held — `blocked`, with the reason `fork` — and
 not just the fork member's. A composed job runs in a maintainer's own
-repository, but the stranger's tree is checked out beside it under
+repository, but the contributor's tree is checked out beside it under
 `$WEFT_WORKSPACE` and the maintainer's own script may execute it, so
-holding only the fork member's run would still run a stranger's code on
-every other member's behalf. Approving that change's workflows, with the
+holding only the fork member's run would still run the contributor's
+code on every other member's behalf. Approving that change's workflows, with the
 button on the change itself, releases the whole composition at once. The
 per-repository `on: change` runs are gated exactly as they were.
 
@@ -666,10 +661,10 @@ per-repository `on: change` runs are gated exactly as they were.
   "composition": "3f9c2b1e…",
   "checks": [
     { "repo": "api", "name": "contract / contract", "state": "passing",
-      "detail_url": "https://weft.example/acme/api/checks/runs/wr_01H…",
+      "detail_url": "https://spool.example.com/acme/api/checks/runs/wr_01H…",
       "run": "wr_01H…" },
     { "repo": "web", "name": "contract / contract", "state": "running",
-      "detail_url": "https://weft.example/acme/web/checks/runs/wr_01H…",
+      "detail_url": "https://spool.example.com/acme/web/checks/runs/wr_01H…",
       "run": "wr_01H…" }
   ]
 }

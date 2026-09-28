@@ -3,15 +3,16 @@
 Every repo is reachable over SSH as well as HTTPS:
 
 ```bash
-git clone ssh://git@ssh.weft.sh/acme/session-8412.git
+git clone ssh://git@spool.example.com:2222/acme/session-8412.git
 ```
 
-The `ssh_clone_url` field on any repo response gives you the exact URL, or
-`null` if the deployment has not enabled the SSH door.
+The host and port are your server's. The `ssh_clone_url` field on any
+repo response gives you the exact URL, or `null` if the server has not
+enabled the SSH door.
 
 SSH needs no domain and no certificate, so on a fresh deployment it is the
-fully-encrypted git path from the first minute — before DNS and ACM are
-sorted out.
+fully-encrypted git path from the first minute — before DNS and a TLS
+certificate are sorted out.
 
 ## Registering a key
 
@@ -23,7 +24,7 @@ under Settings → SSH keys. Sign in, paste the contents of your public key
 file, done:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/ssh-keys \
+curl -X POST https://spool.example.com/v1/orgs/acme/ssh-keys \
   -b "$COOKIE_JAR" -H 'Content-Type: application/json' \
   -d '{"public_key":"ssh-ed25519 AAAA… you@laptop","label":"laptop"}'
 ```
@@ -51,7 +52,7 @@ and repo binding. This is what an unattended machine wants, and creating
 one needs `org:admin`:
 
 ```bash
-curl -X POST https://api.weft.sh/v1/orgs/acme/ssh-keys \
+curl -X POST https://spool.example.com/v1/orgs/acme/ssh-keys \
   -H "Authorization: Bearer $ADMIN_TOKEN" \
   -H 'Content-Type: application/json' \
   -d '{"public_key":"ssh-ed25519 AAAA… deploy@ci",
@@ -66,8 +67,8 @@ the server stored the key you meant.
 List and revoke:
 
 ```bash
-curl  https://api.weft.sh/v1/orgs/acme/ssh-keys      -H "Authorization: Bearer $TOKEN"
-curl -X DELETE https://api.weft.sh/v1/orgs/acme/ssh-keys/<id> -H "Authorization: Bearer $TOKEN"
+curl  https://spool.example.com/v1/orgs/acme/ssh-keys      -H "Authorization: Bearer $TOKEN"
+curl -X DELETE https://spool.example.com/v1/orgs/acme/ssh-keys/<id> -H "Authorization: Bearer $TOKEN"
 ```
 
 An admin sees and can revoke every deploy key in the org; you see and can
@@ -77,11 +78,10 @@ connection. There is no cached session to outlive it.
 
 A disabled account reaches nothing: its keys stop authenticating, exactly
 as its tokens stop being credentials — the connection is refused before a
-repository is named, so a disabled key cannot even read a public one. A
-key that *is* live and simply has no role in a namespace reads that
-namespace's public repositories and is answered "not found" for everything
-else, the same masked answer a namespace you were never in gives, so a key
-cannot be used to map who still works where.
+repository is named. A key that *is* live and simply has no role in a
+namespace is answered "not found" for everything in it, the same masked
+answer a repository that does not exist gives, so a key cannot be used to
+map who still works where or what exists.
 
 ## What the SSH user name means: nothing
 
@@ -93,17 +93,17 @@ A key that resolves to read-only authority cannot push, whatever it
 connects as; `git-receive-pack` is refused with an in-band error your git
 client prints as `remote error: weft: you can read acme/widget but not
 push to it; fork it and open a change from your fork, or ask an owner for
-write access`. The same key reads any public repository, in any
-namespace — a maintainer's key fetches a contributor's fork, a
-contributor's key fetches the upstream — and a repository it cannot read
-at all answers `repository not found`, whichever way it is asked.
+write access`. The same key reads every repository you may read, in
+every namespace you belong to — a contributor's key fetches the upstream
+they forked and pushes to their own fork — and a repository it cannot
+read at all answers `repository not found`, whichever way it is asked.
 
 ## Host keys
 
-The server presents one fleet-stable host key. Every node presents the
-same one, so a client that pinned it on first connect keeps trusting the
-fleet across restarts, deploys, and scale events — a per-node key would
-look like a machine-in-the-middle attack to every user.
+The server presents one host key, and every node presents the same one,
+so a client that pinned it on first connect keeps trusting the server
+across restarts, deploys, and scale events — a per-node key would look
+like a machine-in-the-middle attack to every user.
 
 Operators: this is `STRATUM_SSH_HOST_KEY`, and booting with an SSH bind
 but no host key is a deliberate startup failure rather than a
