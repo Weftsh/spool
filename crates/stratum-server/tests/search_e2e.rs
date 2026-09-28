@@ -10,6 +10,11 @@
 //! Anonymous REST used to answer 404 for a repository that does not
 //! exist and 401 for one that is private, which is the same enumeration
 //! by another name — the git wire has always answered 401 to both.
+//!
+//! Every repository is private to its organization, so search is for
+//! people who belong somewhere: no credential is a 401, a person sees
+//! the organizations they belong to, and a token sees the one it was
+//! minted in.
 
 use stratum_testkit::adversarial::INJECTIONS;
 use stratum_testkit::{browser::Browser, gitcli::Scratch, Minio, Server};
@@ -21,7 +26,7 @@ fn spawn(store_url: &str, scratch: &Scratch, hint: &str) -> Server {
         .start()
 }
 
-fn make_repo(server: &Server, org: &str, token: &str, name: &str, public: bool, desc: &str) {
+fn make_repo(server: &Server, org: &str, token: &str, name: &str, desc: &str) {
     let (st, out) = server.req(
         "POST",
         &format!("/v1/orgs/{org}/repos"),
@@ -48,60 +53,80 @@ fn names(body: &serde_json::Value) -> Vec<String> {
 }
 
 /// The happy path, end to end: make repos, find them by three different
-/// words, page through, and follow a result to the repo it names.
+/// words, page through, and follow a result to the repo it names — as a
+/// member, because nobody else may search here at all.
 #[test]
-fn search_finds_public_repos_by_name_namespace_and_description() {
+fn search_finds_a_members_repos_by_name_namespace_and_description() {
     let minio = Minio::shared();
     let bucket = minio.bucket("search-happy");
     let scratch = Scratch::new("search-happy");
     let server = spawn(&bucket.base_url, &scratch, "search-happy");
     let admin = server.bootstrap_org("acme");
+    let rival = server.bootstrap_org("rival");
 
-    make_repo(&server, "acme", &admin, "widget", true, "the fast one");
-    make_repo(&server, "acme", &admin, "ledger", true, "money, counted");
-    make_repo(&server, "acme", &admin, "secret", false, "not for you");
+    make_repo(&server, "acme", &admin, "widget", "the fast one");
+    make_repo(&server, "acme", &admin, "ledger", "money, counted");
+    make_repo(&server, "acme", &admin, "secret", "not for you");
+    make_repo(&server, "rival", &rival, "other", "theirs");
 
+    // Nobody searches anonymously — not the whole table, not one word.
+    for q in ["", "?q=widg", "?q=secret", "?limit=1"] {
+        let (st, out) = server.req("GET", &format!("/v1/search/repos{q}"), "", None);
+        assert_eq!(st, 401, "anonymous search {q:?}: {out}");
+    }
+
+    let search = |q: &str| {
+        let (st, out) = server.req("GET", &format!("/v1/search/repos{q}"), &admin, None);
+        assert_eq!(st, 200, "{q}: {out}");
+        out
+    };
     // By name.
-    let (st, out) = server.req("GET", "/v1/search/repos?q=widg", "", None);
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(names(&out), ["acme/widget"]);
+    assert_eq!(names(&search("?q=widg")), ["acme/widget"]);
     // By description.
-    let (st, out) = server.req("GET", "/v1/search/repos?q=counted", "", None);
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(names(&out), ["acme/ledger"]);
+    assert_eq!(names(&search("?q=counted")), ["acme/ledger"]);
     // By namespace.
-    let (st, out) = server.req("GET", "/v1/search/repos?q=acme", "", None);
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(names(&out), ["acme/ledger", "acme/widget"]);
-    // An empty query is the discovery page browsing everything public.
-    let (st, out) = server.req("GET", "/v1/search/repos", "", None);
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(names(&out), ["acme/ledger", "acme/widget"]);
+    assert_eq!(
+        names(&search("?q=acme")),
+        ["acme/ledger", "acme/secret", "acme/widget"]
+    );
+    // An empty query browses everything this caller belongs to — and
+    // nothing of rival's.
+    let out = search("");
+    assert_eq!(
+        names(&out),
+        ["acme/ledger", "acme/secret", "acme/widget"]
+    );
     assert!(out["next"].is_null(), "one page, so no cursor: {out}");
-    // The private repo is absent from every one of those.
-    let (_, out) = server.req("GET", "/v1/search/repos?q=secret", "", None);
-    assert_eq!(names(&out), [] as [String; 0]);
+
+    // Another organisation's token finds none of it, by any word.
+    for q in ["?q=secret", "?q=acme", "?q=widget", ""] {
+        let (st, out) = server.req("GET", &format!("/v1/search/repos{q}"), &rival, None);
+        assert_eq!(st, 200, "{out}");
+        for name in names(&out) {
+            assert!(!name.starts_with("acme/"), "rival found {name} with {q:?}");
+        }
+    }
 
     // Paging: one at a time, following `next`, visits each repo once.
     let mut seen: Vec<String> = Vec::new();
-    let mut url = "/v1/search/repos?limit=1".to_string();
+    let mut url = "?limit=1".to_string();
     for _ in 0..10 {
-        let (st, out) = server.req("GET", &url, "", None);
-        assert_eq!(st, 200, "{out}");
+        let out = search(&url);
         seen.extend(names(&out));
         let Some(next) = out["next"].as_str() else {
             break;
         };
-        url = format!("/v1/search/repos?limit=1&after={}", urlencode(next));
+        url = format!("?limit=1&after={}", urlencode(next));
     }
-    assert_eq!(seen, ["acme/ledger", "acme/widget"]);
+    assert_eq!(seen, ["acme/ledger", "acme/secret", "acme/widget"]);
 
-    // A hit is enough to go and read the repo with.
-    let hit = server.req("GET", "/v1/search/repos?q=widget", "", None).1;
+    // A hit is enough to go and read the repo with, on the same
+    // credential that found it.
+    let hit = search("?q=widget");
     let org = hit["repos"][0]["org"].as_str().unwrap().to_string();
     let name = hit["repos"][0]["name"].as_str().unwrap().to_string();
-    let (st, out) = server.req("GET", &format!("/v1/orgs/{org}/repos/{name}"), "", None);
-    assert_eq!(st, 200, "a public hit is readable anonymously: {out}");
+    let (st, out) = server.req("GET", &format!("/v1/orgs/{org}/repos/{name}"), &admin, None);
+    assert_eq!(st, 200, "a hit is readable by whoever found it: {out}");
     assert_eq!(out["description"], "the fast one");
 
     assert!(server.healthy());
@@ -130,8 +155,8 @@ fn a_private_repo_is_invisible_to_everyone_outside_its_namespace() {
     let acme = server.bootstrap_org("acme");
     let rival = server.bootstrap_org("rival");
 
-    make_repo(&server, "acme", &acme, "payments", false, "the private one");
-    make_repo(&server, "rival", &rival, "public-thing", true, "theirs");
+    make_repo(&server, "acme", &acme, "payments", "the private one");
+    make_repo(&server, "rival", &rival, "their-thing", "theirs");
 
     server
         .admin(&[
@@ -166,9 +191,10 @@ fn a_private_repo_is_invisible_to_everyone_outside_its_namespace() {
         ])
         .unwrap();
 
-    // Anonymous.
-    let (_, out) = server.req("GET", "/v1/search/repos?q=payments", "", None);
-    assert_eq!(names(&out), [] as [String; 0], "anonymous: {out}");
+    // Anonymous: not an empty list, a refusal.
+    let (st, out) = server.req("GET", "/v1/search/repos?q=payments", "", None);
+    assert_eq!(st, 401, "anonymous: {out}");
+    assert!(!out.to_string().contains("payments"), "{out}");
     // A member of another org — signed in, and no better off.
     let mut eve = Browser::signed_in(&server, "eve@rival.test", "a long enough password");
     let (st, out) = eve.req("GET", "/v1/search/repos?q=payments", None);
@@ -230,7 +256,8 @@ fn a_private_repo_is_invisible_to_everyone_outside_its_namespace() {
         "an ex-member sees what a stranger sees: {out}"
     );
 
-    // A disabled account's session stops counting too.
+    // A disabled account's session stops counting too — it is no
+    // session at all, so the search is refused as an anonymous one is.
     let mut bo = Browser::signed_in(&server, "bo@acme.test", "a long enough password");
     assert_eq!(
         names(&bo.req("GET", "/v1/search/repos?q=payments", None).1),
@@ -240,14 +267,18 @@ fn a_private_repo_is_invisible_to_everyone_outside_its_namespace() {
         .admin(&["admin", "user-disable", "--email", "bo@acme.test"])
         .unwrap();
     let (st, out) = bo.req("GET", "/v1/search/repos?q=payments", None);
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(names(&out), [] as [String; 0], "disabled: {out}");
+    assert_eq!(st, 401, "disabled: {out}");
+    assert!(!out.to_string().contains("payments"), "disabled: {out}");
 
     assert!(server.healthy());
 }
 
 /// A cursor is a window into what you could already see, and tampering
 /// with it moves the window, never widens it.
+///
+/// The searcher is another organisation, whose token sees its own
+/// repositories and none of acme's; the forged cursors are aimed at
+/// acme's names, from either side.
 #[test]
 fn a_forged_cursor_cannot_page_into_someone_elses_repos() {
     let minio = Minio::shared();
@@ -255,30 +286,38 @@ fn a_forged_cursor_cannot_page_into_someone_elses_repos() {
     let scratch = Scratch::new("search-cursor");
     let server = spawn(&bucket.base_url, &scratch, "search-cursor");
     let acme = server.bootstrap_org("acme");
-    make_repo(&server, "acme", &acme, "aaa-public", true, "first");
-    make_repo(&server, "acme", &acme, "bbb-private", false, "second");
-    make_repo(&server, "acme", &acme, "ccc-public", true, "third");
+    let rival = server.bootstrap_org("rival");
+    make_repo(&server, "acme", &acme, "aaa-first", "first");
+    make_repo(&server, "acme", &acme, "bbb-private", "second");
+    make_repo(&server, "acme", &acme, "ccc-third", "third");
+    make_repo(&server, "rival", &rival, "mine", "theirs");
 
-    // Hand-built cursors that land either side of the private repo.
+    // Hand-built cursors that land either side of acme's repositories.
     for forged in [
         "acme/bbb-private/0",
         "acme/bbb-privatd/zzzzzzzzzzzzzzzzzzzzzzzzzz",
-        "acme/aaa-public/zzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "acme/aaa-first/zzzzzzzzzzzzzzzzzzzzzzzzzz",
+        "aaaa/a/0",
         "%00/%00/%00",
         "../../etc/passwd",
         "a/b/c'; DROP TABLE repos;--",
     ] {
-        let (st, out) = server.req(
-            "GET",
-            &format!("/v1/search/repos?after={}", urlencode(forged)),
-            "",
-            None,
-        );
+        let path = format!("/v1/search/repos?after={}", urlencode(forged));
+        let (st, out) = server.req("GET", &path, &rival, None);
         assert_eq!(st, 200, "cursor {forged:?}: {out}");
         for name in names(&out) {
-            assert_ne!(name, "acme/bbb-private", "cursor {forged:?} leaked: {out}");
+            assert!(
+                !name.starts_with("acme/"),
+                "cursor {forged:?} leaked {name}: {out}"
+            );
         }
+        // Without a credential a cursor is no way in either.
+        let (st, _) = server.req("GET", &path, "", None);
+        assert_eq!(st, 401, "anonymous cursor {forged:?}");
     }
+    // The window still works for its owner: rival pages to its own.
+    let (_, out) = server.req("GET", "/v1/search/repos?after=aaaa%2Fa%2F0", &rival, None);
+    assert_eq!(names(&out), ["rival/mine"]);
     assert!(server.healthy(), "still serving after forged cursors");
 }
 
@@ -292,13 +331,13 @@ fn injections_in_the_query_are_matched_as_text() {
     let scratch = Scratch::new("search-inject");
     let server = spawn(&bucket.base_url, &scratch, "search-inject");
     let acme = server.bootstrap_org("acme");
-    make_repo(&server, "acme", &acme, "widget", true, "ordinary");
+    make_repo(&server, "acme", &acme, "widget", "ordinary");
 
     for probe in INJECTIONS {
         let (st, out) = server.req(
             "GET",
             &format!("/v1/search/repos?q={}", urlencode(probe)),
-            "",
+            &acme,
             None,
         );
         assert!(st == 200 || st == 400, "q={probe:?} answered {st}: {out}");
@@ -319,7 +358,7 @@ fn injections_in_the_query_are_matched_as_text() {
         let (st, out) = server.req(
             "GET",
             &format!("/v1/search/repos?q={}", urlencode(&q)),
-            "",
+            &acme,
             None,
         );
         assert!(
@@ -329,13 +368,18 @@ fn injections_in_the_query_are_matched_as_text() {
         );
     }
     // The repo is still findable afterwards: the server did not wedge.
-    let (_, out) = server.req("GET", "/v1/search/repos?q=widget", "", None);
+    let (_, out) = server.req("GET", "/v1/search/repos?q=widget", &acme, None);
     assert_eq!(names(&out), ["acme/widget"]);
     assert!(server.healthy());
 }
 
 /// Which credential is asking changes only how much comes back — and
-/// two kinds of credential are deliberately worth no more than none.
+/// no credential, or one bound to a single repository, gets nothing.
+///
+/// A token is bound to the organisation it was minted in; a person's
+/// session spans every organisation they belong to. So a person in two
+/// organisations finds both with their session, and with a token minted
+/// in one of them finds that one.
 #[test]
 fn a_credential_widens_the_answer_only_as_far_as_it_reaches() {
     let minio = Minio::shared();
@@ -343,22 +387,30 @@ fn a_credential_widens_the_answer_only_as_far_as_it_reaches() {
     let scratch = Scratch::new("search-creds");
     let server = spawn(&bucket.base_url, &scratch, "search-creds");
     let admin = server.bootstrap_org("acme");
-    make_repo(&server, "acme", &admin, "open", true, "public");
-    make_repo(&server, "acme", &admin, "closed", false, "private");
+    let bravo = server.bootstrap_org("bravo");
+    make_repo(&server, "acme", &admin, "open", "one");
+    make_repo(&server, "acme", &admin, "closed", "two");
+    make_repo(&server, "bravo", &bravo, "elsewhere", "three");
 
     // A token presented and *wrong* is a 401, not a quiet downgrade to
-    // anonymous: somebody with a typo'd credential has to be told, or
-    // they see a shorter list they cannot explain.
+    // anonymous: somebody with a typo'd credential has to be told. And
+    // no credential at all is the same 401 — there is nothing here an
+    // anonymous caller may find.
     let (st, out) = server.req("GET", "/v1/search/repos", "weft_nope_nope", None);
     assert_eq!(st, 401, "{out}");
+    let (st, out) = server.req("GET", "/v1/search/repos", "", None);
+    assert_eq!(st, 401, "{out}");
 
-    // An org-wide service token stands in for its org.
+    // An org-wide service token stands in for its org, and only its org.
     let (_, out) = server.req("GET", "/v1/search/repos", &admin, None);
     assert_eq!(names(&out), ["acme/closed", "acme/open"]);
+    let (_, out) = server.req("GET", "/v1/search/repos", &bravo, None);
+    assert_eq!(names(&out), ["bravo/elsewhere"]);
 
-    // A token bound to one repository is worth no more than none here.
-    // It was minted to reach that repository, and a search is not that
-    // repository — so it sees exactly what a stranger sees.
+    // A token bound to one repository is refused, by name. It was minted
+    // to reach that repository, and a search is not that repository;
+    // answering it as its org would widen it, and answering it with an
+    // empty list would read as "nothing here".
     let bound = server.admin_json(&[
         "admin",
         "mint",
@@ -374,28 +426,49 @@ fn a_credential_widens_the_answer_only_as_far_as_it_reaches() {
         .as_str()
         .unwrap()
         .to_string();
-    let (st, out) = server.req("GET", "/v1/search/repos", &bound, None);
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(names(&out), ["acme/open"], "repo-bound token: {out}");
+    for path in ["/v1/search/repos", "/v1/search/topics"] {
+        let (st, out) = server.req("GET", path, &bound, None);
+        assert_eq!(st, 403, "{path}: {out}");
+        assert!(
+            out.to_string().contains(
+                "a token bound to one repository cannot search; use a personal or \
+                 organization token"
+            ),
+            "{path}: {out}"
+        );
+    }
 
-    // A personal token carries the person, so it sees what they see.
-    server
-        .admin(&[
-            "admin",
-            "user-create",
-            "--email",
-            "ada@acme.test",
-            "--name",
-            "Ada",
-            "--password",
-            "a long enough password",
-            "--org",
-            "acme",
-            "--role",
-            "owner",
-        ])
-        .unwrap();
+    // Ada belongs to both organisations.
+    for org in ["acme", "bravo"] {
+        server
+            .admin(&[
+                "admin",
+                "user-create",
+                "--email",
+                "ada@acme.test",
+                "--name",
+                "Ada",
+                "--password",
+                "a long enough password",
+                "--org",
+                org,
+                "--role",
+                "owner",
+            ])
+            .unwrap();
+    }
     let mut ada = Browser::signed_in(&server, "ada@acme.test", "a long enough password");
+    // Her session spans both.
+    let (st, out) = ada.req("GET", "/v1/search/repos", None);
+    assert_eq!(st, 200, "{out}");
+    assert_eq!(
+        names(&out),
+        ["acme/closed", "acme/open", "bravo/elsewhere"],
+        "a session: {out}"
+    );
+    // A personal token she mints in acme is acme's: it carries her, and
+    // it is bound to the organisation it was minted in, so a script
+    // holding it cannot enumerate bravo.
     let (st, out) = ada.req(
         "POST",
         "/v1/orgs/acme/tokens",
@@ -406,6 +479,13 @@ fn a_credential_widens_the_answer_only_as_far_as_it_reaches() {
     let (st, out) = server.req("GET", "/v1/search/repos", &personal, None);
     assert_eq!(st, 200, "{out}");
     assert_eq!(names(&out), ["acme/closed", "acme/open"], "personal: {out}");
+    let (st, out) = server.req("GET", "/v1/search/repos?q=elsewhere", &personal, None);
+    assert_eq!(st, 200, "{out}");
+    assert_eq!(
+        names(&out),
+        [] as [String; 0],
+        "a token minted in acme found a repository in bravo: {out}"
+    );
 
     assert!(server.healthy());
 }
@@ -423,7 +503,7 @@ fn anonymous_reads_cannot_tell_a_private_repo_from_an_absent_one() {
     let scratch = Scratch::new("search-oracle");
     let server = spawn(&bucket.base_url, &scratch, "search-oracle");
     let admin = server.bootstrap_org("acme");
-    make_repo(&server, "acme", &admin, "payments", false, "private");
+    make_repo(&server, "acme", &admin, "payments", "private");
 
     // Every repo-scoped read route, asked for a repo that exists but is
     // private, and for one that does not exist at all.
@@ -468,27 +548,33 @@ fn anonymous_reads_cannot_tell_a_private_repo_from_an_absent_one() {
         assert_eq!(st, 404, "foreign token on {path}: {out}");
     }
 
-    // And a public repo is still readable by anyone — the fix must not
-    // have closed the door it was holding open.
-    make_repo(&server, "acme", &admin, "widget", true, "public");
-    assert_eq!(server.status_get("/v1/orgs/acme/repos/widget", None), 200);
+    // And a member still reads it — the fix must not have closed the
+    // door it was holding open.
     assert_eq!(
-        server.status_get("/v1/orgs/acme/repos/widget/refs", None),
+        server.status_get("/v1/orgs/acme/repos/payments", Some(&admin)),
+        200
+    );
+    assert_eq!(
+        server.status_get("/v1/orgs/acme/repos/payments/refs", Some(&admin)),
         200
     );
 
     assert!(server.healthy());
 }
 
-/// Editing what a repo says about itself, and who may publish one.
+/// Editing what a repo says about itself, and who may. Publishing it is
+/// not a thing anybody may do: there are no public repositories, and a
+/// patch that asks for one is refused whole — and refused only to
+/// somebody who could have made the patch at all, so the refusal is not
+/// a way to learn that a repository exists.
 #[test]
-fn a_description_can_be_set_cleared_and_published_but_only_by_the_right_role() {
+fn a_description_can_be_set_and_cleared_by_the_right_role_and_never_published() {
     let minio = Minio::shared();
     let bucket = minio.bucket("search-patch");
     let scratch = Scratch::new("search-patch");
     let server = spawn(&bucket.base_url, &scratch, "search-patch");
     let admin = server.bootstrap_org("acme");
-    make_repo(&server, "acme", &admin, "widget", false, "first words");
+    make_repo(&server, "acme", &admin, "widget", "first words");
 
     let url = "/v1/orgs/acme/repos/widget";
     // Set.
@@ -500,7 +586,7 @@ fn a_description_can_be_set_cleared_and_published_but_only_by_the_right_role() {
     );
     assert_eq!(st, 200, "{out}");
     assert_eq!(out["description"], "second words");
-    assert_eq!(out["public"], false, "a description edit must not publish");
+    assert!(out.get("public").is_none(), "{out}");
 
     // Clear, explicitly.
     let (st, out) = server.req(
@@ -511,34 +597,37 @@ fn a_description_can_be_set_cleared_and_published_but_only_by_the_right_role() {
     );
     assert_eq!(st, 200, "{out}");
     assert!(out["description"].is_null(), "{out}");
-    assert_eq!(out["public"], false);
 
-    // Publish, and it appears in anonymous search.
-    assert_eq!(
-        names(&server.req("GET", "/v1/search/repos?q=widget", "", None).1),
-        [] as [String; 0]
-    );
+    // Publishing is refused in words, and the patch it came in is
+    // refused whole: the description beside it did not land either.
     let (st, out) = server.req(
         "PATCH",
         url,
         &admin,
         Some(serde_json::json!({ "public": true, "description": "now public" })),
     );
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(out["public"], true);
+    assert_eq!(st, 400, "{out}");
     assert_eq!(
-        names(&server.req("GET", "/v1/search/repos?q=widget", "", None).1),
-        ["acme/widget"]
+        out["error"],
+        "this server has no public repositories: every repository is private to its \
+         organization — omit \"public\" or set it to false"
     );
-    // Publishing is in the trail. It is the question asked after a leak.
+    let (_, out) = server.req("GET", url, &admin, None);
+    assert!(out["description"].is_null(), "half a refused patch landed: {out}");
+    // Anonymous search still finds nothing, because it is still refused.
+    assert_eq!(
+        server.req("GET", "/v1/search/repos?q=widget", "", None).0,
+        401
+    );
+    // `"public": false` is what already happens, and is accepted.
     let (st, out) = server.req(
-        "GET",
-        "/v1/orgs/acme/audit?action=repo.visibility",
+        "PATCH",
+        url,
         &admin,
-        None,
+        Some(serde_json::json!({ "public": false, "description": "private words" })),
     );
     assert_eq!(st, 200, "{out}");
-    assert_eq!(out["entries"].as_array().map(Vec::len), Some(1), "{out}");
+    assert_eq!(out["description"], "private words");
 
     // Bad descriptions are refused, not stored.
     for bad in [
@@ -568,7 +657,7 @@ fn a_description_can_be_set_cleared_and_published_but_only_by_the_right_role() {
     );
     assert_eq!(st, 200, "the table survived the corpus");
 
-    // Authority: a repo-write token may describe, but not publish.
+    // Authority: a repo-write token may describe.
     let writer = server.admin_json(&[
         "admin",
         "mint",
@@ -589,38 +678,72 @@ fn a_description_can_be_set_cleared_and_published_but_only_by_the_right_role() {
         Some(serde_json::json!({ "description": "by the writer" })),
     );
     assert_eq!(st, 200, "{out}");
+    // A reader may not, and is not told more than a stranger would be.
+    let reader = server.admin_json(&[
+        "admin",
+        "mint",
+        "--org",
+        "acme",
+        "--scopes",
+        "repo:read",
+        "--label",
+        "reader",
+    ])["token"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let (st, out) = server.req(
         "PATCH",
         url,
-        &writer,
-        Some(serde_json::json!({ "public": false })),
+        &reader,
+        Some(serde_json::json!({ "description": "by the reader" })),
     );
-    assert_eq!(st, 404, "publishing needs org admin: {out}");
+    assert_eq!(st, 404, "{out}");
     assert_eq!(
-        server.req("GET", url, &admin, None).1["public"],
-        true,
+        server.req("GET", url, &admin, None).1["description"],
+        "by the writer",
         "and it did not happen"
     );
 
     // Anonymous and foreign callers cannot patch, and cannot learn from
-    // trying whether the repo is there.
+    // trying whether the repo is there — whatever the patch asks for.
+    // A body that would be refused *on its merits* (`"public": true`) is
+    // the sharp case: judged before the caller's authority, it would be
+    // a 400 for a repository that exists and a 404 for one that does
+    // not, which is an existence oracle for every private name.
     let rival = server.bootstrap_org("rival");
-    make_repo(&server, "acme", &admin, "hidden", false, "shh");
-    for name in ["hidden", "no-such-repo"] {
-        let anon = server.status_post(
-            &format!("/v1/orgs/acme/repos/{name}"),
-            "",
-            serde_json::json!({ "description": "mine now" }),
-        );
-        let foreign = server.req(
-            "PATCH",
-            &format!("/v1/orgs/acme/repos/{name}"),
-            &rival,
-            Some(serde_json::json!({ "description": "mine now" })),
-        );
-        assert_eq!(foreign.0, 404, "{name}: {}", foreign.1);
-        assert!(anon == 401 || anon == 405, "{name}: {anon}");
+    make_repo(&server, "acme", &admin, "hidden", "shh");
+    for body in [
+        serde_json::json!({ "description": "mine now" }),
+        serde_json::json!({ "public": true }),
+        serde_json::json!({ "public": true, "description": "mine now" }),
+    ] {
+        for (who, token, expect) in [
+            ("anonymous", "", 401),
+            ("a rival org", rival.as_str(), 404),
+            ("a reader", reader.as_str(), 404),
+        ] {
+            let hidden = server.req(
+                "PATCH",
+                "/v1/orgs/acme/repos/hidden",
+                token,
+                Some(body.clone()),
+            );
+            let absent = server.req(
+                "PATCH",
+                "/v1/orgs/acme/repos/no-such-repo",
+                token,
+                Some(body.clone()),
+            );
+            assert_eq!(hidden.0, expect, "{who} patching hidden with {body}: {}", hidden.1);
+            assert_eq!(
+                hidden, absent,
+                "{who} told a real repo from an absent one with {body}"
+            );
+        }
     }
+    let (_, out) = server.req("GET", "/v1/orgs/acme/repos/hidden", &admin, None);
+    assert_eq!(out["description"], "shh", "{out}");
 
     assert!(server.healthy());
 }
@@ -682,10 +805,10 @@ fn topics_in_use_are_listed_by_popularity_and_scoped_to_the_viewer() {
     let acme = server.bootstrap_org("acme");
     let rival = server.bootstrap_org("rival");
 
-    make_repo(&server, "acme", &acme, "alpha", true, "one");
-    make_repo(&server, "acme", &acme, "beta", true, "two");
-    make_repo(&server, "acme", &acme, "hush", false, "private one");
-    make_repo(&server, "rival", &rival, "gamma", true, "theirs");
+    make_repo(&server, "acme", &acme, "alpha", "one");
+    make_repo(&server, "acme", &acme, "beta", "two");
+    make_repo(&server, "acme", &acme, "hush", "private one");
+    make_repo(&server, "rival", &rival, "gamma", "theirs");
 
     let tag = |repo: &str, token: &str, topics: serde_json::Value| {
         let (st, out) = server.req(
@@ -719,18 +842,15 @@ fn topics_in_use_are_listed_by_popularity_and_scoped_to_the_viewer() {
             .collect()
     };
 
-    // Anonymous: the three public repositories only. `rust` leads on
-    // count; `cli` follows. `project-atlas` is not here at all.
+    // Anonymous: not a shorter list, a refusal — a list of topic names
+    // is a list of what the work is about.
     let (st, out) = server.req("GET", "/v1/search/topics", "", None);
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(
-        listed(&out),
-        vec![("rust".to_string(), 3), ("cli".to_string(), 1)],
-        "anonymous topic list: {out}"
-    );
+    assert_eq!(st, 401, "{out}");
+    assert!(!out.to_string().contains("project-atlas"), "{out}");
 
-    // A member of acme sees their private repository's topic, and the
-    // count for `rust` is unchanged — `hush` does not carry it.
+    // A member of acme sees acme's topics, their counts, and the
+    // private project's — and nothing of rival's: `rust` counts alpha
+    // and beta, not gamma. Most used first.
     server
         .admin(&[
             "admin",
@@ -751,27 +871,34 @@ fn topics_in_use_are_listed_by_popularity_and_scoped_to_the_viewer() {
     let (st, out) = ada.req("GET", "/v1/search/topics", None);
     assert_eq!(st, 200, "{out}");
     let mine = listed(&out);
-    assert!(
-        mine.contains(&("project-atlas".to_string(), 1)),
-        "a member cannot see their own private repository's topic: {out}"
+    assert_eq!(
+        mine.first(),
+        Some(&("rust".to_string(), 2)),
+        "the most-used topic leads, counted over acme only: {out}"
     );
-    assert!(
-        mine.contains(&("rust".to_string(), 3)),
-        "the public count moved for a signed-in member: {out}"
+    let mut rest = mine[1..].to_vec();
+    rest.sort();
+    assert_eq!(
+        rest,
+        vec![("cli".to_string(), 1), ("project-atlas".to_string(), 1)],
+        "a member's topic list: {out}"
     );
+    // The org's own token sees the same.
+    let (st, out) = server.req("GET", "/v1/search/topics", &acme, None);
+    assert_eq!(st, 200, "{out}");
+    assert_eq!(listed(&out).len(), 3, "{out}");
 
-    // Another org's token is no better off than a stranger.
+    // Another org's token sees its own, and not one of acme's.
     let (st, out) = server.req("GET", "/v1/search/topics", &rival, None);
     assert_eq!(st, 200, "{out}");
-    assert!(
-        !listed(&out).iter().any(|(n, _)| n == "project-atlas"),
-        "a foreign token saw a private repository's topic: {out}"
+    assert_eq!(
+        listed(&out),
+        vec![("rust".to_string(), 1)],
+        "a foreign token saw acme's topics or counts: {out}"
     );
 
-    // A typo'd credential is told so, not quietly downgraded to
-    // anonymous and shown a shorter list it cannot explain — the same
-    // rule the repo search states, and now shared with it through one
-    // `resolve_viewer`.
+    // A typo'd credential is told so — the same rule the repo search
+    // states, and shared with it through one `resolve_viewer`.
     let (st, out) = server.req("GET", "/v1/search/topics", "weft_nope_nope", None);
     assert_eq!(st, 401, "a bad token was treated as anonymous: {out}");
 

@@ -509,16 +509,6 @@ fn concurrent_clones_all_fsck_clean() {
 // one repository rather than a global name.
 // ---------------------------------------------------------------------
 
-fn create_public_repo(server: &Server, token: &str, org: &str, name: &str) {
-    let (st, out) = server.req(
-        "POST",
-        &format!("/v1/orgs/{org}/repos"),
-        token,
-        Some(serde_json::json!({ "name": name, "public": true })),
-    );
-    assert_eq!(st, 201, "{out}");
-}
-
 fn now_ms() -> i64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -835,12 +825,9 @@ fn a_check_run_id_is_scoped_to_its_repository_and_its_org() {
     let server = spawn_server(&bucket.base_url, &scratch, &[]);
     let alpha = server.bootstrap_org("alpha");
     let bravo = server.bootstrap_org("bravo");
-    // Public on both sides, so that any 404 below is about the *run*
-    // rather than about the repository being unreadable — a private repo
-    // would answer 404 to everything and the test would pass vacuously.
-    create_public_repo(&server, &alpha, "alpha", "app");
-    create_public_repo(&server, &alpha, "alpha", "other");
-    create_public_repo(&server, &bravo, "bravo", "app");
+    create_repo(&server, &alpha, "alpha", "app");
+    create_repo(&server, &alpha, "alpha", "other");
+    create_repo(&server, &bravo, "bravo", "app");
 
     let commit = "3f2a1b4c5d6e7f8091a2b3c4d5e6f708192a3b4c";
     let alpha_run = record_run(
@@ -859,63 +846,75 @@ fn a_check_run_id_is_scoped_to_its_repository_and_its_org() {
     );
     assert_ne!(alpha_run, bravo_run, "two runs, two ids");
 
-    // It reads where it belongs, to anybody, because the repo is public.
+    // It reads where it belongs, to somebody who may read the repository.
     let (st, body) = server.req(
         "GET",
         &format!("/v1/orgs/alpha/repos/app/checks/runs/{alpha_run}"),
-        "",
+        &alpha,
         None,
     );
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["id"], serde_json::json!(alpha_run));
 
-    // The id nobody ever issued, which is the answer every other path
-    // has to match byte for byte.
+    // The id nobody ever issued, asked by a reader of the repository,
+    // which is the answer every other path has to match byte for byte.
     let never = server.req(
         "GET",
         "/v1/orgs/alpha/repos/app/checks/runs/01hxrunthatneverwas",
-        "",
+        &alpha,
         None,
     );
     assert_eq!(never.0, 404, "{:?}", never.1);
 
-    // Each case is asked by callers who may read *that* repository —
-    // otherwise the 404 would be the repository's rather than the run's,
-    // and the equality would be asserting the wrong thing.
-    for (why, path, tokens) in [
+    // Each case is asked by the one caller who may read *that*
+    // repository — otherwise the 404 would be the repository's rather
+    // than the run's, and the equality would be asserting the wrong
+    // thing. Every repository is private, so there is no anonymous
+    // reader to ask as well; the anonymous caller is asked below, and
+    // is told to sign in whatever the id.
+    for (why, path, token) in [
         (
             "another repository in the same org",
             format!("/v1/orgs/alpha/repos/other/checks/runs/{alpha_run}"),
-            ["", alpha.as_str()],
+            alpha.as_str(),
         ),
         (
             "another org's repository of the same name",
             format!("/v1/orgs/bravo/repos/app/checks/runs/{alpha_run}"),
-            ["", bravo.as_str()],
+            bravo.as_str(),
         ),
         (
             "bravo's run read through alpha's path",
             format!("/v1/orgs/alpha/repos/app/checks/runs/{bravo_run}"),
-            ["", alpha.as_str()],
+            alpha.as_str(),
         ),
     ] {
-        for token in tokens {
-            let got = server.req("GET", &path, token, None);
-            assert_eq!(
-                got, never,
-                "a run read through {why} is distinguishable from one that \
-                 was never issued"
-            );
-        }
+        let got = server.req("GET", &path, token, None);
+        assert_eq!(
+            got, never,
+            "a run read through {why} is distinguishable from one that \
+             was never issued"
+        );
+    }
+
+    // A caller who may not read the repository learns nothing about its
+    // runs either way: a real run and an invented id answer alike, the
+    // masked 404 for another org's credential and 401 for nobody.
+    for id in [alpha_run.as_str(), "01hxrunthatneverwas"] {
+        let path = format!("/v1/orgs/alpha/repos/app/checks/runs/{id}");
+        let (st, body) = server.req("GET", &path, &bravo, None);
+        assert_eq!(st, 404, "another org's token read {id}: {body}");
+        let (st, body) = server.req("GET", &path, "", None);
+        assert_eq!(st, 401, "an anonymous caller read {id}: {body}");
     }
 
     // Both runs are still exactly where they were: nothing above moved a
     // row between repositories.
-    for (org, id) in [("alpha", &alpha_run), ("bravo", &bravo_run)] {
+    for (org, id, token) in [("alpha", &alpha_run, &alpha), ("bravo", &bravo_run, &bravo)] {
         let (st, body) = server.req(
             "GET",
             &format!("/v1/orgs/{org}/repos/app/checks/runs/{id}"),
-            "",
+            token,
             None,
         );
         assert_eq!(st, 200, "{body}");

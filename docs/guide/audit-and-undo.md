@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Audit & undo
-description: The immutable audit trail and the undo primitives built on it.
----
-
 # Audit & undo
 
 Agent platforms need two answers on demand: *"what did the agent change and

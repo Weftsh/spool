@@ -1,16 +1,10 @@
----
-layout: ../../layouts/Docs.astro
-title: CI integration
-description: Get build verdicts onto a repository's Checks tab — polled from GitHub Actions, or posted by GitLab CI, Buildkite, CircleCI or anything else that can sign a request.
----
-
 # CI integration
 
 This page is about **bringing your own CI**: whatever already builds your
 code, wherever it runs, signing a verdict back to us. That is one of two
 ways to get a check onto a commit here.
 
-The other is [Workflows](/docs/workflows/) — hosted CI, a
+The other is [Workflows](workflows.md) — hosted CI, a
 `.weft/*.yml` file in the repository, run on our runners, with logs
 you can read while the job is still going and `push`/`change` triggers
 that start it. If you have no CI yet, start there; it is fewer moving
@@ -59,7 +53,7 @@ That is the whole of it. The rest of this page is for the other two.
 ### 2. Hosted here, CI somewhere else — four steps, and none of them is optional
 
 This is the case with the most moving parts, because **nothing on Weft
-starts a build of yours**. Hosted [workflows](/docs/workflows/) are the
+starts a build of yours**. Hosted [workflows](workflows.md) are the
 one exception and they run here rather than on your CI; for everything
 else, a repository created here is not connected to anything that runs
 your code, so the loop has to be closed at both ends: something has
@@ -73,11 +67,11 @@ than left to be assembled.
    fire on `push`, `change.landed` and `change.ejected`, signed with a
    delivery secret shown once. This is the trigger; without it your CI
    never learns that anything happened. See
-   [Webhooks](/docs/webhooks/), and read *What a delivery does and does
+   [Webhooks](webhooks.md), and read *What a delivery does and does
    not tell you* below before you write the receiver.
 2. **Give the runner a credential to clone with.** A token with
-   `repo:read` ([Authentication](/docs/authentication/)) or a deploy-style
-   SSH key ([SSH](/docs/ssh/)). Your CI fetches from us the same way a
+   `repo:read` ([Authentication](authentication.md)) or a deploy-style
+   SSH key ([SSH](ssh.md)). Your CI fetches from us the same way a
    person does.
 3. **Post the verdict back.** The intake secret and the request in the
    rest of this page.
@@ -148,13 +142,13 @@ repository.
 
 Worth knowing before you wire anything up, because it is a plan you make
 once. None of this is a limit of the product as a whole — hosted
-[workflows](/docs/workflows/) do run code, keep logs and start
+[workflows](workflows.md) do run code, keep logs and start
 themselves — it is what the *intake on this page* is and is not:
 
 - **It does not run your code.** A verdict arrives; nothing executes
   here. That is the point of a credential that can only write a check.
 - **It does not start your build.** We announce a push over a
-  [webhook](/docs/webhooks/) and your CI acts on it. There is no nightly
+  [webhook](webhooks.md) and your CI acts on it. There is no nightly
   timer here to hang one off, for hosted workflows either.
 - **It does not hold your logs.** We store the `url` you send and link to
   it; the log lives on your CI and stays there. (A hosted workflow's log
@@ -629,7 +623,7 @@ happened somewhere we cannot see, and the fields in the request are
 everything we will ever know about it. If you are coming from GitHub
 Actions, here is what stays on your CI's side, so you can plan around it
 rather than discover it — with, for contrast, what a hosted
-[workflow](/docs/workflows/) has, since that one *does* run here:
+[workflow](workflows.md) has, since that one *does* run here:
 
 | On GitHub, a failing check offers | Through this intake | With a hosted workflow |
 |---|---|---|
@@ -656,10 +650,10 @@ its log lives.)
 ## Verifying deliveries the other way
 
 If you want Weft to tell *your* CI when something happens, rather than
-the other way round, that is [webhooks](/docs/webhooks/) — outbound push
+the other way round, that is [webhooks](webhooks.md) — outbound push
 events, signed with the same `X-Weft-Signature-256` scheme. The two
 directions use one signing scheme on purpose.
 
 Checks feed the land queue: see
-[Changes, OWNERS &amp; landing](/docs/code-review/) for how a failing check
+[Changes, OWNERS &amp; landing](code-review.md) for how a failing check
 interacts with human approvals.

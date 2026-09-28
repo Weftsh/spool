@@ -77,7 +77,7 @@ fn the_repair_command_heals_an_account_that_predates_the_fix() {
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs/acme/repos",
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
 
@@ -284,7 +284,7 @@ fn an_operator_created_account_is_a_whole_account() {
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs/acme/repos",
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
     let (st, filed) = ada.req(

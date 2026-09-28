@@ -587,7 +587,11 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     // members, and somebody else has to be able to read it to fork it —
     // with two files on trunk. Bob is a viewer: he may read, and he may
     // not push.
-    let (st, body) = ada.req("POST", "/v1/orgs", Some(serde_json::json!({ "name": "acme" })));
+    let (st, body) = ada.req(
+        "POST",
+        "/v1/orgs",
+        Some(serde_json::json!({ "name": "acme" })),
+    );
     assert_eq!(st, 201, "{body}");
     let (st, body) = ada.req(
         "POST",
@@ -692,9 +696,9 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     // with no role in the org — exactly the contributor the fork path
     // exists to serve. The FINDING sat in this test asserting "absent, not
     // invented" until the same seam refused Bob's ticks and his comments
-    // too; a public repository's reader is now a principal with their own
-    // id and `repo:read`, so every surface that reads identity off it
-    // agrees about who he is.
+    // too; a reader who may not push — here a viewer of the org — is a
+    // principal with their own id and `repo:read`, so every surface that
+    // reads identity off it agrees about who he is.
     let (st, me) = bob.req("GET", "/v1/auth/me", None);
     assert_eq!(st, 200, "{me}");
     let bob_id = me["id"].as_str().expect("bob has an id").to_string();
@@ -709,11 +713,15 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
         serde_json::json!(format!("user:{bob_id}")),
         "{body}"
     );
+    // And the badge is his role here, not his fork: every repository is
+    // private to its organisation, so anybody who can open a change
+    // against it holds a role on it — a viewer is inside the tent. The
+    // first-time badge is for an author who no longer does, which
+    // `associations_say_how_to_weigh_each_voice` above pins.
     assert_eq!(
         body["author"],
-        serde_json::json!("first-time"),
-        "nothing of Bob's has landed here yet, which is the badge a \
-         reviewer most wants to see: {body}"
+        serde_json::json!("member"),
+        "a viewer who opened a change from a fork is a member: {body}"
     );
 
     // Bob reads his own change as himself. His ticks are his — Ada's
@@ -767,32 +775,42 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     assert_eq!(
         body["verdict"]["landable"],
         serde_json::json!(false),
-        "an outsider's approval must not make a change landable: {body}"
+        "a reader's approval must not make a change landable: {body}"
     );
 
-    // Somebody with no session at all is told to sign in, not that they
-    // are a machine.
+    // Somebody with no session at all is told to authenticate, not that
+    // they are a machine — and is told so at the repository's door,
+    // before anything about the change is looked up, so the answer is
+    // the same for a change that does not exist.
     let mut nobody = Browser::new(&server);
-    let (st, body) = nobody.req("GET", views, None);
-    assert_eq!(st, 401, "{body}");
-    assert_eq!(
-        body["error"],
-        serde_json::json!("sign in to mark files as viewed")
-    );
+    for path in [
+        views.to_string(),
+        "/v1/orgs/acme/repos/app/changes/I0000dead/views".to_string(),
+    ] {
+        let (st, body) = nobody.req("GET", &path, None);
+        assert_eq!(st, 401, "{path}: {body}");
+        assert!(
+            body.to_string().contains("authentication required"),
+            "{path}: {body}"
+        );
+    }
     let (st, body) = nobody.req(
         "POST",
         "/v1/orgs/acme/repos/app/changes/I0000f00d/approve",
         None,
     );
     assert_eq!(st, 401, "{body}");
-    assert_eq!(body["error"], serde_json::json!("sign in to approve"));
+    assert!(
+        body.to_string().contains("authentication required"),
+        "{body}"
+    );
 
     // The change is Bob's to withdraw. He holds no write access on Ada's
     // repository, and abandoning is otherwise a writer's action — but a
     // contributor who could open a change and never close it would be
     // left asking a maintainer to tidy up after them. A third person,
-    // equally a stranger to the repository, gets the writer's refusal:
-    // the change is not theirs, and the door does not say why.
+    // outside the organisation, gets the answer a missing repository
+    // gets: the change is not theirs, and the door does not say why.
     let abandon = "/v1/orgs/acme/repos/app/changes/I0000f00d/abandon";
     let mut cam = signup(&server, &mail, "cam", "cam@example.com");
     let (st, body) = cam.req("POST", abandon, None);

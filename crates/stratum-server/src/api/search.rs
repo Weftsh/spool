@@ -76,11 +76,18 @@ fn resolve_viewer(state: &SharedState, headers: &HeaderMap) -> Result<ViewerOwne
     // service token is refused rather than treated as its org: it was
     // minted to reach one repository, and a search is not that
     // repository.
+    //
+    // Any other token sees the organization it was minted in — a
+    // personal token included. A token is bound to one organization; it
+    // is a person's *session* that spans every organization they belong
+    // to. Reading a personal token as its person let a credential minted
+    // for one org's CI list the names and descriptions of every private
+    // repository in every other org its owner belongs to. The token is
+    // only valid while its owner is a member of that org, and every
+    // member reads every repository in it, so the org's view is exactly
+    // the person's view there.
     match (&principal, &user_from_session) {
-        (Some(p), _) if p.repo_id.is_none() => Ok(match p.user_id.as_deref() {
-            Some(u) => ViewerOwned::User(u.to_string()),
-            None => ViewerOwned::Org(p.org_id.clone()),
-        }),
+        (Some(p), _) if p.repo_id.is_none() => Ok(ViewerOwned::Org(p.org_id.clone())),
         (Some(_), _) => Err(authx::forbidden(
             "a token bound to one repository cannot search; use a personal or organization token",
         )),

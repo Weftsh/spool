@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: How serving works
-description: Why a node with an empty disk can serve your clone at NVMe speed.
----
-
 # How serving works
 
 Weft's nodes hold no repositories. Everything lives in S3-compatible

@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Org settings vs repo settings
-description: Two rings of authority — what belongs to the organization, what belongs to one repository, and exactly who can change each.
----
-
 # Org settings vs repo settings
 
 Weft has two rings of authority, and every setting lives in exactly
@@ -58,7 +52,7 @@ an org admin anywhere, or whoever a grant raised to admin right there.
 The last row is the point of the design: *who must approve what* is not
 a setting at all. It lives in `OWNERS` files inside the repository, so
 changing the rules takes a change, with a diff, through the same review
-it governs — see [Changes, OWNERS & landing](/docs/code-review/).
+it governs — see [Changes, OWNERS & landing](code-review.md).
 
 ## Where each ring lives in the dashboard
 

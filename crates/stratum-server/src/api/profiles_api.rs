@@ -352,6 +352,12 @@ pub async fn get_org_profile(
         Ok(o) => o,
         Err(r) => return r,
     };
+    org_profile_response(&state, &org)
+}
+
+/// An org's profile as both routes answer it, with no gate of its own:
+/// each caller has already decided who may see it.
+fn org_profile_response(state: &SharedState, org: &stratum_control::registry::Org) -> Response {
     let profile = match profiles::org_profile(&state.db, &org.id) {
         Ok(p) => p,
         Err(e) => return internal(e),
@@ -400,5 +406,11 @@ pub async fn patch_org_profile(
     if let Err(e) = profiles::set_org_profile(&state.db, &org.id, &patch) {
         return json_error(StatusCode::BAD_REQUEST, e);
     }
-    get_org_profile(State(state), Path(org_name), headers).await
+    // What was written, answered to the administrator who wrote it —
+    // not re-asked through the read route's gate. That gate wants a
+    // *person*, and an org's service token is the ordinary way to
+    // administer an org from a script: sending the write back through
+    // it committed the change and then answered 401, which tells the
+    // caller the write failed when it had not.
+    org_profile_response(&state, &org)
 }

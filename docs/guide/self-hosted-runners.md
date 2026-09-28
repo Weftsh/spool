@@ -1,12 +1,6 @@
----
-layout: ../../layouts/Docs.astro
-title: Running a self-hosted runner
-description: The operator's side of self-hosted runners — getting the binary, registering a machine, a systemd unit, what network access it needs, and how to isolate a process that runs other people's code.
----
-
 # Running a self-hosted runner
 
-[Workflows](/docs/workflows/#self-hosted-runners) describes self-hosted
+[Workflows](workflows.md#self-hosted-runners) describes self-hosted
 runners from the workflow author's side: `runs-on: [self-hosted]`,
 labels, groups, and the organisation policy that admits them. This page
 is the other side — you have a machine, and you want Weft to be able
@@ -243,12 +237,12 @@ And the setting that decides who gets to run code on it at all:
 > **Do not turn on "allow public repositories" for a group unless you
 > mean it.** Anybody can fork a public repository, and a fork's change
 > brings its own `.weft/*.yml`. The
-> [fork-approval gate](/docs/workflows/#changes-pushed-from-a-fork)
+> [fork-approval gate](workflows.md#changes-pushed-from-a-fork)
 > stands in front of it — a maintainer must approve each new tip — but
 > that is one human decision between a stranger and your machine, and a
 > group left closed is zero required decisions.
 
-The [mining watch](/docs/workflows/#what-is-refused-for-abuse) runs here
+The [mining watch](workflows.md#what-is-refused-for-abuse) runs here
 too: a step caught running a miner has its process group killed and the
 job fails. It is protecting *you* in this direction, not our bill, which
 is why it does not also suspend your organisation's hosted workflows the

@@ -792,9 +792,16 @@ fn ssh_host_key_stability_and_mirror_semantics() {
 }
 
 /// R8 over SSH: a VALID key that does not own a repo can never see it —
-/// cross-org probes, repo-bound tokens crossing repos, and public repos
-/// all answer with the same existence-masking words; revoking the BOUND
+/// cross-org probes and repo-bound tokens crossing repos all answer with
+/// the same existence-masking words, for reads and writes alike; a key
+/// that may read but not write is told so by name; revoking the BOUND
 /// TOKEN (not the key) cuts the key off at the next connection.
+///
+/// There are no public repositories, so every repository of acme's is
+/// what `secret` always was to rival: absent. The half that used to be
+/// "a public repository is served to any verified key, and a push to it
+/// is refused as a reader's" is now asked of a key that genuinely reads
+/// acme — one bound to a read-only acme token.
 #[test]
 fn ssh_cross_org_isolation_and_token_revocation() {
     let minio = Minio::shared();
@@ -807,10 +814,10 @@ fn ssh_cross_org_isolation_and_token_revocation() {
     let (rival_admin, rival_id) = server.bootstrap_org("rival");
     let known_hosts = scratch.path().join("known_hosts");
 
-    // acme: one private repo with content, one public repo, one sibling.
+    // acme: one repo with content, one empty, one sibling.
     for body in [
         serde_json::json!({ "name": "secret" }),
-        serde_json::json!({ "name": "open", "public": true }),
+        serde_json::json!({ "name": "open" }),
         serde_json::json!({ "name": "sibling" }),
     ] {
         let (status, r) = server.post("/v1/orgs/acme/repos", &acme_admin, body);
@@ -834,13 +841,11 @@ fn ssh_cross_org_isolation_and_token_revocation() {
     assert_eq!(status, 201);
     let ssh_rival = ssh_command(&rival_key, &known_hosts, "accept-new");
 
-    // Reads of another org's PRIVATE repos are masked, and so is a name
-    // the org does not have: the two must be indistinguishable. A public
-    // one is served — the rival's key is a verified identity, and an
-    // anonymous clone would be served anyway. Before forks this masked
-    // public repositories too, and a maintainer fetching a contributor's
-    // fork over SSH was told it did not exist.
-    for repo in ["secret", "nonexistent"] {
+    // Reads of another org's repositories are masked, and so is a name
+    // the org does not have: the three must be indistinguishable. Before
+    // there were only private repositories `open` was served here, to any
+    // verified key; now it is as absent to rival as `secret` is.
+    for repo in ["secret", "open", "nonexistent"] {
         let err = git_ssh_expect_err(
             scratch.path(),
             &ssh_rival,
@@ -864,47 +869,67 @@ fn ssh_cross_org_isolation_and_token_revocation() {
         assert!(!err.to_lowercase().contains("denied"), "{err}");
     }
 
-    let open_clone = scratch.path().join("open-as-rival");
+    // Writes are masked identically: push from a local repo straight at
+    // the foreign URL (no clone required to attempt it). Not "you can
+    // read": rival cannot, and that sentence would confirm the name.
+    let attack = scratch.path().join("attack");
+    gitcli::fixture_repo(&attack, 1);
+    for repo in ["secret", "open", "nonexistent"] {
+        let err = git_ssh_expect_err(
+            &attack,
+            &ssh_rival,
+            &["push", "-q", &server.ssh_url("acme", repo), "main"],
+        );
+        assert!(err.contains("repository not found"), "{repo}: {err}");
+        assert!(!err.contains("you can read"), "{repo}: {err}");
+    }
+
+    // A key that may read acme and not write it: bound to a read-only
+    // acme token. It clones, and its push is refused as what it is — a
+    // reader pushing — with the way forward, not with "not found".
+    let (status, reader) = server.post(
+        "/v1/orgs/acme/tokens",
+        &acme_admin,
+        serde_json::json!({ "scopes": ["repo:read"], "label": "reader" }),
+    );
+    assert_eq!(status, 201, "{reader}");
+    let (reader_key, reader_pub) = keygen(scratch.path(), "reader-key");
+    let (status, out) = server.post(
+        "/v1/orgs/acme/ssh-keys",
+        &acme_admin,
+        serde_json::json!({ "public_key": reader_pub, "token_id": reader["id"] }),
+    );
+    assert_eq!(status, 201, "{out}");
+    let ssh_reader = ssh_command(&reader_key, &known_hosts, "accept-new");
+    let read_clone = scratch.path().join("secret-as-reader");
     git_ssh(
         scratch.path(),
-        &ssh_rival,
+        &ssh_reader,
         &[
             "clone",
             "-q",
-            &server.ssh_url("acme", "open"),
-            open_clone.to_str().unwrap(),
+            &server.ssh_url("acme", "secret"),
+            read_clone.to_str().unwrap(),
         ],
     );
-
-    // Writes to a private repo are masked identically: push from a local
-    // repo straight at the foreign URL (no clone required to attempt it).
-    let attack = scratch.path().join("attack");
-    gitcli::fixture_repo(&attack, 1);
+    gitcli::fsck(&read_clone);
     let err = git_ssh_expect_err(
         &attack,
-        &ssh_rival,
-        &["push", "-q", &server.ssh_url("acme", "secret"), "main"],
-    );
-    assert!(err.contains("repository not found"), "{err}");
-    // …and a write to the public one is refused as what it is: a reader
-    // pushing. Nothing about existence is given away that the clone above
-    // had not already been handed.
-    let err = git_ssh_expect_err(
-        &attack,
-        &ssh_rival,
+        &ssh_reader,
         &["push", "-q", &server.ssh_url("acme", "open"), "main"],
     );
     assert!(
         err.contains("you can read acme/open but not push to it"),
         "{err}"
     );
+    // Nobody's push landed.
     let (status, branches) = server.get_json("/v1/orgs/acme/repos/open/branches", &acme_admin);
     assert_eq!(status, 200, "{branches}");
     assert!(
         branches["branches"]
             .as_array()
             .is_some_and(|b| b.is_empty()),
-        "the rival's push landed on acme/open: {branches}"
+        "a refused push landed on acme/open: {branches}"
     );
 
     // A repo-bound token's key stays inside its repo: mint a token bound
@@ -1150,13 +1175,13 @@ fn a_personal_ssh_key_follows_its_owners_role() {
 /// which did not — so disabling somebody left their laptop key cloning.
 ///
 /// The check then moved once more, from the role lookup to the key
-/// lookup. A key with no role in a namespace can now read that
-/// namespace's public repositories — that is how a maintainer fetches
-/// a contributor's fork over SSH — so "no role anywhere" stopped being
-/// the same thing as "reaches nothing", and a disabled account's key
-/// would have gone on cloning public repositories. Now the key is not
-/// a credential at all, exactly as the token is not: refused at
-/// authentication, before any repository is named.
+/// lookup, while a key with no role in a namespace could still read that
+/// namespace's public repositories — so "no role anywhere" was not the
+/// same thing as "reaches nothing". There are no public repositories
+/// now, but the property that move bought is the one worth keeping: the
+/// key is not a credential at all, exactly as the token is not —
+/// refused at authentication, before any repository is named, so a
+/// repository that exists and one that does not answer alike.
 #[test]
 fn a_disabled_account_reaches_nothing_it_used_to() {
     let minio = Minio::shared();
@@ -1181,12 +1206,12 @@ fn a_disabled_account_reaches_nothing_it_used_to() {
         }),
     );
     assert_eq!(status, 201);
-    // A public repository too: the one thing a key with no role may
-    // read, and so the one a disabled key must be seen not to.
+    // A second repository the account may read, never cloned before it
+    // is disabled: refused as a key, not as a clone that was open.
     let (status, _) = server.post(
         "/v1/orgs/acme/repos",
         &admin,
-        serde_json::json!({ "name": "open", "public": true }),
+        serde_json::json!({ "name": "open" }),
     );
     assert_eq!(status, 201);
     let (status, _) = server.post(
@@ -1250,25 +1275,26 @@ fn a_disabled_account_reaches_nothing_it_used_to() {
 
     // The key stops being a credential, so the connection is refused
     // before a repository is named — the same place the token is
-    // refused (401, below). It used to get as far as the namespace and
-    // be masked there as "not found", which was enough while a key with
-    // no role read nothing; it is not enough now that such a key reads
-    // public repositories.
+    // refused (401, below) — rather than getting as far as the namespace
+    // and being masked there as "not found".
     let err = git_ssh_expect_err(&work, &ssh, &["fetch", "-q", "origin"]);
     assert!(
         err.contains("Permission denied"),
         "a disabled account's ssh key still authenticated: {err}"
     );
     assert!(!err.contains("not found"), "{err}");
-    let err = git_ssh_expect_err(
-        scratch.path(),
-        &ssh,
-        &["ls-remote", &server.ssh_url("acme", "open")],
-    );
-    assert!(
-        err.contains("Permission denied"),
-        "a disabled account's ssh key still read a public repository: {err}"
-    );
+    for repo in ["open", "never-was"] {
+        let err = git_ssh_expect_err(
+            scratch.path(),
+            &ssh,
+            &["ls-remote", &server.ssh_url("acme", repo)],
+        );
+        assert!(
+            err.contains("Permission denied"),
+            "a disabled account's ssh key reached acme/{repo}: {err}"
+        );
+        assert!(!err.contains("not found"), "{err}");
+    }
     // 401: a token owned by a disabled account is an invalid credential,
     // refused before any resource is resolved.
     assert_eq!(

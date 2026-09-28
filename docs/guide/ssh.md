@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Git over SSH
-description: Clone and push over ssh:// with a registered key — no domain, no certificate.
----
-
 # Git over SSH
 
 Every repo is reachable over SSH as well as HTTPS:
@@ -125,7 +119,7 @@ generated-per-boot key.
   --strict` clean under the same test gate.
 - **CDN offload works over SSH too.** The advertised pack URL is HTTPS
   even when the negotiation rode SSH — see
-  [CDN-offloaded clones](/docs/cdn-offload/).
+  [CDN-offloaded clones](cdn-offload.md).
 
 ## Limits
 

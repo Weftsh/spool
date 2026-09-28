@@ -154,12 +154,7 @@ fn wait_for_mail_about(mailbox: &Mailbox, addr: &str, needle: &str) -> CapturedM
 
 /// A repository with a root OWNERS naming `owner`, trunk, and one open
 /// change on a feature branch. Returns the change key.
-fn repo_with_change(
-    ada: &mut Browser<'_>,
-    repo: &str,
-    owner: &str,
-    change_id: &str,
-) -> String {
+fn repo_with_change(ada: &mut Browser<'_>, repo: &str, owner: &str, change_id: &str) -> String {
     let (st, out) = ada.req(
         "POST",
         "/v1/orgs/acme/repos",
@@ -852,7 +847,7 @@ fn a_changeset_notification_this_build_cannot_read_fails_the_job_and_mails_no_gu
 /// somebody else's address.
 ///
 /// The differential is what makes this test mean something: Eve and Dee
-/// are both viewers an operator added to acme, they do exactly the same
+/// are both viewers of acme from somewhere else, they do exactly the same
 /// thing on the same change, and the only difference between them is
 /// that one of them proved her address.
 #[test]
@@ -871,8 +866,9 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
 
     // The unproved one: signed up, never clicked the link. This is an
     // ordinary state, not a contrived one — every account passes through
-    // it, and some stay there. An operator adding the account to an org
-    // proves nothing about its address, so it stays unproved.
+    // it, and some stay there. Accepting an invitation into acme makes
+    // her a reader and leaves the account's address as it was: only
+    // an account *created* by an invitation is proved by it.
     let (st, out) = server.req(
         "POST",
         "/v1/auth/signup",
@@ -885,9 +881,9 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
         })),
     );
     assert_eq!(st, 202, "signup: {out}");
-    member(&server, "acme", "dee@example.test", "Dee", "viewer");
 
     let mut ada = Browser::signed_in(&server, "ada@acme.test", PASSWORD);
+    ada.invite_and_accept("acme", "dee@example.test", "viewer");
     let mut eve = Browser::signed_in(&server, "eve@elsewhere.test", PASSWORD);
     let mut dee = Browser::signed_in(&server, "dee@example.test", PASSWORD);
     let (st, me) = dee.req("GET", "/v1/auth/me", None);

@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: "Search and discovery"
-description: Find a repository by name, namespace, description or topic — and what a stranger is allowed to find.
----
-
 # Search and discovery
 
 One endpoint answers both "find that repo of ours" and "what is public
@@ -157,7 +151,7 @@ curl -X PATCH https://api.weft.sh/v1/orgs/acme/repos/widget \
 Changing visibility needs **`org:admin`**, not `repo:write`: it is the
 one edit here with consequences outside the organization — it puts the
 code in front of anonymous search — and it is recorded in the
-[audit trail](/docs/audit-and-undo/) as `repo.visibility`, which is the
+[audit trail](audit-and-undo.md) as `repo.visibility`, which is the
 question asked after a leak.
 
 ## Absent and private answer the same

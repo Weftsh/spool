@@ -580,6 +580,9 @@ fn a_pasted_github_url_is_mirrored_as_owner_name() {
     );
     let admin = server.bootstrap_org("acme");
 
+    // A paste that still asks for a public mirror — a script written for
+    // the hosted edition — is refused in words before anything is made
+    // or fetched, rather than quietly given a private one.
     let (status, out) = server.post(
         "/v1/orgs/acme/mirrors",
         &admin,
@@ -588,6 +591,25 @@ fn a_pasted_github_url_is_mirrored_as_owner_name() {
             "provider": "github",
             "origin": "github.com/acme/pasted",
             "public": true,
+        }),
+    );
+    assert_eq!(status, 400, "{out}");
+    assert_eq!(
+        out["error"],
+        "this server has no public repositories: every repository is private to its \
+         organization — omit \"public\" or set it to false",
+        "{out}"
+    );
+    let (status, _) = server.get("/v1/orgs/acme/repos/pasted", &admin);
+    assert_eq!(status, 404, "a refused mirror left a repository behind");
+
+    let (status, out) = server.post(
+        "/v1/orgs/acme/mirrors",
+        &admin,
+        serde_json::json!({
+            "name": "pasted",
+            "provider": "github",
+            "origin": "github.com/acme/pasted",
         }),
     );
     assert_eq!(status, 202, "{out}");
@@ -2268,8 +2290,11 @@ fn a_push_under_an_installation_lacking_contents_write_is_refused_by_name() {
         .find(|i| i["installation_id"] == "4007")
         .expect("4007 is connected");
     assert_eq!(inst["detail"]["push_ready"], false, "{inst}");
-    assert_eq!(inst["detail"]["runners_ready"], true, "{inst}");
     assert_eq!(inst["detail"]["contents_write"], false, "{inst}");
+    // There are no GitHub-hosted runners to be ready for, so the detail
+    // does not carry a readiness flag for them: a `runners_ready: true`
+    // here would tell a dashboard a feature is set up that is not there.
+    assert!(inst["detail"].get("runners_ready").is_none(), "{inst}");
 
     // The same refusal over REST says which permission and where to
     // approve it, so a dashboard can offer the link.

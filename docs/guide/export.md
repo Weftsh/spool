@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Export & escape hatch
-description: Standard-format export of any repo, any time — org-wide if you want.
----
-
 # Export & the escape hatch
 
 No lock-in is a stated product principle, so leaving has first-class API

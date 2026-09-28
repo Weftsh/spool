@@ -840,22 +840,18 @@ fn page_json(
 /// So every repository is put through the *same* `rest_repo_auth` the
 /// per-repo route uses, and a repository that answers anything but Ok is
 /// simply not in the page. That makes this list agree with the per-repo
-/// list by construction — public repos readable anonymously, private
-/// ones needing a credential, a per-repo grant lowering someone the way
-/// it does everywhere else — rather than by a second opinion about
+/// list by construction — a per-repo grant lowering someone the way it
+/// does everywhere else — rather than by a second opinion about
 /// visibility written in SQL, which is how the two would drift apart.
 ///
-/// A token belonging to another organization is put through the same
-/// per-repository gate and comes out reading what anyone does: the public
-/// repositories' changes, anonymously. This used to refuse it outright
-/// with a masked 404, on the theory that an empty page would confirm the
-/// org exists — but the anonymous page already lists every public change
-/// to anybody, so the refusal hid nothing and broke the promise
-/// authentication.md makes for the REST API, that a public repository
-/// reads with **any** valid credential. `GET …/changesets` kept the
-/// promise all along; the two org-wide lists now agree. A credential that
-/// does not resolve at all is still a 401, never a 404: that caller has to
-/// be told their token is the problem.
+/// Every repository is private to its organization, so a caller whose
+/// credential does not authenticate — none at all, or one that does not
+/// resolve — may read none of them, and is told to sign in (401) rather
+/// than handed an empty page: the per-repo list answers each repository
+/// that way, and an empty 200 here would be the one door in the org a
+/// signed-out caller could open. A token belonging to another
+/// organization is put through the per-repository gate and comes out
+/// reading nothing, which is the page `GET …/changesets` gives it too.
 pub async fn list_in_org(
     State(state): State<SharedState>,
     Path(org_name): Path<String>,
@@ -866,6 +862,9 @@ pub async fn list_in_org(
         Ok(o) => o,
         Err(r) => return r,
     };
+    if let Err(r) = crate::authx::require_authenticated(&state.db, &headers) {
+        return r;
+    }
     // Who is asking, for the two `?q=` terms that are about a person —
     // and **only** for those. Every authority question below still goes
     // through `rest_repo_auth` per repository with the raw headers, so

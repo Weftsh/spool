@@ -421,7 +421,8 @@ fn v2_gate_still_enforced() {
         assert_eq!(advert("app", "", v2), 401, "anonymous, v2={v2}");
         assert_eq!(advert("ghost", "", v2), 401, "anonymous absent, v2={v2}");
     }
-    assert!(server.healthy());
+    let health = ureq::get(&format!("{}/healthz", server.base)).call();
+    assert!(health.is_ok(), "the server stopped serving: {health:?}");
 }
 
 /// Push a branch, delete it, push it again. Ordinary, and it was refused.

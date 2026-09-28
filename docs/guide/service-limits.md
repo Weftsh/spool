@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Service limits
-description: Every v1 limit Weft enforces — push size, concurrent pushers, batch and listing sizes, operations per commit, shallow and partial clones, CDN offload, the free plan — stated up front rather than discovered in an error.
----
-
 # Service limits
 
 These are the v1 limits, stated plainly. Each traces to a measured or

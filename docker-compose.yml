@@ -66,6 +66,10 @@ services:
       # Mail. `null` drops it (the dashboard says so where it matters);
       # see docs/operations.md, "Mail", for smtp and ses.
       STRATUM_MAIL_TRANSPORT: ${SPOOL_MAIL_TRANSPORT:-null}
+      # Where self-hosted runners fetch a job's repository from. Empty
+      # means STRATUM_PUBLIC_URL; set it when runners reach this machine
+      # at another address.
+      STRATUM_RUNNER_URL: ${SPOOL_RUNNER_URL:-}
     # The image's entrypoint is tini + the binary; this reads the host key
     # file into the variable the server expects ($$ keeps the
     # substitution away from compose).

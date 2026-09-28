@@ -502,6 +502,14 @@ resource "aws_ecs_service" "app" {
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
 
+  # A revision whose tasks never become healthy — an image that does not
+  # start, a migration that fails — is rolled back to the last good one
+  # instead of being retried forever.
+  deployment_circuit_breaker {
+    enable   = true
+    rollback = true
+  }
+
   network_configuration {
     subnets          = var.private_subnets
     security_groups  = [aws_security_group.app.id]
@@ -522,9 +530,10 @@ resource "aws_ecs_service" "app" {
 
   health_check_grace_period_seconds = 60
 
-  # Deploys register task-definition revisions outside terraform (see
-  # docs/deployment-aws.md) and autoscaling owns the count; terraform
-  # must not fight either.
+  # Deploys register task-definition revisions outside terraform
+  # (deploy/roll.sh; docs/deployment-aws.md) and autoscaling owns the
+  # count; terraform must not fight either. `image_tag` is therefore only
+  # the version the service is created with.
   lifecycle {
     ignore_changes = [task_definition, desired_count]
   }

@@ -1,15 +1,9 @@
----
-layout: ../../layouts/Docs.astro
-title: Changesets across repositories
-description: One review unit made of changes in several repositories — composed, ordered, and landed together, all or nothing.
----
-
 # Changesets across repositories
 
 A **changeset** is one review unit made of changes that live in
 different repositories of the same organization: the API that grows a
 field, the web app that reads it, the CLI that prints it. Each of those
-is still an ordinary [change](/docs/code-review/) in its own repository,
+is still an ordinary [change](code-review.md) in its own repository,
 with its own patchsets and its own approvals. The changeset is the thing
 that says *these belong together*, in what order they land, and — once
 one is a member — that none of them lands or is abandoned on its own.
@@ -156,7 +150,7 @@ Authority is per member, and comes from the repositories:
   answers `402` with the sentence that says what to do.
 
 Every composition, membership change, edge change and abandonment is in
-the org's [audit trail](/docs/audit-and-undo/) as `changeset.create`,
+the org's [audit trail](audit-and-undo.md) as `changeset.create`,
 `changeset.member.add`, `changeset.member.remove`, `changeset.edges` and
 `changeset.abandon`.
 
@@ -316,9 +310,9 @@ and because a member is still a change in its own repository, that
 answer is composed from the answers each member already has. Nothing is
 re-decided here: every member's `verdict` is exactly what
 `GET …/changes/{change}/verdict` gives for it — the
-[OWNERS](/docs/code-review/) sufficiency at its latest patchset — and
+[OWNERS](code-review.md) sufficiency at its latest patchset — and
 its `gate` is exactly what the change's own Land button consults, the
-[required checks](/docs/ci-integration/#making-a-check-required) on its target branch.
+[required checks](ci-integration.md#making-a-check-required) on its target branch.
 
 ```json
 {
@@ -625,7 +619,7 @@ whether the API and the web app still agree, because it never has both.
 A **composed run** does: one run, per member repository, with every
 member checked out at the head the changeset proposes for it.
 
-Declare it in the repository's [workflow file](/docs/workflows/), by
+Declare it in the repository's [workflow file](workflows.md), by
 adding `changeset` to `on:`:
 
 ```yaml
@@ -645,7 +639,7 @@ Steps start in the job's own repository; the siblings are beside it under
 each. Each sibling is fetched with a read token minted for that one
 repository, so a composed script cannot read organization repositories
 the change's author cannot. The details are in
-[Composed runs for a changeset](/docs/workflows/#composed-runs-for-a-changeset).
+[Composed runs for a changeset](workflows.md#composed-runs-for-a-changeset).
 
 Only repositories whose `.weft/` asks for `changeset` get a run; a
 changeset of four repositories where one declares a composed workflow has
@@ -695,7 +689,7 @@ lead to the run page, where the log tails live; `detail_url` is absolute,
 under the deployment's public URL. The run page names the changeset and
 the composition it was started for and links back here — a composed run
 is not listed on the member repository's Checks tab (see [where
-verdicts land](/docs/workflows/#composed-runs-for-a-changeset)), so
+verdicts land](workflows.md#composed-runs-for-a-changeset)), so
 the changeset is where its runs are found.
 
 ### What it does to the gate

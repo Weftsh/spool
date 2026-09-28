@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Authentication
-description: People, tokens, scopes, and how auth works on REST and the git wire.
----
-
 # Authentication
 
 There are two kinds of caller, and the difference decides everything else.
@@ -378,7 +372,7 @@ can never learn what exists in another.
 Repos created with `"public": true` allow anonymous reads, and reads with
 **any** valid credential: a token minted in your own namespace clones and
 fetches a public repository in somebody else's, which is how a
-[fork](/docs/forks/) is kept current with its upstream. The REST API keeps
+[fork](forks.md) is kept current with its upstream. The REST API keeps
 the same promise, and a *person* reads as themselves: a browser session or
 personal token with no role in the org still holds `repo:read` on a public
 repository, so what they do there — open a change from their fork, comment

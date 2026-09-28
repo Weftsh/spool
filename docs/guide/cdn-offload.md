@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: CDN-offloaded clones
-description: Opt in with one git config and pull the bulk of a clone from the edge.
----
-
 # CDN-offloaded clones
 
 A clone normally streams every byte through a Weft node. With offload,
@@ -41,7 +35,7 @@ it. A CI fleet cloning the same repo all day fetches it from the nearest
 edge location rather than assembling it at origin every time.
 
 Offloaded clones are metered separately as `cdn_clone`, so you can see the
-split on the [metrics endpoint](/docs/metrics/).
+split on the [metrics endpoint](metrics.md).
 
 ## When it engages
 
@@ -85,4 +79,4 @@ marked cacheable so it can be shared at the edge.
 
 Offload is a property of the git protocol, not of HTTP, so an SSH clone
 offloads exactly the same way — the negotiation rides SSH and the
-advertised pack URL is HTTPS. See [Git over SSH](/docs/ssh/).
+advertised pack URL is HTTPS. See [Git over SSH](ssh.md).

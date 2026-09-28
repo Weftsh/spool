@@ -1,8 +1,8 @@
-//! The contribution path: a stranger proposes code to a project they
+//! The contribution path: somebody proposes code to a project they
 //! cannot push to.
 //!
-//! Until this existed, a project hosted here could be **read** by
-//! anybody and **contributed to** by nobody outside its org.
+//! Until this existed, a project hosted here could be **read** by people
+//! who could not push to it and **contributed to** by none of them.
 //! `changes_api::create` required `repo:write`, so the only people who
 //! could open a change were the people who could already push — which
 //! is everybody who does not need a review tool and nobody who does.
@@ -13,11 +13,16 @@
 //! DaZuiZui:codex/fix-worker-manifest"*. The contributor never had write
 //! access to `vitejs/vite`. That sentence is what this file makes true.
 //!
+//! Every repository is private to its organization, so the contributor
+//! is **bob, a viewer of `acme`**: he may read `acme/widget`, fork it into
+//! his own namespace, and propose from there, and he may not push to it.
 //! The awkward case is the only one worth testing, for the same reason
 //! `forks_e2e` insists on it: a test where the repository's own owner
 //! opens the change passes against a guard that would refuse every real
-//! contributor.
+//! contributor. And because that contributor's `run:` lines are about to
+//! meet somebody's machine, the last test here is the fork gate.
 
+use std::time::{Duration, Instant};
 use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::{self, Scratch};
 use stratum_testkit::mailbox::Mailbox;
@@ -31,7 +36,12 @@ fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Serv
         .data_dir(scratch.path().join("data"))
         // The contribution walker, so a landed change can be followed
         // all the way to the credit it is supposed to produce.
-        .env("STRATUM_CONTRIB_POLL_SECS", "1");
+        .env("STRATUM_CONTRIB_POLL_SECS", "1")
+        .env("STRATUM_FORK_POLL_SECS", "1")
+        // A runner's claim is a long poll; shortened so "nothing for
+        // you" is a fast 204 rather than twenty seconds of test.
+        .env("STRATUM_RUNNER_POLL_SECS", "1")
+        .env("STRATUM_RUNNER_CLAIM_WAIT_MS", "700");
     for (k, v) in mail.env() {
         b = b.env(k, v);
     }
@@ -88,22 +98,55 @@ fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> 
     b
 }
 
-fn public_repo(owner: &mut Browser, handle: &str, name: &str) {
+/// An organization owned by the person signed in to `owner`.
+fn create_org(owner: &mut Browser, name: &str) {
     let (st, body) = owner.req(
         "POST",
-        &format!("/v1/orgs/{handle}/repos"),
-        Some(serde_json::json!({ "name": name, "public": true })),
+        "/v1/orgs",
+        Some(serde_json::json!({ "name": name })),
+    );
+    assert_eq!(st, 201, "create org {name}: {body}");
+}
+
+/// A repository in `org` with one commit in it.
+fn seeded_repo(owner: &mut Browser, org: &str, name: &str) {
+    let (st, body) = owner.req(
+        "POST",
+        &format!("/v1/orgs/{org}/repos"),
+        Some(serde_json::json!({ "name": name })),
     );
     assert_eq!(st, 201, "{body}");
     let (st, body) = owner.req(
         "POST",
-        &format!("/v1/orgs/{handle}/repos/{name}/commits"),
+        &format!("/v1/orgs/{org}/repos/{name}/commits"),
         Some(serde_json::json!({
             "message": "first commit",
             "operations": [{ "op": "put", "path": "README.md", "content": "# seed\n" }],
         })),
     );
     assert_eq!(st, 201, "{body}");
+}
+
+/// ada, who owns `acme` and its seeded `widget`, and bob, a *viewer* of
+/// acme: he may read `widget` and may not push to it.
+fn acme_with_a_viewer<'a>(server: &'a Server, mail: &Mailbox) -> (Browser<'a>, Browser<'a>) {
+    let mut ada = signup(server, mail, "ada", "ada@example.com");
+    create_org(&mut ada, "acme");
+    seeded_repo(&mut ada, "acme", "widget");
+    let bob = signup(server, mail, "bob", "bob@example.com");
+    ada.invite_and_accept("acme", "bob@example.com", "viewer");
+    (ada, bob)
+}
+
+/// A token minted by `browser` in `org`.
+fn mint(browser: &mut Browser, org: &str, scopes: &[&str]) -> String {
+    let (st, minted) = browser.req(
+        "POST",
+        &format!("/v1/orgs/{org}/tokens"),
+        Some(serde_json::json!({ "scopes": scopes, "label": "laptop" })),
+    );
+    assert_eq!(st, 201, "mint in {org}: {minted}");
+    minted["token"].as_str().expect("token").to_string()
 }
 
 fn await_fork(browser: &mut Browser, path: &str) -> String {
@@ -118,49 +161,94 @@ fn await_fork(browser: &mut Browser, path: &str) -> String {
     panic!("fork never left pending");
 }
 
+/// bob forks `acme/widget`, branches off its trunk and commits there —
+/// on a branch, because a commit on a *new* branch with no base is a
+/// root commit, and a root commit is correctly not a fast-forward of
+/// anything. Returns the contributed commit.
+fn contribute(bob: &mut Browser, files: &[(&str, &str)]) -> String {
+    let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
+    assert_eq!(st, 202, "{body}");
+    assert_eq!(await_fork(bob, "/v1/orgs/bob/repos/widget"), "ready");
+    let (st, body) = bob.req(
+        "POST",
+        "/v1/orgs/bob/repos/widget/branches",
+        Some(serde_json::json!({ "name": "fix-empty-config", "from": "main" })),
+    );
+    assert!(
+        st == 200 || st == 201,
+        "branch from the fork's trunk: {body}"
+    );
+    let ops: Vec<serde_json::Value> = files
+        .iter()
+        .map(|(p, c)| serde_json::json!({ "op": "put", "path": p, "content": c }))
+        .collect();
+    let (st, pushed) = bob.req(
+        "POST",
+        "/v1/orgs/bob/repos/widget/commits",
+        Some(serde_json::json!({
+            "message": "fix: default an empty config",
+            "branch": "fix-empty-config",
+            "operations": ops,
+        })),
+    );
+    assert_eq!(st, 201, "{pushed}");
+    pushed["commit"].as_str().expect("commit").to_string()
+}
+
+/// Was `an_outsider_forks_pushes_and_opens_a_change_against_a_repo_they_cannot_write`.
+/// There is no outsider who may read a repository any more; the least
+/// authority that can is a viewer, and that is who contributes here.
+/// The outsider survives as the negative: somebody with no role in acme
+/// cannot learn the repository is there, let alone propose to it.
 #[test]
-fn an_outsider_forks_pushes_and_opens_a_change_against_a_repo_they_cannot_write() {
+fn a_reader_forks_pushes_and_opens_a_change_against_a_repo_they_cannot_write() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-open");
     let scratch = Scratch::new("forkpr-open");
     let mail = Mailbox::temp("forkpr-open");
     let server = spawn(&bucket.base_url, &scratch, "forkpr_open", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
-    public_repo(&mut ada, "ada", "widget");
+    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
 
-    // Bob has no membership in `ada` and no grant on the repository.
-    // He may read it because it is public, and that is all.
-    let (st, _) = bob.req("GET", "/v1/orgs/ada/repos/widget", None);
-    assert_eq!(st, 200, "a public repository must be readable by anybody");
+    // Bob holds a viewer's role in acme and no grant on the repository.
+    // He may read it, and that is all — the server says so itself.
+    let (st, view) = bob.req("GET", "/v1/orgs/acme/repos/widget", None);
+    assert_eq!(st, 200, "a viewer could not read the repository: {view}");
+    assert_eq!(view["viewer_member"], true, "{view}");
+    assert_eq!(view["viewer_write"], false, "{view}");
 
-    let (st, body) = bob.req("POST", "/v1/orgs/ada/repos/widget/forks", None);
-    assert_eq!(st, 202, "{body}");
-    assert_eq!(await_fork(&mut bob, "/v1/orgs/bob/repos/widget"), "ready");
+    // Somebody with no role in acme is told nothing: the repository, its
+    // forks and its changes answer as a missing name does, and a caller
+    // who is not signed in is told to sign in.
+    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    for path in [
+        "/v1/orgs/acme/repos/widget",
+        "/v1/orgs/acme/repos/widget/forks",
+        "/v1/orgs/acme/repos/widget/changes",
+    ] {
+        let (st, _) = carl.req("GET", path, None);
+        assert_eq!(st, 404, "a non-member reached {path}");
+        let (st, _) = server.req("GET", path, "", None);
+        assert_eq!(st, 401, "an anonymous caller reached {path}");
+    }
+    let (st, _) = carl.req(
+        "POST",
+        "/v1/orgs/acme/repos/widget/changes",
+        Some(serde_json::json!({ "from": "main", "source": "carl/widget" })),
+    );
+    assert_eq!(st, 404, "a non-member proposed a change");
 
     // He writes to the repository he owns — an ordinary authorised push
     // to his own fork. Nothing about push authorisation changes here,
     // and that is the point: the contribution never touches upstream's
     // write path.
-    let (st, body) = bob.req(
-        "POST",
-        "/v1/orgs/bob/repos/widget/commits",
-        Some(serde_json::json!({
-            "message": "fix: handle an empty config\n\nIt panicked instead of defaulting.",
-            "branch": "fix-empty-config",
-            "operations": [
-                { "op": "put", "path": "src/config.rs", "content": "// defaults\n" }
-            ],
-        })),
-    );
-    assert_eq!(st, 201, "push to own fork: {body}");
+    contribute(&mut bob, &[("src/config.rs", "// defaults\n")]);
 
     // And proposes it upstream. This is the request that used to be
     // impossible.
     let (st, opened) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({
             "from": "fix-empty-config",
             "source": "bob/widget",
@@ -168,18 +256,18 @@ fn an_outsider_forks_pushes_and_opens_a_change_against_a_repo_they_cannot_write(
     );
     assert_eq!(
         st, 201,
-        "an outsider could not open a change from their own fork — this is \
+        "a reader could not open a change from their own fork — this is \
          the contribution path, not an edge case: {opened}"
     );
     assert_eq!(opened["change"]["state"], "open", "{opened}");
 
     // Upstream sees it, and sees where it came from. GitHub prints this
-    // as "bob wants to merge 1 commit into ada:main from bob:…"; the
+    // as "bob wants to merge 1 commit into acme:main from bob:…"; the
     // fields that sentence is built from have to be on the wire.
-    let (st, listed) = ada.req("GET", "/v1/orgs/ada/repos/widget/changes", None);
+    let (st, listed) = ada.req("GET", "/v1/orgs/acme/repos/widget/changes", None);
     assert_eq!(st, 200, "{listed}");
     let first = &listed["changes"][0];
-    assert_eq!(first["title"], "fix: handle an empty config", "{listed}");
+    assert_eq!(first["title"], "fix: default an empty config", "{listed}");
     assert_eq!(
         first["source"], "bob/widget",
         "a change from a fork must say which fork: {listed}"
@@ -192,59 +280,38 @@ fn an_outsider_forks_pushes_and_opens_a_change_against_a_repo_they_cannot_write(
 /// The same contribution path over the git wire, with the contributor's
 /// own credential in the URL — which is how every real clone arrives.
 ///
-/// Found by driving the app end to end: a stranger's token on a public
-/// upstream got `fatal: repository … not found` from `git clone`, while
-/// an anonymous clone of the same URL succeeded. The wire seam masked
-/// every cross-org repository as absent, public or not — R8 written for
-/// a world with no forks, where nobody outside an org had a reason to
-/// hold a token and fetch from it. With forks, the two people who
-/// most need that fetch are the forker keeping their fork current and
-/// the maintainer fetching a contributor's branch to try it locally,
-/// and both were told the repository did not exist.
-///
-/// A push by someone who may only read got the same "not found". The
-/// REST seam already answers a public repository to anybody, so masking
-/// the wire protected nothing; it just sent a would-be contributor
-/// looking for a typo. Now: a verified principal reads any public
-/// repository over HTTP and SSH; a push by somebody who can read but not
-/// write is refused with the reason and the way forward; a private
-/// repository they cannot read stays absent, in both directions.
+/// Was `a_forker_reads_upstream_with_their_own_token_…`, whose "own
+/// token" lived in the forker's namespace and read a public upstream.
+/// A token is bound to one organization now, so the credential that
+/// reads acme is one bob minted in acme — his viewer's role, and not a
+/// byte more. The rest stands: a push by somebody who can read but not
+/// write is refused with the reason and the way forward, not with "not
+/// found", because the repository is not hidden from *him*. And the
+/// token from bob's own namespace, the one in his fork's remote, is a
+/// credential for another organization — so acme's repository is absent
+/// to it, in both directions, exactly as a repository in an org bob has
+/// no role in is absent to his acme token.
 #[test]
-fn a_forker_reads_upstream_with_their_own_token_and_is_told_to_fork_on_push() {
+fn a_forker_reads_upstream_with_a_token_from_its_org_and_is_told_to_fork_on_push() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-wire");
     let scratch = Scratch::new("forkpr-wire");
     let mail = Mailbox::temp("forkpr-wire");
     let server = spawn(&bucket.base_url, &scratch, "forkpr_wire", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
-    public_repo(&mut ada, "ada", "widget");
-    let (st, body) = ada.req(
-        "POST",
-        "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "vault" })),
-    );
-    assert_eq!(st, 201, "{body}");
+    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    // An organization bob has no role in, with a repository in it.
+    create_org(&mut ada, "globex");
+    seeded_repo(&mut ada, "globex", "vault");
 
-    // Bob's credential lives in *his* namespace. It says nothing about
-    // `ada`, and that is exactly the token a forker has in their remote.
-    let (st, minted) = bob.req(
-        "POST",
-        "/v1/orgs/bob/tokens",
-        Some(serde_json::json!({ "scopes": ["repo:read", "repo:write"], "label": "laptop" })),
-    );
-    assert_eq!(st, 201, "{minted}");
-    let bob_tok = minted["token"].as_str().expect("token").to_string();
+    let acme_tok = mint(&mut bob, "acme", &["repo:read"]);
+    let bob_tok = mint(&mut bob, "bob", &["repo:read", "repo:write"]);
 
     // Read: the clone works *with* the credential, and fscks clean.
     let work = Scratch::new("forkpr-wire-clone");
     let dir = work.path().join("widget");
-    let head = gitcli::clone_and_fsck(&server.authed_url(&bob_tok, "ada", "widget"), &dir);
-    assert!(
-        !head.is_empty(),
-        "clone of a public upstream with a foreign token"
-    );
+    let head = gitcli::clone_and_fsck(&server.authed_url(&acme_tok, "acme", "widget"), &dir);
+    assert!(!head.is_empty(), "clone of upstream with a viewer's token");
 
     // Push: refused with a sentence, not with a 404. The advert is where
     // git first hears it, so the refusal travels in-band and git prints
@@ -255,8 +322,8 @@ fn a_forker_reads_upstream_with_their_own_token_and_is_told_to_fork_on_push() {
     let err = gitcli::git_expect_err(&dir, &["push", "-q", "origin", "HEAD:main"])
         .expect("a reader's push to upstream must be refused");
     assert!(
-        err.contains("you can read ada/widget but not push to it"),
-        "a reader pushing to a public upstream must be told why and what to do, \
+        err.contains("you can read acme/widget but not push to it"),
+        "a reader pushing upstream must be told why and what to do, \
          not that the repository is missing:\n{err}"
     );
     assert!(err.contains("fork it"), "{err}");
@@ -264,54 +331,65 @@ fn a_forker_reads_upstream_with_their_own_token_and_is_told_to_fork_on_push() {
 
     // A client that skips the advert and posts the RPC directly meets a
     // 403 with the same sentence — the door is refused, not hidden.
-    let resp = ureq::post(&format!("{}/ada/widget/git-receive-pack", server.base))
-        .set("Authorization", &format!("Bearer {bob_tok}"))
+    let resp = ureq::post(&format!("{}/acme/widget/git-receive-pack", server.base))
+        .set("Authorization", &format!("Bearer {acme_tok}"))
         .set("Content-Type", "application/x-git-receive-pack-request")
         .send_bytes(b"0000");
     match resp {
         Err(ureq::Error::Status(403, r)) => {
             let t = r.into_string().unwrap();
             assert!(
-                t.contains("you can read ada/widget but not push to it"),
+                t.contains("you can read acme/widget but not push to it"),
                 "{t}"
             );
         }
         other => panic!("a reader's raw receive-pack RPC: {other:?}"),
     }
 
-    // Private stays private: Bob cannot read `vault`, so both doors say
-    // it does not exist — the read and the write answer alike, or the
-    // write door would confirm the name.
-    for service in ["git-upload-pack", "git-receive-pack"] {
-        let st = server.status_get(
-            &format!("/ada/vault.git/info/refs?service={service}"),
-            Some(&bob_tok),
-        );
-        assert_eq!(
-            st, 404,
-            "{service} advert on a private repo for an outsider"
+    // A credential for another organization reads nothing here, and is
+    // told so in the words a missing name gets: bob's acme token against
+    // globex, and bob's own-namespace token against acme. The read and
+    // the write door answer alike, or the write door would confirm the
+    // name.
+    for (tok, org, repo) in [
+        (&acme_tok, "globex", "vault"),
+        (&acme_tok, "globex", "nothing-here"),
+        (&bob_tok, "acme", "widget"),
+    ] {
+        for service in ["git-upload-pack", "git-receive-pack"] {
+            let st = server.status_get(
+                &format!("/{org}/{repo}.git/info/refs?service={service}"),
+                Some(tok),
+            );
+            assert_eq!(
+                st, 404,
+                "{service} advert on {org}/{repo} for another org's token"
+            );
+        }
+        let err = gitcli::git_expect_err(
+            work.path(),
+            &["clone", "-q", &server.authed_url(tok, org, repo), "absent"],
+        )
+        .expect("another org's token must not clone");
+        assert!(err.contains("not found"), "{err}");
+        assert!(
+            !err.contains("you can read"),
+            "a repository admitted it exists to another org's token: {err}"
         );
     }
-    let err = gitcli::git_expect_err(
-        work.path(),
-        &[
-            "clone",
-            "-q",
-            &server.authed_url(&bob_tok, "ada", "vault"),
-            "vault",
-        ],
-    )
-    .expect("a private repository must not clone for an outsider");
-    assert!(err.contains("not found"), "{err}");
-    assert!(
-        !err.contains("you can read"),
-        "a private repo must not admit it exists: {err}"
-    );
+    // Nobody at all is asked for credentials, whatever the name.
+    for repo in ["widget", "nothing-here"] {
+        let st = server.status_get(
+            &format!("/acme/{repo}.git/info/refs?service=git-upload-pack"),
+            None,
+        );
+        assert_eq!(st, 401, "anonymous advert on acme/{repo}");
+    }
 
     // Upstream is untouched by any of it: trunk is still the seed commit
     // the clone started from, not the commit Bob tried to push.
     let tried = gitcli::git(&dir, &["rev-parse", "HEAD"]).trim().to_string();
-    let (st, branches) = ada.req("GET", "/v1/orgs/ada/repos/widget/branches", None);
+    let (st, branches) = ada.req("GET", "/v1/orgs/acme/repos/widget/branches", None);
     assert_eq!(st, 200, "{branches}");
     let main = branches["branches"]
         .as_array()
@@ -338,13 +416,11 @@ fn proposing_from_the_target_itself_still_needs_write_access() {
     let mail = Mailbox::temp("forkpr-nosource");
     let server = spawn(&bucket.base_url, &scratch, "forkpr_nosource", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
-    public_repo(&mut ada, "ada", "widget");
+    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
 
     let (st, refused) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({ "from": "main" })),
     );
     assert_eq!(
@@ -359,10 +435,26 @@ fn proposing_from_the_target_itself_still_needs_write_access() {
         "the refusal did not tell a contributor what to do instead: {message}"
     );
 
+    // A person with no role at all gets no sentence: the repository is
+    // not there for them, as a missing one is not.
+    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let (st, _) = carl.req(
+        "POST",
+        "/v1/orgs/acme/repos/widget/changes",
+        Some(serde_json::json!({ "from": "main" })),
+    );
+    let (absent, _) = carl.req(
+        "POST",
+        "/v1/orgs/acme/repos/no-such/changes",
+        Some(serde_json::json!({ "from": "main" })),
+    );
+    assert_eq!(st, 404, "a non-member was told the repository exists");
+    assert_eq!(absent, st);
+
     // The owner is unaffected — the enterprise flow does not change.
     let (st, ok) = ada.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({ "from": "main" })),
     );
     assert!(st == 200 || st == 201, "the owner's own flow broke: {ok}");
@@ -383,15 +475,13 @@ fn a_source_must_be_a_readable_fork_of_this_repository() {
     let mail = Mailbox::temp("forkpr-source");
     let server = spawn(&bucket.base_url, &scratch, "forkpr_source", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
-    public_repo(&mut ada, "ada", "widget");
-    public_repo(&mut ada, "ada", "other");
+    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    seeded_repo(&mut ada, "acme", "other");
 
     // A bare name, which is ambiguous between a repo and a namespace.
     let (st, refused) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({ "from": "main", "source": "widget" })),
     );
     assert_eq!(st, 400, "{refused}");
@@ -400,8 +490,8 @@ fn a_source_must_be_a_readable_fork_of_this_repository() {
     // one.
     let (st, refused) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
-        Some(serde_json::json!({ "from": "main", "source": "ada/other" })),
+        "/v1/orgs/acme/repos/widget/changes",
+        Some(serde_json::json!({ "from": "main", "source": "acme/other" })),
     );
     assert_eq!(
         st, 400,
@@ -415,26 +505,39 @@ fn a_source_must_be_a_readable_fork_of_this_repository() {
         "{refused}"
     );
 
-    // A private repository the caller cannot read is **masked**, not
-    // refused with a reason — 404 and never 403, because a 403 would
-    // confirm it exists.
-    let (st, body) = ada.req(
-        "POST",
-        "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "secret", "public": false })),
-    );
-    assert_eq!(st, 201, "{body}");
-    let (st, masked) = bob.req(
-        "POST",
-        "/v1/orgs/ada/repos/widget/changes",
-        Some(serde_json::json!({ "from": "main", "source": "ada/secret" })),
-    );
-    assert_eq!(
-        st, 404,
-        "naming a private repository as a source told the caller it exists: {masked}"
-    );
+    // A repository the caller cannot read is **masked**, not refused
+    // with a reason — 404 and never 403, because a 403 would confirm it
+    // exists. carl's own repository is one bob has no role anywhere near,
+    // and it answers exactly as a name nobody took.
+    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    seeded_repo(&mut carl, "carl", "secret");
+    for source in ["carl/secret", "carl/no-such"] {
+        let (st, masked) = bob.req(
+            "POST",
+            "/v1/orgs/acme/repos/widget/changes",
+            Some(serde_json::json!({ "from": "main", "source": source })),
+        );
+        assert_eq!(
+            st, 404,
+            "naming {source} as a source told the caller something: {masked}"
+        );
+    }
 
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
+}
+
+/// Poll the change until the lander has finished with it.
+fn await_landed(ada: &mut Browser, key: &str) -> serde_json::Value {
+    let path = format!("/v1/orgs/acme/repos/widget/changes/{key}");
+    for _ in 0..200 {
+        let (st, out) = ada.req("GET", &path, None);
+        assert_eq!(st, 200, "{out}");
+        if out["change"]["state"] != serde_json::json!("landing") {
+            return out;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(200));
+    }
+    panic!("the change never left landing");
 }
 
 /// A change from a fork lands, and the repository it landed into is
@@ -456,44 +559,12 @@ fn a_change_from_a_fork_lands_and_the_clone_is_still_sound() {
     let mail = Mailbox::temp("forkpr-land");
     let server = spawn(&bucket.base_url, &scratch, "forkpr_land", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
-    public_repo(&mut ada, "ada", "widget");
-
-    let (st, body) = bob.req("POST", "/v1/orgs/ada/repos/widget/forks", None);
-    assert_eq!(st, 202, "{body}");
-    assert_eq!(await_fork(&mut bob, "/v1/orgs/bob/repos/widget"), "ready");
-
-    // Branch from the fork's trunk first. A commit on a *new* branch
-    // with no base is a root commit, and a root commit is correctly not
-    // a fast-forward of anything — which is a real refusal, just not the
-    // one this test is about.
-    let (st, body) = bob.req(
-        "POST",
-        "/v1/orgs/bob/repos/widget/branches",
-        Some(serde_json::json!({ "name": "fix-empty-config", "from": "main" })),
-    );
-    assert!(
-        st == 200 || st == 201,
-        "branch from the fork's trunk: {body}"
-    );
-    let (st, pushed) = bob.req(
-        "POST",
-        "/v1/orgs/bob/repos/widget/commits",
-        Some(serde_json::json!({
-            "message": "fix: default an empty config",
-            "branch": "fix-empty-config",
-            "operations": [
-                { "op": "put", "path": "src/config.rs", "content": "// defaults\n" }
-            ],
-        })),
-    );
-    assert_eq!(st, 201, "{pushed}");
-    let contributed = pushed["commit"].as_str().expect("commit").to_string();
+    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let contributed = contribute(&mut bob, &[("src/config.rs", "// defaults\n")]);
 
     let (st, opened) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({ "from": "fix-empty-config", "source": "bob/widget" })),
     );
     assert_eq!(st, 201, "{opened}");
@@ -501,42 +572,29 @@ fn a_change_from_a_fork_lands_and_the_clone_is_still_sound() {
 
     // The maintainer approves and lands. Bob cannot: approving and
     // landing stay owner-governed, which is the whole reason opening a
-    // change can be opened up safely.
+    // change can be opened up safely. 404, because `rest_repo_auth`
+    // masks a repository from anybody who cannot do the thing asked.
     let (st, refused) = bob.req(
         "POST",
-        &format!("/v1/orgs/ada/repos/widget/changes/{key}/land"),
+        &format!("/v1/orgs/acme/repos/widget/changes/{key}/land"),
         None,
     );
-    assert!(
-        st == 403 || st == 404,
-        "a contributor landed their own change: {st} {refused}"
-    );
+    assert_eq!(st, 404, "a contributor landed their own change: {refused}");
 
     let (st, _) = ada.req(
         "POST",
-        &format!("/v1/orgs/ada/repos/widget/changes/{key}/approve"),
+        &format!("/v1/orgs/acme/repos/widget/changes/{key}/approve"),
         None,
     );
     assert_eq!(st, 204);
     let (st, queued) = ada.req(
         "POST",
-        &format!("/v1/orgs/ada/repos/widget/changes/{key}/land"),
+        &format!("/v1/orgs/acme/repos/widget/changes/{key}/land"),
         None,
     );
     assert_eq!(st, 202, "{queued}");
 
-    // Wait for the lander.
-    let path = format!("/v1/orgs/ada/repos/widget/changes/{key}");
-    let mut landed = serde_json::Value::Null;
-    for _ in 0..150 {
-        let (st, out) = ada.req("GET", &path, None);
-        assert_eq!(st, 200, "{out}");
-        if out["change"]["state"] != serde_json::json!("landing") {
-            landed = out;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    let landed = await_landed(&mut ada, &key);
     assert_eq!(
         landed["change"]["state"], "landed",
         "a change from a fork did not land: {landed}"
@@ -546,12 +604,12 @@ fn a_change_from_a_fork_lands_and_the_clone_is_still_sound() {
     // The whole point, proved the only way it can be: clone the
     // upstream repository with the real git CLI and fsck it. The commit
     // came from a prefix this repository never owned.
+    let tok = mint(&mut ada, "acme", &["repo:read"]);
     let work = Scratch::new("forkpr-land-clone");
-    let url = format!("{}/ada/widget.git", server.base);
     let dir = work.path().join("clone");
     // `clone_and_fsck` is the house gate: it clones with the real git
     // CLI and runs `fsck --full --strict`, and returns HEAD.
-    let head = gitcli::clone_and_fsck(&url, &dir);
+    let head = gitcli::clone_and_fsck(&server.authed_url(&tok, "acme", "widget"), &dir);
     assert_eq!(head, contributed, "trunk is not the landed commit");
     // And the file the contributor added is actually in the clone —
     // fsck proves the objects are sound, not that the right ones came.
@@ -563,50 +621,18 @@ fn a_change_from_a_fork_lands_and_the_clone_is_still_sound() {
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
 
-/// Poll a contributions graph until it says what we are waiting for.
-fn graph_until(
-    server: &Server,
-    handle: &str,
-    what: &str,
-    want: impl Fn(&serde_json::Value) -> bool,
-) -> serde_json::Value {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
-    let mut last = serde_json::Value::Null;
-    while std::time::Instant::now() < deadline {
-        let (st, body) = server.req(
-            "GET",
-            &format!("/v1/users/{handle}/contributions"),
-            "",
-            None,
-        );
-        assert_eq!(st, 200, "graph for {handle}: {body}");
-        if want(&body) {
-            return body;
-        }
-        last = body;
-        std::thread::sleep(std::time::Duration::from_millis(250));
-    }
-    panic!("{what}; last graph was {last}");
-}
-
-/// Poll a repository's contributor rail the same way.
+/// Poll a repository's contributor rail, as `who`, until it says what
+/// we are waiting for.
 fn contributors_until(
-    server: &Server,
-    org: &str,
-    repo: &str,
+    who: &mut Browser,
     what: &str,
     want: impl Fn(&serde_json::Value) -> bool,
 ) -> serde_json::Value {
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(45);
     let mut last = serde_json::Value::Null;
     while std::time::Instant::now() < deadline {
-        let (st, body) = server.req(
-            "GET",
-            &format!("/v1/orgs/{org}/repos/{repo}/contributors"),
-            "",
-            None,
-        );
-        assert_eq!(st, 200, "contributors of {org}/{repo}: {body}");
+        let (st, body) = who.req("GET", "/v1/orgs/acme/repos/widget/contributors", None);
+        assert_eq!(st, 200, "contributors of acme/widget: {body}");
         if want(&body) {
             return body;
         }
@@ -616,22 +642,20 @@ fn contributors_until(
     panic!("{what}; last answer was {last}");
 }
 
-fn total(graph: &serde_json::Value) -> i64 {
-    graph["days"]
-        .as_array()
-        .unwrap_or(&Vec::new())
+fn commits_of(rail: &serde_json::Value, handle: &str) -> Option<i64> {
+    rail["contributors"]
+        .as_array()?
         .iter()
-        .filter_map(|d| d["count"].as_i64())
-        .sum()
+        .find(|c| c["handle"] == serde_json::json!(handle))
+        .and_then(|c| c["commits"].as_i64())
 }
 
 /// **The claim the whole contribution path rests on: your name stays on
 /// it.**
 ///
-/// `a_change_from_a_fork_lands_and_the_clone_is_still_sound` proves an
-/// outsider's change lands. `contribs_e2e` proves a proved address
-/// colours a square and ranks in the contributor rail. Neither crosses
-/// over, so the sentence a contributor actually cares about — *I
+/// `a_change_from_a_fork_lands_and_the_clone_is_still_sound` proves a
+/// contributor's change lands. Neither it nor anything about contributors
+/// crosses over, so the sentence a contributor actually cares about — *I
 /// contributed to that project and it says so* — had no test at all,
 /// and the join is exactly where it can break.
 ///
@@ -639,16 +663,14 @@ fn total(graph: &serde_json::Value) -> i64 {
 /// commit, so authorship survives by construction. That is precisely
 /// why this needs pinning rather than assuming: the day somebody adds
 /// squash-on-land, or a merge commit, or rewrites the author to the
-/// person who pressed the button, every outside contributor's credit
-/// silently moves to the maintainer who reviewed it — the graph goes
-/// blank, the rail names the wrong person, and all twenty-seven fork and
-/// contribution tests stay green, because not one of them looks at both
-/// halves.
+/// person who pressed the button, every contributor's credit silently
+/// moves to the maintainer who reviewed it.
 ///
-/// Both readings are asserted, because they come from different code:
-/// the per-person graph is walked from the commit's author line, and the
-/// repository's rail is aggregated per repo. A regression could easily
-/// take one and leave the other.
+/// The per-person contribution graph this used to read as well is gone
+/// with the social layer; the repository's contributor rail is what is
+/// left, and it is read here by the people who may read the repository
+/// — and refused to the people who may not, the same as the repository
+/// itself.
 #[test]
 fn a_change_landed_from_a_fork_credits_the_contributor_and_not_the_maintainer() {
     let minio = Minio::shared();
@@ -657,58 +679,24 @@ fn a_change_landed_from_a_fork_credits_the_contributor_and_not_the_maintainer() 
     let mail = Mailbox::temp("forkpr-credit");
     let server = spawn(&bucket.base_url, &scratch, "forkpr_credit", &mail);
 
-    // Signup proves the address, which is what makes a square legal:
-    // `contribs_e2e` covers the anti-gaming rule, and this test relies
-    // on it rather than restating it.
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
-    public_repo(&mut ada, "ada", "widget");
+    // Signup proves the address, which is what makes a commit count for
+    // a person rather than for an address nobody owns.
+    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
 
-    // Ada's own seed commit is hers, and Bob has nothing yet. Taken
+    // ada's own seed commit is hers, and bob has nothing yet. Taken
     // before anything else happens, so the assertions below are about
     // what *this* change did rather than about a number that was
     // already there.
-    let ada_before = total(&graph_until(
-        &server,
-        "ada",
-        "ada's own seed never landed",
-        |g| total(g) >= 1,
-    ));
-    let bob_before = total(&graph_until(
-        &server,
-        "bob",
-        "bob's graph never answered",
-        |_| true,
-    ));
-    assert_eq!(bob_before, 0, "bob has contributed nothing yet");
+    let before = contributors_until(&mut ada, "ada's own seed never counted", |r| {
+        commits_of(r, "ada").is_some()
+    });
+    let ada_before = commits_of(&before, "ada").unwrap();
+    assert_eq!(commits_of(&before, "bob"), None, "{before}");
 
-    let (st, body) = bob.req("POST", "/v1/orgs/ada/repos/widget/forks", None);
-    assert_eq!(st, 202, "{body}");
-    assert_eq!(await_fork(&mut bob, "/v1/orgs/bob/repos/widget"), "ready");
-
-    let (st, body) = bob.req(
-        "POST",
-        "/v1/orgs/bob/repos/widget/branches",
-        Some(serde_json::json!({ "name": "fix-empty-config", "from": "main" })),
-    );
-    assert!(st == 200 || st == 201, "{body}");
-    let (st, pushed) = bob.req(
-        "POST",
-        "/v1/orgs/bob/repos/widget/commits",
-        Some(serde_json::json!({
-            "message": "fix: default an empty config",
-            "branch": "fix-empty-config",
-            "operations": [
-                { "op": "put", "path": "src/config.rs", "content": "// defaults\n" }
-            ],
-        })),
-    );
-    assert_eq!(st, 201, "{pushed}");
-    let contributed = pushed["commit"].as_str().expect("commit").to_string();
-
+    let contributed = contribute(&mut bob, &[("src/config.rs", "// defaults\n")]);
     let (st, opened) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({ "from": "fix-empty-config", "source": "bob/widget" })),
     );
     assert_eq!(st, 201, "{opened}");
@@ -718,97 +706,245 @@ fn a_change_landed_from_a_fork_credits_the_contributor_and_not_the_maintainer() 
     // and she must not be the one who gets the credit.
     let (st, _) = ada.req(
         "POST",
-        &format!("/v1/orgs/ada/repos/widget/changes/{key}/approve"),
+        &format!("/v1/orgs/acme/repos/widget/changes/{key}/approve"),
         None,
     );
     assert_eq!(st, 204);
     let (st, queued) = ada.req(
         "POST",
-        &format!("/v1/orgs/ada/repos/widget/changes/{key}/land"),
+        &format!("/v1/orgs/acme/repos/widget/changes/{key}/land"),
         None,
     );
     assert_eq!(st, 202, "{queued}");
-
-    let path = format!("/v1/orgs/ada/repos/widget/changes/{key}");
-    let mut landed = serde_json::Value::Null;
-    for _ in 0..200 {
-        let (st, out) = ada.req("GET", &path, None);
-        assert_eq!(st, 200, "{out}");
-        if out["change"]["state"] != serde_json::json!("landing") {
-            landed = out;
-            break;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(200));
-    }
+    let landed = await_landed(&mut ada, &key);
     assert_eq!(landed["change"]["state"], "landed", "{landed}");
     assert_eq!(landed["change"]["landed_commit"], contributed, "{landed}");
 
     // --- the claim -----------------------------------------------------
 
-    // Bob's graph gains the commit he wrote.
-    let bob_graph = graph_until(
-        &server,
-        "bob",
-        "the contributor's graph never gained the change they wrote",
-        |g| total(g) > bob_before,
-    );
-    assert_eq!(
-        total(&bob_graph),
-        bob_before + 1,
-        "the contributor was credited for something other than their one commit: {bob_graph}"
-    );
-
-    // And Ada's does **not**. Landing is review, not authorship — a
-    // maintainer who merges a hundred contributions has written none of
-    // them, and a graph that says otherwise is a lie about who did the
-    // work. Read after Bob's has already moved, so this is a settled
-    // state and not a race with a walker that had not got there yet.
-    let ada_graph = graph_until(&server, "ada", "ada's graph never answered", |_| true);
-    assert_eq!(
-        total(&ada_graph),
-        ada_before,
-        "the maintainer was credited for a contribution they only reviewed: {ada_graph}"
-    );
-
-    // The repository's own rail agrees, and it is aggregated by a
-    // different query than the graph — one could regress without the
-    // other.
+    // Bob is on the rail with the one commit he wrote…
     let rail = contributors_until(
-        &server,
-        "ada",
-        "widget",
+        &mut ada,
         "the contributor never appeared on the repository's rail",
-        |b| {
-            b["contributors"]
-                .as_array()
-                .map(|a| a.iter().any(|c| c["handle"] == serde_json::json!("bob")))
-                .unwrap_or(false)
-        },
+        |r| commits_of(r, "bob").is_some(),
     );
-    let bob_row = rail["contributors"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .find(|c| c["handle"] == serde_json::json!("bob"))
-        .cloned()
-        .expect("bob is on the rail");
     assert_eq!(
-        bob_row["commits"],
-        serde_json::json!(1),
+        commits_of(&rail, "bob"),
+        Some(1),
         "the rail credits the contributor with the wrong number: {rail}"
     );
-
-    // A stranger reads the same thing, signed out. A credit only its
-    // owner can see is not a credit.
-    let (st, public) = server.req("GET", "/v1/orgs/ada/repos/widget/contributors", "", None);
-    assert_eq!(st, 200, "{public}");
-    assert!(
-        public["contributors"]
-            .as_array()
-            .map(|a| a.iter().any(|c| c["handle"] == serde_json::json!("bob")))
-            .unwrap_or(false),
-        "a signed-out reader cannot see who contributed: {public}"
+    // …and ada's count has **not** moved. Landing is review, not
+    // authorship — a maintainer who merges a hundred contributions has
+    // written none of them. Read after bob's row has appeared, so this is
+    // a settled state and not a race with a walker that had not got there
+    // yet.
+    assert_eq!(
+        commits_of(&rail, "ada"),
+        Some(ada_before),
+        "the maintainer was credited for a contribution they only reviewed: {rail}"
     );
+
+    // The contributor reads the same thing: a credit its owner cannot
+    // see is not a credit.
+    let seen = contributors_until(&mut bob, "the contributor cannot see their credit", |r| {
+        commits_of(r, "bob") == Some(1)
+    });
+    assert_eq!(commits_of(&seen, "ada"), Some(ada_before), "{seen}");
+
+    // And the rail is exactly as private as the repository: a person
+    // with no role in acme is told it is not there, and nobody signed in
+    // is told to sign in.
+    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let (st, _) = carl.req("GET", "/v1/orgs/acme/repos/widget/contributors", None);
+    assert_eq!(st, 404, "a non-member read who contributes to acme");
+    let (st, _) = server.req("GET", "/v1/orgs/acme/repos/widget/contributors", "", None);
+    assert_eq!(st, 401, "an anonymous caller read who contributes to acme");
+
+    assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
+}
+
+// ---------------------------------------------------------------------
+// The fork gate
+// ---------------------------------------------------------------------
+
+/// A workflow with no `runs-on`, which means `[self-hosted]`: the one
+/// kind of machine there is.
+const CI: &str = "\
+name: ci
+on: [push, change]
+jobs:
+  test:
+    steps:
+      - name: Work
+        run: echo hi
+";
+
+/// Ask for a job the way a registered machine does. `None` is the long
+/// poll coming back with nothing for it.
+fn claim(server: &Server, credential: &str) -> Option<(String, String)> {
+    let (st, out) = server.post("/v1/runners/claim", credential, None);
+    match st {
+        200 => Some((
+            out["job_id"].as_str().unwrap().to_string(),
+            out["token"].as_str().unwrap().to_string(),
+        )),
+        204 => None,
+        other => panic!("claim answered {other}: {out}"),
+    }
+}
+
+fn claim_within(server: &Server, credential: &str, what: &str) -> (String, String) {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        if let Some(job) = claim(server, credential) {
+            return job;
+        }
+        assert!(Instant::now() < deadline, "waited 30s for {what}");
+    }
+}
+
+/// Poll `path` (a workflow-runs listing) until a run for `sha` has left
+/// `queued`/`running`, and return it.
+fn settled_run(who: &mut Browser, path: &str, sha: &str) -> serde_json::Value {
+    let deadline = Instant::now() + Duration::from_secs(30);
+    loop {
+        let (st, out) = who.req("GET", &format!("{path}?commit_sha={sha}"), None);
+        assert_eq!(st, 200, "{out}");
+        if let Some(r) = out["runs"].as_array().and_then(|r| r.first()) {
+            if r["state"] != "queued" && r["state"] != "running" {
+                return r.clone();
+            }
+        }
+        assert!(Instant::now() < deadline, "no settled run at {sha}: {out}");
+        std::thread::sleep(Duration::from_millis(150));
+    }
+}
+
+/// A change from a fork is held for a maintainer before its workflows
+/// reach anybody's machine — and a maintainer, and only a maintainer,
+/// lets it go.
+///
+/// Every machine here is somebody's own: registered by an organization,
+/// on its hardware, on its network. A fork's change carries `run:` lines
+/// its author wrote, and bob — a viewer who may read `widget` and fork
+/// it — is exactly who that author is. acme's machine is listening
+/// throughout and takes ada's own push first, so "nothing ran" is the
+/// server deciding and not a machine that was absent; and bob's push to
+/// his own fork, where nobody has a machine, settles failed in the words
+/// any repository without one gets — the gate is not a stand-in for
+/// "no runner".
+#[test]
+fn a_change_from_a_fork_is_held_for_a_maintainer_before_it_reaches_a_machine() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("forkpr-gate");
+    let scratch = Scratch::new("forkpr-gate");
+    let mail = Mailbox::temp("forkpr-gate");
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_gate", &mail);
+
+    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+
+    // acme's machine, in the default group, which admits every
+    // repository — so the only thing that can hold bob's change is the
+    // fork gate.
+    let (st, minted) = ada.req("POST", "/v1/orgs/acme/runners/registration-token", None);
+    assert_eq!(st, 201, "{minted}");
+    let (st, reg) = server.post(
+        "/v1/runners/register",
+        minted["token"].as_str().unwrap(),
+        Some(serde_json::json!({
+            "name": "acme-box", "labels": [], "os": "linux", "arch": "x64",
+            "version": "0.1.0-test", "ephemeral": false,
+        })),
+    );
+    assert_eq!(st, 201, "{reg}");
+    let machine = reg["credential"].as_str().unwrap().to_string();
+
+    // ada's own push runs on it — the stack is proven good before the
+    // fork case, so a held change cannot be a misconfiguration passing
+    // as a gate.
+    let (st, body) = ada.req(
+        "POST",
+        "/v1/orgs/acme/repos/widget/commits",
+        Some(serde_json::json!({
+            "message": "add ci",
+            "operations": [{ "op": "put", "path": ".weft/ci.yml", "content": CI }],
+        })),
+    );
+    assert_eq!(st, 201, "{body}");
+    let (job, token) = claim_within(&server, &machine, "ada's own push");
+    let (st, out) = server.post(
+        &format!("/v1/runner/jobs/{job}/finish"),
+        &token,
+        Some(serde_json::json!({ "state": "passed" })),
+    );
+    assert_eq!(st, 200, "{out}");
+
+    let sha = contribute(&mut bob, &[("src/lib.rs", "// hi\n")]);
+    // bob's push to his own fork ran nowhere: acme's machine is acme's,
+    // and his namespace has none.
+    let own = settled_run(&mut bob, "/v1/orgs/bob/repos/widget/workflow-runs", &sha);
+    assert_eq!(own["state"], "failed", "{own}");
+    assert_eq!(
+        own["error"], "no runner with labels [self-hosted] is registered for this repository",
+        "{own}"
+    );
+
+    let (st, opened) = bob.req(
+        "POST",
+        "/v1/orgs/acme/repos/widget/changes",
+        Some(serde_json::json!({ "from": "fix-empty-config", "source": "bob/widget" })),
+    );
+    assert_eq!(st, 201, "{opened}");
+    let key = opened["change"]["key"].as_str().expect("key").to_string();
+
+    // Held, with the fork's own commit and sentence, and no job made.
+    let held = settled_run(&mut ada, "/v1/orgs/acme/repos/widget/workflow-runs", &sha);
+    assert_eq!(held["state"], "blocked", "{held}");
+    assert_eq!(held["event"], "change", "{held}");
+    assert_eq!(held["blocked_reason"], "fork", "{held}");
+    assert_eq!(
+        held["error"],
+        "this change comes from a fork; a maintainer has to approve its workflows before they run",
+        "{held}"
+    );
+    assert!(
+        held["jobs"].as_array().is_some_and(|j| j.is_empty()),
+        "{held}"
+    );
+    // And the listening machine is offered nothing. Three long polls:
+    // the negative has no observable of its own.
+    for _ in 0..3 {
+        assert_eq!(
+            claim(&server, &machine),
+            None,
+            "a fork's change reached acme's machine"
+        );
+    }
+
+    // The contributor cannot let their own contribution run, and is
+    // refused exactly as landing it would be.
+    let approve = format!("/v1/orgs/acme/repos/widget/changes/{key}/workflows/approve");
+    let (st, out) = bob.req("POST", &approve, None);
+    assert_eq!(st, 404, "bob approved his own change's workflows: {out}");
+    let (land, _) = bob.req(
+        "POST",
+        &format!("/v1/orgs/acme/repos/widget/changes/{key}/land"),
+        None,
+    );
+    assert_eq!(land, st, "approval and landing must refuse alike");
+    assert_eq!(
+        claim(&server, &machine),
+        None,
+        "a refused approval ran something"
+    );
+
+    // The maintainer approves, and the machine is handed bob's commit.
+    let (st, out) = ada.req("POST", &approve, None);
+    assert_eq!(st, 202, "{out}");
+    let (job, token) = claim_within(&server, &machine, "the approved fork change");
+    let (st, spec) = server.get(&format!("/v1/runner/jobs/{job}"), &token);
+    assert_eq!(st, 200, "{spec}");
+    assert_eq!(spec["commit_sha"], sha, "{spec}");
 
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }

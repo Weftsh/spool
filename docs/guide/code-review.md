@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Changes, OWNERS & the land queue
-description: Stack-native review — one commit per change, OWNERS-governed approval sufficiency, and fast-forward landing with verdicts in words.
----
-
 # Changes, OWNERS & the land queue
 
 Review on Weft is per commit, not per branch. A **change** is one
@@ -67,7 +61,7 @@ it was recorded at and the two trees are diffed, which is not the same
 thing as diffing the newest patchset against its parent: a file touched
 in patchset 2 and put back in patchset 3 is in *that* diff and is
 correctly absent from this one. Entries come back in the same shape as
-[`…/diff`](/openapi.json) — `{status, path, old_oid, new_oid, …}` — so
+[`…/diff`](../openapi.json) — `{status, path, old_oid, new_oid, …}` — so
 whatever renders one renders this, and the commit oids are echoed as
 `from`/`to` beside the numbers you asked for as `from_patchset` /
 `to_patchset`. Reversed ranges are fine; `from=3&to=1` shows what going
@@ -299,12 +293,12 @@ changes whose commits are now ancestors of the new tip are marked landed
 by inclusion.
 
 Landing takes `repo:write`. Abandoning takes `repo:write` **or** being the
-change's author: somebody who proposed from a [fork](/docs/forks/) holds
+change's author: somebody who proposed from a [fork](forks.md) holds
 only read access on the repository they proposed to, and a change they
 could open but never close would be theirs to leave lying around. Anyone
 else without write access gets the same `404` a stranger does.
 
-A change that is a member of a [changeset](/docs/changesets/) — one
+A change that is a member of a [changeset](changesets.md) — one
 review unit spanning several repositories — refuses to land or be
 abandoned on its own; it moves with the changeset.
 
@@ -642,7 +636,7 @@ The pieces above are one discipline, end to end:
 Your CI is a reviewer with a badge, not a bystander. The loop is three
 steps, using systems you already run:
 
-1. **Hear about work**: subscribe a [webhook](/docs/webhooks/) — `push`
+1. **Hear about work**: subscribe a [webhook](webhooks.md) — `push`
    fires on every branch update, `change.landed` / `change.ejected` on
    queue outcomes.
 2. **Run whatever you run** — GitHub Actions, Buildkite, Jenkins, a
@@ -675,7 +669,7 @@ and a link to the run.
 ## Webhooks
 
 `change.landed` and `change.ejected` deliver beside `push`, HMAC-signed
-the same way — see [Webhooks](/docs/webhooks/):
+the same way — see [Webhooks](webhooks.md):
 
 ```json
 { "event": "change.landed",

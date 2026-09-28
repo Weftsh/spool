@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: "Quickstart: first commit over REST"
-description: Create a repo and commit to it in under a minute, no git anywhere.
----
-
 # First commit over REST
 
 Weft Repos gives every user, session, or agent its own real git repository —
@@ -19,7 +13,7 @@ Three things, once, and each takes about a minute:
    be private or shared with a team. Creating one saves a card and
    charges nothing, and stays free while everything in it is public; see
    [organizations and billing](/docs/billing/#creating-one).
-3. [Mint a token](/docs/authentication/#minting-and-revoking-tokens) for
+3. [Mint a token](authentication.md#minting-and-revoking-tokens) for
    your scripts. It is the `$WEFT_TOKEN` in every example below.
 
 ## 1. Create a repo
@@ -52,7 +46,7 @@ curl -X POST https://api.weft.sh/v1/orgs/acme/repos/session-8412/commits \
 ```
 
 The response carries the new `commit` id. The `context` blob lands in the
-immutable [audit trail](/docs/audit-and-undo/) alongside the acting token —
+immutable [audit trail](audit-and-undo.md) alongside the acting token —
 that's how you answer "what did the agent change and when" months later.
 
 **Concurrency:** pass `expected_parent` with the commit you built against.
@@ -135,7 +129,7 @@ curl -X POST https://api.weft.sh/v1/orgs/acme/repos/session-8412/reset \
 ```
 
 The undone commits stay reachable by SHA until garbage collection — undo
-never erases the record. See [audit & undo](/docs/audit-and-undo/).
+never erases the record. See [audit & undo](audit-and-undo.md).
 
 ## 5. It's still git
 
@@ -143,12 +137,12 @@ never erases the record. See [audit & undo](/docs/audit-and-undo/).
 git clone https://x:$WEFT_TOKEN@api.weft.sh/acme/session-8412.git
 ```
 
-Clone it, push to it, or [export it as a standard bundle](/docs/export/) any
+Clone it, push to it, or [export it as a standard bundle](export.md) any
 time. Adopting Weft is not a lock-in decision.
 
 ## The same thing from an SDK
 
-Everything above is one call each in the [TypeScript SDK](/docs/sdk/),
+Everything above is one call each in the [TypeScript SDK](sdk.md),
 `npm install @weftsh/sdk`:
 
 ```ts
@@ -167,7 +161,7 @@ await repo.reset({ to: goodCommit, expectedHead: commit });
 const url = await repo.getRemoteURL(); // git clone this: a credential for this repo only
 ```
 
-and in the [Python SDK](/docs/sdk-python/), `pip install weftsh`:
+and in the [Python SDK](sdk-python.md), `pip install weftsh`:
 
 ```python
 import os

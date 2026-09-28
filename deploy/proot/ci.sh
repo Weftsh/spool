@@ -30,12 +30,14 @@ pg="$PROOT_WORK/stack/postgres"
 "$PROOT" -0 -r "$pg" -b /proc -b /dev -w / /bin/sh -c 'touch /tmp/p && chown 1234:1234 /tmp/p && chown 0:0 / && echo "fake-root chown, incl. of /: ok"' || fail "PRoot fake root does not fake chown"
 "$PROOT" -0 -r "$pg" -b /proc -b /dev -w / /usr/bin/python3 -c 'import os,threading; t=threading.Thread(target=lambda: os.chown("/",0,0)); t.start(); t.join(); print("chown from a second thread: ok")' 2>/dev/null || echo "(no python3 in the postgres image; thread probe skipped)"
 
-step "admin task launcher: RunTask refusals against a fake aws"
-# deploy/admin-ecs.sh against a fake `aws`; bash and python3, no daemon.
+step "operator scripts against a fake aws: admin tasks and rollouts"
+# deploy/admin-ecs.sh and deploy/roll.sh against a fake `aws`; bash and
+# python3, no daemon, no AWS.
 bash "$repo/deploy/admin-ecs.test.sh" || fail "admin-ecs.test.sh failed"
+bash "$repo/deploy/roll.test.sh" || fail "roll.test.sh failed"
 
 if [ "${SKIP_BUILD:-0}" = "1" ]; then
-  echo; echo "SKIP_BUILD=1: not building or running the production image"
+  echo; echo "SKIP_BUILD=1: not building or running the server image"
 else
   step "build the server image with kaniko under PRoot"
   SECONDS=0

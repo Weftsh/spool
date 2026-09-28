@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: "Quickstart: point CI at a mirror"
-description: Mirror a repository and switch your CI checkout in five minutes.
----
-
 # Point CI at a mirror in 5 minutes
 
 Weft Mirror is a provably-fresh copy of your origin repository, served
@@ -22,7 +16,7 @@ Three things, once, and each takes about a minute:
    into your own namespace. Creating one saves a card and charges
    nothing, and stays free while everything in it is public; see
    [organizations and billing](/docs/billing/#creating-one).
-3. [Mint a token](/docs/authentication/#minting-and-revoking-tokens) for
+3. [Mint a token](authentication.md#minting-and-revoking-tokens) for
    your CI. It is the `$WEFT_TOKEN` in every example below.
 
 ## The short version: paste a URL
@@ -49,7 +43,7 @@ broken.
 
 The rest of this page is the same flow over the API, for CI and for
 scripting. On GitHub Actions the switch is one line:
-[`weftsh/checkout`](/docs/actions-checkout/) replaces `actions/checkout`
+[`weftsh/checkout`](actions-checkout.md) replaces `actions/checkout`
 and falls back to it, by name, when the mirror cannot serve the commit.
 
 ## Pushing to a mirror
@@ -263,9 +257,9 @@ credential that can push, refused with a message naming the origin.
 
 - **Provable freshness.** A fetch for a commit the mirror lacks triggers a
   synchronous origin sync before the response. See
-  [the freshness contract](/docs/freshness-contract/).
+  [the freshness contract](freshness-contract.md).
 - **Outage behavior you can put in a runbook.** Origin down → last-known
   state serves, with `X-Weft-Staleness` on every response.
 - **The renewal artifact.** Per-repo clone p50/p99, bytes served, and
   requests absorbed at
-  [`/v1/orgs/acme/repos/widget/metrics`](/docs/metrics/), JSON or CSV.
+  [`/v1/orgs/acme/repos/widget/metrics`](metrics.md), JSON or CSV.

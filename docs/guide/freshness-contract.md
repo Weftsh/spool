@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: The freshness contract
-description: The exact behavior of a Weft mirror when origin is ahead, slow, or down.
----
-
 # The freshness contract
 
 The contract has one invariant: **never a silent stale miss.** Every case

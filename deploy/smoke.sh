@@ -299,6 +299,7 @@ else
 fi
 
 say "8/10 CDN-offloaded clone"
+CDN_PROVED=""
 # Offload is opt-in per client (fetch.uriprotocols), so this leg both
 # builds the pack and clones as an opted-in client would. The signed-URL
 # check below is the operator-side proof of the one thing CI cannot
@@ -320,6 +321,7 @@ if [ "${SMOKE_CDN:-1}" = "1" ] && req POST "/v1/orgs/$ORG/repos/$REPO/cdn-pack" 
         CODE="$(curl -s -o /dev/null -w '%{http_code}' "$TAMPERED")"
         [ "$CODE" = "403" ] || { echo "tampered signature returned $CODE, expected 403"; exit 1; }
         echo "edge served the signed pack and refused a tampered signature"
+        CDN_PROVED=1
         ;;
       *sig=*)
         # Origin-route shape: the token is an HMAC and a bad one is a
@@ -328,8 +330,9 @@ if [ "${SMOKE_CDN:-1}" = "1" ] && req POST "/v1/orgs/$ORG/repos/$REPO/cdn-pack" 
         CODE="$(curl -s -o /dev/null -w '%{http_code}' "$TAMPERED")"
         [ "$CODE" = "404" ] || { echo "tampered token returned $CODE, expected 404"; exit 1; }
         echo "origin route served the signed pack and refused a tampered token"
+        CDN_PROVED=1
         ;;
-      *) echo "offloaded clone served from $PACK_URL (unsigned deployment)" ;;
+      *) echo "offloaded clone served from $PACK_URL (unsigned deployment)"; CDN_PROVED=1 ;;
     esac
   fi
 else
@@ -385,4 +388,6 @@ else
   echo "skipped"
 fi
 
-say "SMOKE OK — $BASE_URL serves health, REST, git over HTTP${SSH_ENDPOINT:+ and SSH}, CDN offload${SMOKE_SELF_HOSTED:+, self-hosted runners}, and the web"
+SELF_HOSTED_PROVED=""
+[ "${SMOKE_SELF_HOSTED:-0}" = "1" ] && SELF_HOSTED_PROVED=1
+say "SMOKE OK — $BASE_URL serves health, REST, git over HTTP${SSH_ENDPOINT:+ and SSH}${CDN_PROVED:+, CDN offload}${SELF_HOSTED_PROVED:+, a self-hosted runner}, and the web"

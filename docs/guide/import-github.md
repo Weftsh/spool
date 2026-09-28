@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Importing from GitHub
-description: The design for issue import — what it would move, in what order, and the one thing it deliberately will not reconstruct.
----
-
 # Importing from GitHub
 
 **The issue importer does not exist. This page is its design.** There is no
@@ -20,7 +14,7 @@ is the importer alone.
 
 **What does work today is the half that matters most and is pure git:**
 mirroring a GitHub repository's commits, branches and tags. That is
-[Mirror in 5 minutes](/docs/quickstart-mirror/), it is running now, and it
+[Mirror in 5 minutes](quickstart-mirror.md), it is running now, and it
 is the step that moves your history. This page is about the things that are
 not in the repository — issues, their conversations, and the URLs that point
 at them.
@@ -94,8 +88,8 @@ record. So they would arrive as what they now are: the written record of a
 discussion, with a working link to where it happened.
 
 Open pull requests a project still cares about would be re-opened as
-[changes](/docs/code-review/) here by their contributors, from the
-[fork](/docs/forks/) they came from. That is a real cost of a move, and
+[changes](code-review.md) here by their contributors, from the
+[fork](forks.md) they came from. That is a real cost of a move, and
 [the migration page](/migrate) counts it as one.
 
 ## One door, because we have not launched

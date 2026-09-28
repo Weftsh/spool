@@ -414,9 +414,11 @@ fn admin_cli_failure_modes() {
             "ghost"
         ])
         .contains("not found"));
+    // Plans went with billing: the command is not quietly accepted as a
+    // no-op an operator would take for a plan change that happened.
     assert!(server
-        .admin_expect_err(&["admin", "set-plan", "--org", "acme"])
-        .contains("--plan"));
+        .admin_expect_err(&["admin", "set-plan", "--org", "acme", "--plan", "team"])
+        .contains("unknown admin command"));
 
     // Forgetting the word `admin` used to fall through to *serving*: the
     // process bound a port and sat there, so an operator saw a command

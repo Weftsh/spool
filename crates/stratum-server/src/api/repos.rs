@@ -578,9 +578,6 @@ pub async fn patch(
         Ok(x) => x,
         Err(r) => return r,
     };
-    if let Err(r) = crate::api::refuse_public(body.public) {
-        return r;
-    }
     // Moving the default branch and attaching an installation are
     // authority, not preference: both take an admin. A description alone
     // takes write.
@@ -593,6 +590,13 @@ pub async fn patch(
         Ok(p) => p,
         Err(r) => return r,
     };
+    // After the caller's authority, never before it: judged first, a
+    // body refused on its merits answered 400 for a repository that
+    // exists and 401/404 for one that does not, to anybody who asked —
+    // an existence oracle for every private name.
+    if let Err(r) = crate::api::refuse_public(body.public) {
+        return r;
+    }
     if let Some(inst) = body.installation_id.as_deref() {
         if repo.kind != RepoKind::Mirror || repo.origin_provider.as_deref() != Some("github") {
             return json_error(

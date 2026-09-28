@@ -6,6 +6,7 @@
 //! most of it is that this list and the per-repo list never disagree
 //! about who may see what.
 
+use stratum_testkit::browser::Browser;
 use stratum_testkit::{gitcli::Scratch, Minio, Server};
 
 const ORG_CHANGES: &str = "/v1/orgs/acme/changes";
@@ -17,11 +18,11 @@ fn spawn_server(store_url: &str, scratch: &Scratch) -> Server {
         .start()
 }
 
-fn create_repo(server: &Server, admin: &str, name: &str, public: bool) {
+fn create_repo(server: &Server, admin: &str, name: &str) {
     let (st, out) = server.post(
         "/v1/orgs/acme/repos",
         admin,
-        Some(serde_json::json!({"name": name, "public": public})),
+        Some(serde_json::json!({ "name": name })),
     );
     assert_eq!(st, 201, "create repo {name}: {out}");
 }
@@ -40,8 +41,8 @@ fn commit(server: &Server, token: &str, repo: &str, branch: &str, message: &str,
 }
 
 /// A repository with trunk, a feature branch, and one open change.
-fn repo_with_change(server: &Server, admin: &str, repo: &str, public: bool, key: &str) {
-    create_repo(server, admin, repo, public);
+fn repo_with_change(server: &Server, admin: &str, repo: &str, key: &str) {
+    create_repo(server, admin, repo);
     commit(server, admin, repo, "main", "base", "README.md");
     let (st, out) = server.post(
         &format!("/v1/orgs/acme/repos/{repo}/branches"),
@@ -106,8 +107,8 @@ fn one_request_answers_what_this_caller_could_compose() {
     let scratch = Scratch::new("org-changes-list");
     let server = spawn_server(&bucket.base_url, &scratch);
     let admin = server.bootstrap_org("acme");
-    repo_with_change(&server, &admin, "api", false, "Iaa000001");
-    repo_with_change(&server, &admin, "web", false, "Ibb000002");
+    repo_with_change(&server, &admin, "api", "Iaa000001");
+    repo_with_change(&server, &admin, "web", "Ibb000002");
 
     // Newest first, across repositories, each row naming its repository
     // and saying it is free to be composed.
@@ -238,6 +239,15 @@ fn one_request_answers_what_this_caller_could_compose() {
     }
 }
 
+/// The org-wide list and the per-repo list never disagree about who may
+/// see what, because the org-wide one asks the per-repo question of
+/// every repository.
+///
+/// The half that changed: there are no public repositories, so the
+/// anonymous caller who used to read the public repository's changes
+/// here reads nothing anywhere and is told to sign in — here as on each
+/// repository — and another organization's credential, which used to
+/// read what anybody did, now reads nothing either.
 #[test]
 fn the_org_wide_list_shows_exactly_what_the_per_repo_list_would() {
     let minio = Minio::shared();
@@ -245,8 +255,8 @@ fn the_org_wide_list_shows_exactly_what_the_per_repo_list_would() {
     let scratch = Scratch::new("org-changes-acl");
     let server = spawn_server(&bucket.base_url, &scratch);
     let admin = server.bootstrap_org("acme");
-    repo_with_change(&server, &admin, "api", false, "Iaa000001");
-    repo_with_change(&server, &admin, "open", true, "Ibb000002");
+    repo_with_change(&server, &admin, "api", "Iaa000001");
+    repo_with_change(&server, &admin, "web", "Ibb000002");
 
     // A token bound to one repository sees that repository's changes and
     // no others — and it could never have passed an `org:read` gate, so
@@ -271,39 +281,68 @@ fn the_org_wide_list_shows_exactly_what_the_per_repo_list_would() {
         "{out}"
     );
     let (_, out) = server.get(ORG_CHANGES, &admin);
+    assert_eq!(
+        labels(&out),
+        vec!["web/Ibb000002", "api/Iaa000001"],
+        "{out}"
+    );
     for c in out["changes"].as_array().unwrap() {
         assert_eq!(c["viewer_write"], serde_json::json!(true), "{c}");
     }
 
-    // Anonymous: the public repository's changes, and nothing private —
-    // exactly what `GET /repos/{repo}/changes` answers one at a time.
-    let (st, out) = server.get(ORG_CHANGES, "");
+    // A viewer, signed in the way the dashboard is: every repository in
+    // the org, and none of them writable.
+    server
+        .admin(&[
+            "admin",
+            "user-create",
+            "--org",
+            "acme",
+            "--email",
+            "val@acme.test",
+            "--password",
+            "a long enough password",
+            "--role",
+            "viewer",
+        ])
+        .expect("user-create");
+    let mut val = Browser::signed_in(&server, "val@acme.test", "a long enough password");
+    let (st, out) = val.req("GET", ORG_CHANGES, None);
     assert_eq!(st, 200, "{out}");
-    assert_eq!(labels(&out), vec!["open/Ibb000002"], "{out}");
     assert_eq!(
-        out["changes"][0]["viewer_write"],
-        serde_json::json!(false),
+        labels(&out),
+        vec!["web/Ibb000002", "api/Iaa000001"],
         "{out}"
     );
-    let (st, _) = server.get("/v1/orgs/acme/repos/open/changes", "");
-    assert_eq!(st, 200);
-    let (st, _) = server.get("/v1/orgs/acme/repos/api/changes", "");
-    assert_eq!(st, 401, "a private repo asks anonymous callers to identify");
+    for c in out["changes"].as_array().unwrap() {
+        assert_eq!(c["viewer_write"], serde_json::json!(false), "{c}");
+    }
 
-    // Another organization's token reads what anyone does — the public
-    // repository's changes, as nobody — because a public repository reads
-    // with any valid credential, on the REST API as on the wire. This
-    // used to be a masked 404 that hid nothing the anonymous page did not
-    // already show, and disagreed with `GET …/changesets`, which never
-    // refused it.
+    // Anonymous: nothing, and told to sign in — exactly what
+    // `GET /repos/{repo}/changes` answers one at a time. An empty 200
+    // here would be a page a signed-out caller may read, of an
+    // organization whose every repository they may not.
+    let (st, out) = server.get(ORG_CHANGES, "");
+    assert_eq!(st, 401, "an anonymous caller read the org-wide list: {out}");
+    for repo in ["api", "web"] {
+        let (st, _) = server.get(&format!("/v1/orgs/acme/repos/{repo}/changes"), "");
+        assert_eq!(st, 401, "{repo} answered an anonymous caller");
+    }
+
+    // Another organization's token reads none of it: each repository is
+    // the masked 404 a missing one is, so none of their changes are in
+    // the page. (The page itself is an empty 200, as `GET …/changesets`
+    // answers the same caller.)
     let rival = server.bootstrap_org("rival");
+    for repo in ["api", "web"] {
+        let (st, _) = server.get(&format!("/v1/orgs/acme/repos/{repo}/changes"), &rival);
+        assert_eq!(st, 404, "{repo} answered another org's token");
+    }
     let (st, out) = server.get(ORG_CHANGES, &rival);
     assert_eq!(st, 200, "{out}");
-    assert_eq!(labels(&out), vec!["open/Ibb000002"], "{out}");
-    assert_eq!(
-        out["changes"][0]["viewer_write"],
-        serde_json::json!(false),
-        "{out}"
+    assert!(
+        labels(&out).is_empty(),
+        "another org read acme's changes: {out}"
     );
     // A token that does not resolve at all is a 401, never a 404: the
     // caller has to be told their credential is the problem.
@@ -313,4 +352,5 @@ fn the_org_wide_list_shows_exactly_what_the_per_repo_list_would() {
     // An organization that does not exist is a 404 whoever asks.
     let (st, _) = server.get("/v1/orgs/ghost/changes", &admin);
     assert_eq!(st, 404);
+    assert!(server.healthy());
 }

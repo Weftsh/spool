@@ -93,7 +93,7 @@ fn signing_up_with_github_makes_a_proved_account_that_can_create_at_once() {
     let (st, repo) = person.req(
         "POST",
         "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "notebook", "public": true })),
+        Some(serde_json::json!({ "name": "notebook" })),
     );
     assert_eq!(st, 201, "a proved account could not create: {repo}");
 

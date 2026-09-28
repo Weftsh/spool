@@ -1,62 +1,61 @@
----
-layout: ../../layouts/Docs.astro
-title: Documentation
-description: Weft documentation for people and for agents — quickstarts for mirrors and REST repos, TypeScript and Python SDKs, code review with OWNERS, workflows, runners, billing, and the REST API as OpenAPI and llms.txt.
----
+# Spool user guide
 
-# Weft documentation
-
-Everything here is real git. **Mirror** stops your CI waiting on clones.
+Spool is a git forge you run yourself. Every repository is real git,
+stored in your own bucket, and private to the organization that owns it.
 **Repos** gives you a repository per user or per agent session over REST.
-**Review** and **Workflows** land and check changes on either. Public
-repositories are free forever.
+**Mirrors** keep a copy of a GitHub repository next to your CI. **Review**
+and **Workflows** check and land changes on either.
+
+Examples on these pages use `https://spool.example.com` for the server.
+Put your own server's URL in its place.
 
 ## Start here
 
-Three steps, in order. The first two take a minute each.
-
-1. **Create an account.** Free, no card. Your namespace holds public
-   repositories; a team gets an organization.
-   [Sign up](/login?mode=signup)
-2. **Make an organization and a token.** An organization is where a
-   team or a private repository lives; a public mirror or repository
-   can live in your own namespace. A token is what your CI
-   and scripts sign in with. [Authentication](/docs/authentication/)
-3. **Pick a quickstart.** Point CI at a mirror in five minutes, or make
-   your first commit over REST. Both end with a clone.
-   [Mirror in 5 minutes](/docs/quickstart-mirror/) ·
-   [First commit over REST](/docs/quickstart-repos/) ·
-   the SDK for [TypeScript](/docs/sdk/) or [Python](/docs/sdk-python/)
+1. **Get an account on your server.** Whoever runs the server creates the
+   first one from the command line. After that, people sign up with an
+   email address (or with GitHub, when the server has a GitHub App), and
+   an organization's admins invite them in.
+   [Authentication](authentication.md)
+2. **Join an organization and mint a token.** An organization is where
+   your team's repositories live. A token is what your CI and scripts
+   sign in with, and it acts in one organization.
+   [Authentication](authentication.md)
+3. **Pick a quickstart.** Point CI at a mirror, or make your first
+   commit over REST. Both end with a clone.
+   [Mirror a GitHub repository](quickstart-mirror.md) ·
+   [First commit over REST](quickstart-repos.md) ·
+   the SDK for [TypeScript](sdk.md) or [Python](sdk-python.md)
 
 ## Understand the system
 
-- [How serving works](/docs/how-serving-works/): why empty-disk nodes are fast
-- [Changes, OWNERS and landing](/docs/code-review/): per-commit review and the fast-forward land queue
-- [The freshness contract](/docs/freshness-contract/): never a silent stale miss
-- [Organizations and billing](/docs/billing/): what a seat is, and what a failed payment does not do
+- [How serving works](how-serving-works.md): why empty-disk nodes are fast
+- [Changes, OWNERS and landing](code-review.md): per-commit review and the fast-forward land queue
+- [Changesets](changesets.md): one review over changes in several repositories, landed together
+- [Forks](forks.md): contributing to a repository you can read but not push to
+- [The freshness contract](freshness-contract.md): never a silent stale miss
 
 ## Operate
 
-- [Webhooks](/docs/webhooks/) — inbound origin events, outbound push events
-- [Workflows](/docs/workflows/) — CI from a `.weft/*.yml` file, on our runners or yours
-- [Running a self-hosted runner](/docs/self-hosted-runners/) — the operator's side: the binary, a systemd unit, and how to isolate it
-- [Weft runners for GitHub Actions](/docs/github-runners/) — keep your workflows on GitHub, `runs-on: weft`, and the jobs run on our fleet from the same pool of minutes
-- [CI integration](/docs/ci-integration/) — bring your own CI: sign a verdict onto the Checks tab
-- [Static sites](/docs/static-sites/) — commit a `.weft/site.yml` and a directory in the repository is served as a website
-- [Packages](/docs/packages/) — a private registry for your own packages, with the commit that built each version
-- [Package policy](/docs/package-policy/) — what may enter your builds from a public registry: licences, a waiting period, and names that are yours
-- [Export & escape hatch](/docs/export/) — bundles, org-wide
-- [Metrics & usage](/docs/metrics/) — p50/p99, CSV, Prometheus
-- [Service limits](/docs/service-limits/) — the honest v1 envelope
+- [Settings](settings.md) — where each setting lives and who may change it
+- [Webhooks](webhooks.md) — inbound origin events, outbound push events
+- [Workflows](workflows.md) — CI from a `.weft/*.yml` file, run on machines your organization registers
+- [Running a self-hosted runner](self-hosted-runners.md) — the operator's side: the binary, a systemd unit, and how to isolate it
+- [CI integration](ci-integration.md) — bring your own CI: sign a verdict onto the Checks tab
+- [Checking out from a mirror in GitHub Actions](actions-checkout.md)
+- [Importing issues from GitHub](import-github.md)
+- [Git over SSH](ssh.md)
+- [Search](search.md) — find a repository in the organizations you belong to
+- [Audit and undo](audit-and-undo.md) — the trail, and putting a branch back
+- [Export](export.md) — bundles, one repository or the whole organization
+- [Metrics and usage](metrics.md) — p50/p99, CSV, Prometheus
+- [CDN offload](cdn-offload.md) — serving clone packs from a CDN
+- [Service limits](service-limits.md) — the v1 envelope
+- [The maintainer firewall](maintainer-firewall.md) — a design, not yet built
 
-## For agents
+## For agents and scripts
 
-Machine-consumable surfaces, kept current with the docs build:
-
-- [TypeScript SDK](/docs/sdk/) — `@weftsh/sdk`: a repository per session,
+- [TypeScript SDK](sdk.md) — `@weftsh/sdk`: a repository per session,
   commits, reads, undo and repo-scoped git remotes in a few lines
-- [Python SDK](/docs/sdk-python/) — `weftsh`: the same, sync or asyncio
-
-- [`/llms.txt`](/llms.txt) — index of this documentation
-- [`/llms-full.txt`](/llms-full.txt) — the full documentation as one file
-- [`/openapi.json`](/openapi.json) — the REST API, OpenAPI 3.1
+- [Python SDK](sdk-python.md) — `weftsh`: the same, sync or asyncio
+- [The REST API](../openapi.json) — OpenAPI 3.1. Your server also serves
+  it at `/openapi.json`.

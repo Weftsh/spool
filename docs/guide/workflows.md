@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Workflows
-description: CI from a `.weft/*.yml` file in your repository, on Weft's runners or on machines you register yourself, reported as checks on the commit.
----
-
 # Workflows
 
 Put a YAML file in `.weft/` and pushing runs it. Each job runs in a
@@ -14,7 +8,7 @@ is still being written, and its verdict arrives on the commit's
 exactly like a check posted by any other CI.
 
 This is one of two ways to get a verdict here. The other is
-[CI integration](/docs/ci-integration/): your own CI, wherever it runs,
+[CI integration](ci-integration.md): your own CI, wherever it runs,
 signing a result back. They coexist, and a change waits on both.
 
 The workflow file is deliberately a *subset* of GitHub Actions' syntax
@@ -83,7 +77,7 @@ not mean a ref moving for some other reason: commits that reach a
 Only `refs/heads/*` triggers anything.
 
 `changeset` means a patchset of a
-[changeset](/docs/changesets/) this repository is a member of: the job
+[changeset](changesets.md) this repository is a member of: the job
 runs with every member repository checked out beside this one. It is a
 different event from `change`, not a wider one — `on: [change,
 changeset]` asks for both, and a repository whose file says only
@@ -444,7 +438,7 @@ gate.
 
 ## Composed runs for a changeset
 
-A [changeset](/docs/changesets/) is one review over changes in several
+A [changeset](changesets.md) is one review over changes in several
 repositories, and a test that only ever sees one of them cannot say
 whether the unit works. A file with `changeset` in its `on:` gets a run
 where **every member repository is checked out**, each at the head that
@@ -521,7 +515,7 @@ alone.
 
 **Verdicts land on the changeset, not on the commit.** A composed job's
 check appears on the changeset and gates
-[landing it](/docs/changesets/#composed-ci); it is not written to the
+[landing it](changesets.md#composed-ci); it is not written to the
 member commit's Checks tab. The per-change `on: change` runs are
 untouched and still gate their own member — a file with `on: [change,
 changeset]` produces the same check name from both events on the same
@@ -759,7 +753,7 @@ for what the job can reach.
 A runner only ever makes **outbound** calls. It asks for work, and it is
 handed a job or told there is nothing. Nothing of ours connects to it,
 nothing has to be port-forwarded, and it does not need a public address.
-[Running a runner](/docs/self-hosted-runners/) is the operator's side of
+[Running a runner](self-hosted-runners.md) is the operator's side of
 this page: the binary, a systemd unit, and how to isolate it.
 
 ### The organisation's policy
@@ -932,7 +926,7 @@ directory, which is removed when the job ends. It runs **as the user the
 runner runs as**, directly on the machine — so the process ceiling and
 the egress allowlist described above are properties of *our* fleet and
 not of yours, and the isolation between one job and the next is whatever
-you built. [Running a runner](/docs/self-hosted-runners/) is about
+you built. [Running a runner](self-hosted-runners.md) is about
 exactly that.
 
 Because there is no container, there is nothing for `image:` to name. A
@@ -1141,9 +1135,9 @@ so nothing posted from outside can claim it. That is what lets the
 **Details** link navigate inside the dashboard instead of opening a new
 tab the way a link to somebody else's build system does.
 
-So everything on [CI integration](/docs/ci-integration/) applies
+So everything on [CI integration](ci-integration.md) applies
 unchanged: a `failing` check blocks the land queue, a check you have
-[made required](/docs/ci-integration/#making-a-check-required) must go
+[made required](ci-integration.md#making-a-check-required) must go
 green before a change may land, and `ci / test` from a hosted workflow
 and `ci/tests` from Buildkite sit in the same list under the same rules.
 
@@ -1157,7 +1151,7 @@ A **composed run goes somewhere else entirely**. Its jobs mirror into the
 changeset's own list of checks, under the same `<workflow> / <job>` name
 and linking to the same run page, and never onto the commit. Nothing on
 the commit page changes when a composed job reports, and the changeset's
-[land gate](/docs/changesets/#composed-ci) is the only thing that reads
+[land gate](changesets.md#composed-ci) is the only thing that reads
 it.
 
 ## What is not here yet

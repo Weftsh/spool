@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Metrics & usage
-description: Per-repository serving metrics — clones and fetches with counts, bytes and p50/p99 latency, requests absorbed — plus organization usage, CSV export and a Prometheus endpoint.
----
-
 # Metrics & usage
 
 ## Per-repo serving metrics

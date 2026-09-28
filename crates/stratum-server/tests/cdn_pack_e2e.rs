@@ -845,8 +845,7 @@ fn a_pack_is_never_publicly_cacheable() {
         stratum_store::ObjectStore::new(&bucket.base_url, stratum_store::LatencyModel::None);
     let prefix = repo_prefix(&server, &admin, "acme", name);
     let desc: serde_json::Value =
-        serde_json::from_slice(&store.get(&format!("{prefix}/cdn/current.json")).unwrap())
-            .unwrap();
+        serde_json::from_slice(&store.get(&format!("{prefix}/cdn/current.json")).unwrap()).unwrap();
     store.delete(desc["pack_key"].as_str().unwrap()).unwrap();
     assert_eq!(server.get_status(&signed), 404, "a vanished pack must 404");
     assert_eq!(server.get_status("/healthz"), 200);

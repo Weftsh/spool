@@ -1,23 +1,17 @@
----
-layout: ../../layouts/Docs.astro
-title: Forks and the contribution flow
-description: Zero-copy forks and contributing without write access — what a fork is, how a change from one reaches review and lands, and what a fork does not get to skip.
----
-
 # Forks and the contribution flow
 
 A fork is how somebody with no push credential contributes at all. Here it
 is a **new repository in your namespace that shares the upstream's stored
 objects** until the two histories diverge: creating one takes milliseconds
 and occupies nothing until you push something upstream does not have. A
-contribution is then an ordinary [change](/docs/code-review/) against the
+contribution is then an ordinary [change](code-review.md) against the
 upstream whose commits happen to live in your fork, and it lands through
 the same `OWNERS` sufficiency, required checks and serialized land queue as
 a colleague's. There is no second path.
 
 Two things this page describes as designed and not built — bringing a fork
 up to date with its upstream, and [the maintainer
-firewall](/docs/maintainer-firewall/) — are called out as such
+firewall](maintainer-firewall.md) — are called out as such
 [at the end](#what-is-not-built).
 
 ## What a fork is
@@ -76,7 +70,7 @@ way and the way past it — `bob/widget already exists and is not a fork of
 ada/widget; fork it under another name`.
 
 The fork has its own name, its own permissions, its own push path over
-[HTTPS and SSH](/docs/ssh/) and its own [audit trail](/docs/audit-and-undo/).
+[HTTPS and SSH](ssh.md) and its own [audit trail](audit-and-undo.md).
 Your pushes are new data in a repository you own. Nothing about it is a
 view onto upstream that upstream can change out from under you: the
 storage a fork refers to is pinned for as long as the fork refers to it.
@@ -186,7 +180,7 @@ objects of a change that was approved and then ejected are not swept while
 you are still working on it.
 
 Everything downstream is identical to internal work: [patchsets, `OWNERS`
-sufficiency, required checks and the land queue](/docs/code-review/). The
+sufficiency, required checks and the land queue](code-review.md). The
 Land button on a change from a fork *is* the queue, which is how a
 protection rule and an approval requirement mean the same thing on a
 contribution from a stranger as on one from a colleague. A change's
@@ -205,11 +199,11 @@ with `blocked_reason: fork`, its check rows stay `queued` rather than
 failing because nothing is wrong with the commit, and a maintainer who
 could land the change releases them with
 `POST …/changes/{change}/workflows/approve`. Approval is **per tip**: a new
-patchset from the fork is blocked again. In a [changeset](/docs/changesets/)
+patchset from the fork is blocked again. In a [changeset](changesets.md)
 one unapproved fork member holds every member's composed run, because a
 composed job checks out all of them. The full rules, including the
 organisation-level block that no maintainer can approve away, are in
-[Workflows](/docs/workflows/#changes-pushed-from-a-fork).
+[Workflows](workflows.md#changes-pushed-from-a-fork).
 
 ## What a fork does not get to skip
 
@@ -232,7 +226,7 @@ fork up to date with the repository it came from. Today that is a `git
 fetch` from upstream — your own credential reads it — and a push to your
 fork, in your own clone, which is also where the decision a divergent
 history forces, merge or rebase, is yours to make. When it is built it will be fast-forward only, refusing a
-diverged fork in the [land queue's](/docs/code-review/) house style; a
+diverged fork in the [land queue's](code-review.md) house style; a
 one-click button that silently picked one would sometimes rewrite your
 work.
 
@@ -241,6 +235,6 @@ upstream's storage as it was when the fork was made, and that is
 deliberate: the upstream's data is pinned for the fork, and the fork never
 has to learn about a compaction it did not ask for.
 
-**The [maintainer firewall](/docs/maintainer-firewall/)** — staged intake
+**The [maintainer firewall](maintainer-firewall.md)** — staged intake
 in front of review — is designed and published as a design. A change from
 a fork reaches review the moment it is registered.

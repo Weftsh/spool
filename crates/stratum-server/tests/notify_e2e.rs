@@ -260,69 +260,83 @@ fn watching_is_a_persons_setting_and_a_token_is_refused() {
     );
 }
 
-/// Somebody signed in who belongs to no part of this namespace can still
-/// watch its public repositories.
+/// A reader may watch a repository, and somebody with no role in its
+/// organization cannot even learn it is there to be watched.
 ///
-/// The identity was being read off the principal `rest_repo_auth`
+/// Was `an_outsider_can_watch_a_public_repository`, which pinned a real
+/// bug: the identity was read off the principal `rest_repo_auth`
 /// returns, which answers "what authority has this caller in *this
-/// org*" — `None` for a signed-in outsider. Correct for authorization
-/// and wrong for identity, and it refused the single most ordinary
-/// outsider action there is. Found by a peer hitting the identical shape
-/// on stars.
+/// org*", and it refused the most ordinary outsider action there was.
+/// There is no outsider who may read a repository any more, so the
+/// person here is the least authority that can — a viewer, who may not
+/// push — and the outsider is the negative: `…/watch` answers them
+/// exactly as a repository that does not exist does, for a read and for
+/// a write, or the watch door would be an existence oracle.
 #[test]
-fn an_outsider_can_watch_a_public_repository() {
+fn a_reader_can_watch_and_a_stranger_cannot_learn_the_repository_exists() {
     let minio = Minio::shared();
     let bucket = minio.bucket("notify-outsider");
     let scratch = Scratch::new("notify-outsider");
     let mailbox = Mailbox::temp("notify-outsider");
     let server = spawn(&bucket.base_url, &scratch, "notify-outsider", &mailbox);
     let admin = server.bootstrap_org("acme");
-    server.req(
+    let (st, out) = server.req(
         "POST",
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "open", "public": true })),
+        Some(serde_json::json!({ "name": "open" })),
     );
-    server.req(
-        "POST",
-        "/v1/orgs/acme/repos",
-        &admin,
-        Some(serde_json::json!({ "name": "shut" })),
-    );
+    assert_eq!(st, 201, "{out}");
 
-    // A person with an account and no membership anywhere near acme.
-    server.bootstrap_org("elsewhere");
-    member(&server, "elsewhere", "zoe@elsewhere.test", "Zoe", "owner");
-    let mut zoe = Browser::signed_in(&server, "zoe@elsewhere.test", PASSWORD);
-
-    let (st, out) = zoe.req("GET", "/v1/orgs/acme/repos/open/watch", None);
-    assert_eq!(
-        st, 200,
-        "an outsider was refused a public repo's watch: {out}"
-    );
+    // A viewer: reads, may not push.
+    member(&server, "acme", "val@acme.test", "Val", "viewer");
+    let mut val = Browser::signed_in(&server, "val@acme.test", PASSWORD);
+    let (st, out) = val.req("GET", "/v1/orgs/acme/repos/open/watch", None);
+    assert_eq!(st, 200, "a reader was refused the watch: {out}");
     assert_eq!(out["level"], "participating", "{out}");
-
-    let (st, out) = zoe.req(
+    let (st, out) = val.req(
         "PUT",
         "/v1/orgs/acme/repos/open/watch",
         Some(serde_json::json!({ "level": "all" })),
     );
-    assert_eq!(st, 200, "an outsider could not subscribe: {out}");
+    assert_eq!(st, 200, "a reader could not subscribe: {out}");
+    assert_eq!(out["level"], "all", "{out}");
 
-    // ...and a private repository is still not theirs to watch, or to
-    // learn the existence of.
-    let (st, _) = zoe.req("GET", "/v1/orgs/acme/repos/shut/watch", None);
-    assert_ne!(st, 200, "an outsider watched a private repository");
+    // A person with an account and no role anywhere near acme.
+    server.bootstrap_org("elsewhere");
+    member(&server, "elsewhere", "zoe@elsewhere.test", "Zoe", "owner");
+    let mut zoe = Browser::signed_in(&server, "zoe@elsewhere.test", PASSWORD);
+    for repo in ["open", "never-was"] {
+        let path = format!("/v1/orgs/acme/repos/{repo}/watch");
+        let (st, out) = zoe.req("GET", &path, None);
+        assert_eq!(st, 404, "an outsider read acme/{repo}'s watch: {out}");
+        let (st, out) = zoe.req("PUT", &path, Some(serde_json::json!({ "level": "all" })));
+        assert_eq!(st, 404, "an outsider subscribed to acme/{repo}: {out}");
+        let (st, out) = server.req("GET", &path, "", None);
+        assert_eq!(
+            st, 401,
+            "an anonymous caller read acme/{repo}'s watch: {out}"
+        );
+    }
+    // The refused subscription was not recorded: val is the one watcher.
+    let (st, view) = server.req("GET", "/v1/orgs/acme/repos/open", &admin, None);
+    assert_eq!(st, 200, "{view}");
+    assert_eq!(view["watcher_count"], 1, "{view}");
+
+    assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
 
-/// The watcher count is public, and it counts the right thing.
+/// The watcher count is on the repository view, and it counts the right
+/// thing.
 ///
-/// Two properties, and the second is the one that bit. **Public**: the
+/// Two properties, and the second is the one that bit. **Where**: the
 /// count rides on the repository view beside the fork count rather than
-/// on `…/watch`, which answers "what did *you* choose" and refuses a
-/// stranger. A masthead reading it from there had no number to draw
-/// until somebody signed in and then grew one, which changed the width
-/// of the identity row after paint on every repository page.
+/// on `…/watch`, which answers "what did *you* choose". A masthead
+/// reading it from there had no number to draw until the person's own
+/// setting had loaded and then grew one, which changed the width of the
+/// identity row after paint on every repository page. The view is read
+/// by exactly the people who may read the repository — the count is not
+/// a way round that.
 ///
 /// **The right thing**: only `level = 'all'`. The default subscription
 /// is stored as *no row at all*, so `count(*)` over `repo_watches` is
@@ -330,35 +344,44 @@ fn an_outsider_can_watch_a_public_repository() {
 /// direction" — a number that goes **up** when somebody asks to be left
 /// alone. That is the assertion below that a naive implementation
 /// fails.
+///
+/// Was `the_watcher_count_is_public_and_counts_only_people_who_asked_for_everything`.
 #[test]
-fn the_watcher_count_is_public_and_counts_only_people_who_asked_for_everything() {
+fn the_watcher_count_is_on_the_view_and_counts_only_people_who_asked_for_everything() {
     let minio = Minio::shared();
     let bucket = minio.bucket("notify-watchers");
     let scratch = Scratch::new("notify-watchers");
     let mailbox = Mailbox::temp("notify-watchers");
     let server = spawn(&bucket.base_url, &scratch, "notify-watchers", &mailbox);
     let admin = server.bootstrap_org("acme");
-    server.req(
+    let (st, out) = server.req(
         "POST",
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "open", "public": true })),
+        Some(serde_json::json!({ "name": "open" })),
     );
+    assert_eq!(st, 201, "{out}");
 
     let view = "/v1/orgs/acme/repos/open";
-    // A stranger, with no credential at all, is told the number.
-    let (st, body) = server.req("GET", view, "", None);
-    assert_eq!(st, 200, "a stranger was refused a public repo: {body}");
+    let count = || -> serde_json::Value {
+        let (st, body) = server.req("GET", view, &admin, None);
+        assert_eq!(st, 200, "{body}");
+        body["watcher_count"].clone()
+    };
     assert_eq!(
-        body["watcher_count"], 0,
-        "the count was absent or wrong before anybody watched: {body}"
+        count(),
+        0,
+        "the count was absent or wrong before anybody watched"
     );
+    // Nobody signed out reads it, since nobody signed out reads the
+    // repository.
+    let (st, body) = server.req("GET", view, "", None);
+    assert_eq!(st, 401, "an anonymous caller read the view: {body}");
 
-    server.bootstrap_org("elsewhere");
-    member(&server, "elsewhere", "zoe@elsewhere.test", "Zoe", "owner");
-    member(&server, "elsewhere", "rex@elsewhere.test", "Rex", "member");
-    let mut zoe = Browser::signed_in(&server, "zoe@elsewhere.test", PASSWORD);
-    let mut rex = Browser::signed_in(&server, "rex@elsewhere.test", PASSWORD);
+    member(&server, "acme", "zoe@acme.test", "Zoe", "viewer");
+    member(&server, "acme", "rex@acme.test", "Rex", "member");
+    let mut zoe = Browser::signed_in(&server, "zoe@acme.test", PASSWORD);
+    let mut rex = Browser::signed_in(&server, "rex@acme.test", PASSWORD);
 
     let (st, out) = zoe.req(
         "PUT",
@@ -366,11 +389,9 @@ fn the_watcher_count_is_public_and_counts_only_people_who_asked_for_everything()
         Some(serde_json::json!({ "level": "all" })),
     );
     assert_eq!(st, 200, "{out}");
-    assert_eq!(
-        server.req("GET", view, "", None).1["watcher_count"],
-        1,
-        "somebody watching everything was not counted"
-    );
+    assert_eq!(count(), 1, "somebody watching everything was not counted");
+    // The same number for the watcher, a reader like any other.
+    assert_eq!(zoe.req("GET", view, None).1["watcher_count"], 1);
 
     // Rex asks to be left alone. That writes a row — and it must move
     // the count *down*, or rather leave it exactly where it was.
@@ -381,7 +402,7 @@ fn the_watcher_count_is_public_and_counts_only_people_who_asked_for_everything()
     );
     assert_eq!(st, 200, "{out}");
     assert_eq!(
-        server.req("GET", view, "", None).1["watcher_count"],
+        count(),
         1,
         "somebody who chose Ignore was published as a watcher"
     );
@@ -393,26 +414,22 @@ fn the_watcher_count_is_public_and_counts_only_people_who_asked_for_everything()
         "/v1/orgs/acme/repos/open/watch",
         Some(serde_json::json!({ "level": "participating" })),
     );
-    assert_eq!(
-        server.req("GET", view, "", None).1["watcher_count"],
-        0,
-        "unsubscribing left the count where it was"
-    );
+    assert_eq!(count(), 0, "unsubscribing left the count where it was");
 
     // The server is still serving.
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
 
-/// **Watching a project you are not a member of, and hearing about a
-/// change you had nothing to do with.**
+/// **Watching a project you do not work on, and hearing about a change
+/// you had nothing to do with.**
 ///
 /// Three features meet here and every one of them is tested alone:
-/// `an_outsider_can_watch_a_public_repository` proves a stranger may
-/// subscribe, `fork_pr_e2e` proves an outsider's change lands, and the
-/// tests above prove a notification reaches the people on a change. What
-/// none of them covers is the join — and the join is the entire point of
-/// watching an open-source project. Somebody who is neither the author,
-/// nor a reviewer, nor a member of the org asked to hear about this
+/// `a_reader_can_watch_and_a_stranger_cannot_learn_the_repository_exists`
+/// proves a reader may subscribe, `fork_pr_e2e` proves a reader's change
+/// lands, and the tests above prove a notification reaches the people on
+/// a change. What none of them covers is the join — and the join is the
+/// entire point of watching a project. Somebody who is neither the
+/// author, nor a reviewer, nor able to push asked to hear about this
 /// repository, and a landing is exactly the event they asked for.
 ///
 /// It is the case a participation-based notifier gets wrong by
@@ -440,7 +457,7 @@ fn a_watcher_hears_about_a_landing_they_had_nothing_to_do_with() {
     let (st, out) = ada.req(
         "POST",
         "/v1/orgs/acme/repos",
-        Some(serde_json::json!({ "name": "open", "public": true })),
+        Some(serde_json::json!({ "name": "open" })),
     );
     assert_eq!(st, 201, "{out}");
     let (st, out) = ada.req(
@@ -453,26 +470,20 @@ fn a_watcher_hears_about_a_landing_they_had_nothing_to_do_with() {
     );
     assert_eq!(st, 201, "{out}");
 
-    // Two strangers, in a different org entirely. Zoe wants everything;
-    // Quinn has said to be left alone. Neither can push here.
-    server.bootstrap_org("elsewhere");
-    member(&server, "elsewhere", "zoe@elsewhere.test", "Zoe", "owner");
-    member(
-        &server,
-        "elsewhere",
-        "quinn@elsewhere.test",
-        "Quinn",
-        "member",
-    );
-    let mut zoe = Browser::signed_in(&server, "zoe@elsewhere.test", PASSWORD);
-    let mut quinn = Browser::signed_in(&server, "quinn@elsewhere.test", PASSWORD);
+    // Two readers, who may read the repository and push to nothing —
+    // the closest there is to somebody following a project from outside
+    // it. Zoe wants everything; Quinn has said to be left alone.
+    member(&server, "acme", "zoe@acme.test", "Zoe", "viewer");
+    member(&server, "acme", "quinn@acme.test", "Quinn", "viewer");
+    let mut zoe = Browser::signed_in(&server, "zoe@acme.test", PASSWORD);
+    let mut quinn = Browser::signed_in(&server, "quinn@acme.test", PASSWORD);
 
     let (st, out) = zoe.req(
         "PUT",
         "/v1/orgs/acme/repos/open/watch",
         Some(serde_json::json!({ "level": "all" })),
     );
-    assert_eq!(st, 200, "an outsider could not subscribe: {out}");
+    assert_eq!(st, 200, "a reader could not subscribe: {out}");
     let (st, out) = quinn.req(
         "PUT",
         "/v1/orgs/acme/repos/open/watch",
@@ -481,7 +492,7 @@ fn a_watcher_hears_about_a_landing_they_had_nothing_to_do_with() {
     assert_eq!(st, 200, "{out}");
 
     // Ada opens a change and lands it. Zoe and Quinn are not involved
-    // in it in any way — not author, not reviewer, not org members.
+    // in it in any way — not author, not reviewer, and unable to push.
     // Branch from trunk first: a commit on a new branch with no base is
     // a root commit, and a root commit is correctly not a fast-forward
     // of anything — a real refusal, and not the one this test is about.
@@ -549,7 +560,7 @@ fn a_watcher_hears_about_a_landing_they_had_nothing_to_do_with() {
     let deadline = std::time::Instant::now() + SOON;
     let landing = loop {
         let found = mailbox
-            .to("zoe@elsewhere.test")
+            .to("zoe@acme.test")
             .into_iter()
             .find(|m| m.subject.contains("landed") || m.text.contains("landed"));
         if let Some(m) = found {
@@ -559,7 +570,7 @@ fn a_watcher_hears_about_a_landing_they_had_nothing_to_do_with() {
             std::time::Instant::now() < deadline,
             "the watcher was never told the change landed; they got {:?}",
             mailbox
-                .to("zoe@elsewhere.test")
+                .to("zoe@acme.test")
                 .iter()
                 .map(|m| m.subject.clone())
                 .collect::<Vec<_>>()
@@ -574,10 +585,10 @@ fn a_watcher_hears_about_a_landing_they_had_nothing_to_do_with() {
 
     // And the person who asked to be left alone was left alone.
     assert!(
-        mailbox.to("quinn@elsewhere.test").is_empty(),
+        mailbox.to("quinn@acme.test").is_empty(),
         "somebody who said 'ignore' was mailed anyway: {:?}",
         mailbox
-            .to("quinn@elsewhere.test")
+            .to("quinn@acme.test")
             .iter()
             .map(|m| m.subject.clone())
             .collect::<Vec<_>>()

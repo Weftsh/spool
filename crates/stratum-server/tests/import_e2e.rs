@@ -309,7 +309,7 @@ fn a_repository_with_no_github_origin_cannot_be_imported_into() {
     let (st, out) = server.post(
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "native", "public": true })),
+        Some(serde_json::json!({ "name": "native" })),
     );
     assert_eq!(st, 201, "{out}");
 
@@ -801,7 +801,7 @@ fn the_worker_refuses_a_job_it_cannot_run_and_says_which_way() {
     let (st, out) = server.post(
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "native", "public": true })),
+        Some(serde_json::json!({ "name": "native" })),
     );
     assert_eq!(st, 201, "{out}");
     let native = stratum_control::registry::repo_by_name(&db, &org_id, "native")
@@ -1002,7 +1002,7 @@ fn a_worker_switched_off_does_not_run_and_the_server_still_serves() {
     let (st, out) = server.post(
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "idle", "public": true })),
+        Some(serde_json::json!({ "name": "idle" })),
     );
     assert_eq!(st, 201, "{out}");
     let repo_id = stratum_control::registry::repo_by_name(&db, &org_id, "idle")

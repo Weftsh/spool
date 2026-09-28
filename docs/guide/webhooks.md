@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: Webhooks
-description: Inbound origin webhooks for mirrors; outbound push webhooks for repos.
----
-
 # Webhooks
 
 ## Inbound: keeping mirrors fresh
@@ -44,7 +38,7 @@ verify before trusting.
 
 You can do the same from the repository's **Settings → Push webhooks**
 panel, which is also where the CI intake secret lives — the two are the
-two halves of one job. See [CI integration](/docs/ci-integration/) for the
+two halves of one job. See [CI integration](ci-integration.md) for the
 whole loop.
 
 ### The events

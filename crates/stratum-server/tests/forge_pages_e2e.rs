@@ -1,40 +1,27 @@
-//! The public forge pages: `/{owner}` and `/{owner}/{repo}/…` render the
-//! dashboard SPA to a signed-out visitor, served from the router's
-//! fallback rather than from a route of their own.
+//! The forge pages: `/{owner}` and `/{owner}/{repo}/…` render the
+//! dashboard SPA, served from the router's fallback rather than from a
+//! route of their own.
 //!
-//! Doing it in the fallback is what keeps the marketing site in front of
+//! Doing it in the fallback is what keeps every real route in front of
 //! the forge: a root `.route("/:owner")` would have matchit prefer a
-//! parameterised segment over the Astro files answered by the same
-//! fallback, so `/mirror`, `/repos`, `/monorepo`, `/gitfarm` and
-//! `/discover` would have quietly become somebody's profile. These tests
-//! hold that ordering, and hold the two things it must not disturb: a
-//! typo is still a real 404, and the git wire is untouched.
+//! parameterised segment over the git wire and anything else the
+//! fallback decides, so a reserved name would quietly have become
+//! somebody's profile. These tests hold that ordering, and hold the two
+//! things it must not disturb: a typo is still a real 404, and the git
+//! wire is untouched.
+//!
+//! The shell is content-free. Every repository is private to its
+//! organisation, so what a signed-out visitor sees on one of these pages
+//! is decided by the SPA's API calls — which answer them 401 — and not
+//! by the shell, which is the same bytes for everybody.
 
 use stratum_testkit::gitcli::{self, Scratch};
 use stratum_testkit::{Minio, Server};
 
-/// A server with both asset dirs configured, the way a real deployment
-/// runs. The contents stand in for the built site and SPA: what is being
-/// tested is which file the fallback chooses, not what Astro or Vite
-/// emit.
+/// A server with the dashboard configured, the way a real deployment
+/// runs. The contents stand in for the built SPA: what is being tested
+/// is which file the fallback chooses, not what Vite emits.
 fn spawn_with_assets(store_url: &str, scratch: &Scratch) -> Server {
-    let site = scratch.path().join("site");
-    std::fs::create_dir_all(site.join("monorepo")).unwrap();
-    std::fs::create_dir_all(site.join("unreserved")).unwrap();
-    std::fs::write(site.join("index.html"), "<h1>marketing home</h1>").unwrap();
-    std::fs::write(
-        site.join("monorepo/index.html"),
-        "<h1>the monorepo product page</h1>",
-    )
-    .unwrap();
-    // A page that ships *without* a denylist entry behind it — the state
-    // the site was actually in for `monorepo`. See the ordering test.
-    std::fs::write(
-        site.join("unreserved/index.html"),
-        "<h1>a page nobody reserved</h1>",
-    )
-    .unwrap();
-
     let dash = scratch.path().join("dashboard");
     std::fs::create_dir_all(&dash).unwrap();
     std::fs::write(dash.join("index.html"), "<div id=\"root\">SPA SHELL</div>").unwrap();
@@ -42,17 +29,26 @@ fn spawn_with_assets(store_url: &str, scratch: &Scratch) -> Server {
     Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
         .db_hint("forge-pages")
         .data_dir(scratch.path().join("data"))
-        .env("STRATUM_SITE_DIR", site.display().to_string())
         .env("STRATUM_DASHBOARD_DIR", dash.display().to_string())
         .env("STRATUM_COMPACT_POLL_SECS", "86400")
         .start()
 }
 
-/// GET with no credentials at all, reporting `(status, body)` — an
-/// anonymous browser, which is the visitor this whole surface exists
-/// for. `Server::req` parses JSON; these answers are HTML.
+/// GET with no credentials at all, reporting `(status, body)` — a
+/// signed-out browser, the visitor the shell has to work for before it
+/// can send them to sign in. `Server::req` parses JSON; these answers
+/// are HTML.
 fn anon_get(server: &Server, path: &str) -> (u16, String) {
-    let resp = match ureq::get(&format!("{}{path}", server.base)).call() {
+    get_as(server, path, "")
+}
+
+/// The same GET with a bearer token, or none when `token` is empty.
+fn get_as(server: &Server, path: &str, token: &str) -> (u16, String) {
+    let mut r = ureq::get(&format!("{}{path}", server.base));
+    if !token.is_empty() {
+        r = r.set("Authorization", &format!("Bearer {token}"));
+    }
+    let resp = match r.call() {
         Ok(r) => r,
         Err(ureq::Error::Status(_, r)) => r,
         Err(e) => panic!("transport GET {path}: {e}"),
@@ -62,19 +58,20 @@ fn anon_get(server: &Server, path: &str) -> (u16, String) {
 }
 
 #[test]
-fn public_forge_urls_render_the_spa_and_typos_still_404() {
+fn forge_urls_render_the_spa_and_typos_still_404() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forge-pages");
     let scratch = Scratch::new("forge-pages");
     let server = spawn_with_assets(&bucket.base_url, &scratch);
     let admin = server.bootstrap_org("acme");
-    server.req(
+    let (st, out) = server.req(
         "POST",
         "/v1/orgs/acme/repos",
         &admin,
         Some(serde_json::json!({ "name": "widget" })),
     );
-    server.req(
+    assert_eq!(st, 201, "{out}");
+    let (st, out) = server.req(
         "POST",
         "/v1/orgs/acme/repos/widget/commits",
         &admin,
@@ -83,9 +80,11 @@ fn public_forge_urls_render_the_spa_and_typos_still_404() {
             "operations": [{"op": "put", "path": "readme", "content": "hello\n"}],
         })),
     );
+    assert_eq!(st, 201, "{out}");
 
     // The namespace root and every depth beneath it are the SPA, to a
-    // visitor holding no session and no token.
+    // visitor holding no session and no token — the shell is how they
+    // are sent to sign in.
     for path in [
         "/acme",
         "/acme/",
@@ -98,25 +97,24 @@ fn public_forge_urls_render_the_spa_and_typos_still_404() {
         assert!(body.contains("SPA SHELL"), "{path} served {body:?}");
     }
 
-    // A private repo is the SPA too, and that is deliberate: the shell
-    // carries no repo content, and its API call gets the existing
-    // masking. A 404 here would be a *worse* answer — it would tell an
-    // anonymous visitor that a name is absent when a member browsing the
-    // same URL must be able to load the page.
-    server.req(
-        "POST",
-        "/v1/orgs/acme/repos",
-        &admin,
-        Some(serde_json::json!({ "name": "secret" })),
-    );
-    let (st, body) = anon_get(&server, "/acme/secret");
+    // A repository that does not exist is the SPA too, and that is
+    // deliberate: the repo is never looked up here. The shell carries no
+    // repo content, and its API call gets the existing masking — a 404
+    // here for an absent name and a 200 for a present one would be an
+    // oracle for which private repositories a namespace holds.
+    let (st, body) = anon_get(&server, "/acme/no-such-repo");
     assert_eq!(st, 200);
     assert!(body.contains("SPA SHELL"));
+    // …and the API behind it is where the visitor is refused, the same
+    // way for the real repository and the absent one.
+    let (real, _) = anon_get(&server, "/v1/orgs/acme/repos/widget");
+    let (absent, _) = anon_get(&server, "/v1/orgs/acme/repos/no-such-repo");
+    assert_eq!((real, absent), (401, 401));
 
     // A namespace nobody has taken is a real 404, not a soft one. This
     // is the reason the fallback pays for a lookup instead of gating on
     // name shape alone: a 200 here would make every typo and every
-    // crawler probe an indexable page indistinguishable from a profile.
+    // crawler probe an indexable page indistinguishable from a real one.
     for path in ["/typo-here", "/typo-here/widget", "/nobody/at/all"] {
         let (st, body) = anon_get(&server, path);
         assert_eq!(st, 404, "{path} answered {st} with {body:?}");
@@ -130,67 +128,56 @@ fn public_forge_urls_render_the_spa_and_typos_still_404() {
         assert_eq!(st, 404, "{path}");
     }
 
-    // The site keeps precedence, and `monorepo` cannot show that on its
-    // own: it is *also* reserved, so the SPA branch would decline it
-    // whichever order the two were tried in. The claim that needs its
-    // own evidence is the one the design rests on — the site is looked
-    // up **first**, so a page that shipped before anyone reserved its
-    // name is safe even against a namespace that already exists. That is
-    // precisely the state `/monorepo` was in, and the reason not to do
-    // this with a root `.route("/:owner")`.
-    server.bootstrap_org("unreserved");
-    let (st, body) = anon_get(&server, "/unreserved");
-    assert_eq!(st, 200);
-    assert!(
-        body.contains("a page nobody reserved"),
-        "an existing namespace shadowed a live site page: {body:?}"
-    );
-
-    let (st, body) = anon_get(&server, "/monorepo");
-    assert_eq!(st, 200);
-    assert!(
-        body.contains("the monorepo product page"),
-        "the SPA shadowed a marketing page: {body:?}"
-    );
-    let (st, body) = anon_get(&server, "/");
-    assert_eq!(st, 200);
-    assert!(body.contains("marketing home"), "{body:?}");
-
-    // And the denylist is the second lock on the same door: `monorepo`
-    // cannot be taken as a namespace at all. Asserted through the org
-    // creation path rather than against `is_reserved` directly, because
-    // what matters is that the refusal reaches a person typing a name.
+    // A reserved name is nobody's page: it is a 404 whether or not
+    // anything is served under it, and it cannot be taken as a namespace
+    // at all. Asserted through the org creation path rather than against
+    // `is_reserved` directly, because what matters is that the refusal
+    // reaches a person typing a name.
+    let (st, _) = anon_get(&server, "/monorepo");
+    assert_eq!(st, 404, "a reserved name rendered as a namespace");
     let taken = server.admin(&["admin", "bootstrap", "--org", "monorepo"]);
     assert!(
         taken.is_err(),
         "monorepo was available as a namespace: {taken:?}"
     );
+    // The SPA's own top-level pages are reserved *so that* nobody can
+    // shadow them, and they are served rather than refused.
+    for path in ["/search", "/login", "/orgs", "/issues", "/notifications"] {
+        let (st, body) = anon_get(&server, path);
+        assert_eq!(st, 200, "{path}");
+        assert!(body.contains("SPA SHELL"), "{path} served {body:?}");
+    }
 
     // The git wire is registered as real routes, so it matches before
-    // the fallback is ever consulted: an anonymous clone of the public
-    // repo still works and still fscks (I11).
+    // the fallback is ever consulted: a clone with a credential still
+    // works and still fscks (I11)…
     let base = server.base.strip_prefix("http://").unwrap();
     gitcli::clone_and_fsck(
-        &format!("http://{base}/acme/widget.git"),
-        &scratch.path().join("anon-clone"),
+        &format!("http://x:{admin}@{base}/acme/widget.git"),
+        &scratch.path().join("clone"),
     );
-    // Including the un-suffixed form, which shares its first two
+    // …including the un-suffixed form, which shares its first two
     // segments with the SPA's repo URL and must still be git.
     gitcli::clone_and_fsck(
-        &format!("http://{base}/acme/widget"),
-        &scratch.path().join("anon-clone-bare"),
+        &format!("http://x:{admin}@{base}/acme/widget"),
+        &scratch.path().join("clone-bare"),
     );
     // A ref advert reached by hand — no `Git-Protocol` header — is
     // refused by the git handler for wanting protocol v2. That refusal
     // is the evidence: the route answered, the fallback never saw it.
     // Had the SPA claimed this path it would have been a cheerful 200
     // of HTML, which stock git would have tried to parse as pkt-lines.
-    let (st, body) = anon_get(&server, "/acme/widget/info/refs?service=git-upload-pack");
+    let advert = "/acme/widget/info/refs?service=git-upload-pack";
+    let (st, body) = get_as(&server, advert, &admin);
     assert_eq!(st, 400, "{body:?}");
     assert!(
         body.contains("protocol v2 required"),
         "the SPA answered a git request: {body:?}"
     );
+    // Without one it is git's challenge, not the shell.
+    let (st, body) = anon_get(&server, advert);
+    assert_eq!(st, 401, "{body:?}");
+    assert!(!body.contains("SPA SHELL"), "{body:?}");
 
     // The attack-case rule: the server is still healthy and serving.
     assert!(server.healthy());
@@ -241,54 +228,68 @@ fn a_server_without_a_dashboard_dir_still_404s_forge_urls() {
     assert!(server.healthy());
 }
 
-/// A stranger discovers a namespace's public repositories through
-/// search, and never sees its private ones.
+/// A namespace's repositories are found by the people who belong to it,
+/// and by nobody else.
 ///
-/// This is the public profile page's data source, and it is search
-/// rather than `GET /v1/orgs/{org}/repos` on purpose. That listing is a
-/// protected endpoint — three suites depend on it refusing both absent
-/// and bad credentials (`api_edges_e2e` uses it to prove REST sends no
-/// Basic challenge, `http_pentest_e2e` uses it as the target where
-/// hostile headers must never yield 200, and `git_e2e` uses it for the
-/// cross-tenant 404). Widening it to serve anonymous callers tripped all
-/// three, which is a contract saying so three times.
+/// This used to be "a stranger finds only the public repositories of a
+/// namespace": the public profile page read search, anonymously, for the
+/// repositories anybody could see. There are no public repositories, so
+/// the page has nothing to show a stranger — and search says so in the
+/// two ways it can: no credential is a 401, and a credential from
+/// another organisation finds nothing here, private repository names
+/// included, while a member finds every one.
 ///
-/// The page was reading the wrong endpoint. Search already applies
-/// `registry::Viewer` for every kind of caller and was built for exactly
-/// this question.
+/// It is search rather than `GET /v1/orgs/{org}/repos` on purpose. That
+/// listing is a protected endpoint — three suites depend on it refusing
+/// both absent and bad credentials (`api_edges_e2e` uses it to prove
+/// REST sends no Basic challenge, `http_pentest_e2e` uses it as the
+/// target where hostile headers must never yield 200, and `git_e2e`
+/// uses it for the cross-tenant 404).
 #[test]
-fn a_stranger_finds_only_the_public_repositories_of_a_namespace() {
+fn a_namespace_s_repositories_are_found_only_by_its_members() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forge-list");
     let scratch = Scratch::new("forge-list");
     let server = spawn_with_assets(&bucket.base_url, &scratch);
     let admin = server.bootstrap_org("acme");
-    for (name, public) in [("open-one", true), ("open-two", true), ("secret", false)] {
-        server.req(
+    let rival = server.bootstrap_org("rival");
+    for name in ["one", "two", "secret"] {
+        let (st, out) = server.req(
             "POST",
             "/v1/orgs/acme/repos",
             &admin,
             Some(serde_json::json!({ "name": name })),
         );
+        assert_eq!(st, 201, "{out}");
     }
+    let names = |body: &str| -> Vec<String> {
+        let found: serde_json::Value = serde_json::from_str(body).expect("JSON");
+        found["repos"]
+            .as_array()
+            .unwrap_or_else(|| panic!("repos array in {found}"))
+            .iter()
+            .map(|r| r["name"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let search = "/v1/search/repos?q=acme&limit=25";
 
-    let (status, body) = anon_get(&server, "/v1/search/repos?q=acme&limit=25");
-    assert_eq!(status, 200, "a stranger was refused the search: {body}");
-    let found: serde_json::Value = serde_json::from_str(&body).expect("JSON");
-    let names: Vec<&str> = found["repos"]
-        .as_array()
-        .expect("repos array")
-        .iter()
-        .map(|r| r["name"].as_str().unwrap())
-        .collect();
-    assert!(
-        names.contains(&"open-one") && names.contains(&"open-two"),
-        "public repositories missing from what a stranger can find: {names:?}"
+    let (status, body) = anon_get(&server, search);
+    assert_eq!(status, 401, "an anonymous search was answered: {body}");
+    assert!(!body.contains("secret"), "{body}");
+
+    let (status, body) = get_as(&server, search, &rival);
+    assert_eq!(status, 200, "another org was refused a search: {body}");
+    assert_eq!(
+        names(&body),
+        Vec::<String>::new(),
+        "another org found acme's repositories"
     );
-    assert!(
-        !names.contains(&"secret"),
-        "a private repository leaked to an anonymous search: {names:?}"
-    );
+
+    let (status, body) = get_as(&server, search, &admin);
+    assert_eq!(status, 200, "{body}");
+    let mut found = names(&body);
+    found.sort();
+    assert_eq!(found, ["one", "secret", "two"], "a member's search");
 
     // The protected listing stays protected — this is the property the
     // other three suites rest on, restated here so a future change to
@@ -298,4 +299,7 @@ fn a_stranger_finds_only_the_public_repositories_of_a_namespace() {
         status, 401,
         "the namespace listing stopped refusing strangers"
     );
+    let (status, _) = get_as(&server, "/v1/orgs/acme/repos", &rival);
+    assert_eq!(status, 404, "the namespace listing answered another org");
+    assert!(server.healthy());
 }

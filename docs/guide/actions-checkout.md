@@ -1,13 +1,7 @@
----
-layout: ../../layouts/Docs.astro
-title: "Weft Checkout for GitHub Actions"
-description: Replace actions/checkout with one line that clones from your Weft mirror and falls back, by name, when the mirror cannot serve the commit.
----
-
 # Weft Checkout for GitHub Actions
 
 `weftsh/checkout` is a drop-in for `actions/checkout` that fetches the
-commit from a [mirror on Weft](/docs/quickstart-mirror/) instead of from
+commit from a [mirror on Weft](quickstart-mirror.md) instead of from
 github.com. Developers keep pushing to GitHub; only the read path CI takes
 moves. If the mirror cannot serve the commit, `actions/checkout` runs
 instead and the job says why. Adopting it is one line, not a decision.
@@ -24,11 +18,11 @@ The action is open source at
 
 ## What you need
 
-1. A mirror. [Mirror in 5 minutes](/docs/quickstart-mirror/) covers both
+1. A mirror. [Mirror in 5 minutes](quickstart-mirror.md) covers both
    a public origin (paste the URL) and a private one (install the Weft app
    and pick the repository).
 2. For a private mirror, a token with `repo:read`, stored as a repository
-   secret. [Minting one](/docs/authentication/#minting-and-revoking-tokens)
+   secret. [Minting one](authentication.md#minting-and-revoking-tokens)
    is a single request or a click in Settings; restrict it to the one
    mirror if this is the only thing the token is for.
 
@@ -46,7 +40,7 @@ from, and `origin`, the GitHub repository, so a later `git push origin`
 goes where a developer's push goes.
 
 Because the fetch goes to a mirror, it is served by the
-[freshness contract](/docs/freshness-contract/): a commit the mirror does
+[freshness contract](freshness-contract.md): a commit the mirror does
 not have yet is fetched from your origin before the response, or refused
 by name. There is no way to get a stale tree.
 

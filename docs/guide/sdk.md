@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: TypeScript SDK
-description: "@weftsh/sdk — create repositories, commit, read, branch and undo from TypeScript, with repo-scoped git remotes and webhook verification built in."
----
-
 # TypeScript SDK
 
 `@weftsh/sdk` is the Repos API in a few lines of TypeScript: a repository per
@@ -30,7 +24,7 @@ It has no dependencies, ships ESM and CommonJS with full types, and runs
 anywhere `fetch` does: Node 20+, Bun, Deno and edge runtimes. The source and
 the full reference are on
 [GitHub](https://github.com/weftsh/typescript-sdk); the same API is in the
-[Python SDK](/docs/sdk-python/).
+[Python SDK](sdk-python.md).
 
 ## Quickstart
 
@@ -41,7 +35,7 @@ From nothing to a repository you have committed to over HTTP and cloned with
 and an organization, then mint a token under **Settings → Tokens** with
 `org:read` and `repo:write`. `repo:write` creates and commits; `org:read` lets
 the SDK mint the short-lived clone credential in the last step. An `org:admin`
-token does both. See [authentication](/docs/authentication/) for the rest.
+token does both. See [authentication](authentication.md) for the rest.
 
 ```bash
 export WEFT_TOKEN=weft_…     # the token you just minted
@@ -159,7 +153,7 @@ const { commit, parent } = await repo
 ```
 
 `context` is recorded immutably beside the commit and the token that made it
-— see [audit & undo](/docs/audit-and-undo/).
+— see [audit & undo](audit-and-undo.md).
 
 **Concurrency.** Pass `expectedParent` with the commit you built against. If
 the branch has moved, `send()` throws a `WeftConflictError` whose
@@ -263,7 +257,7 @@ export async function POST(request: Request) {
 ```
 
 Subscribe with `repo.createWebhook({ url })`, which returns the secret once.
-What each event carries is in [webhooks](/docs/webhooks/#the-events).
+What each event carries is in [webhooks](webhooks.md#the-events).
 
 ## Errors
 
@@ -279,6 +273,6 @@ still have happened. Pass your own `fetch` to decide what is safe to retry.
 ## Everything else
 
 The SDK also covers forks, mirrors, repository settings, tokens and bundle
-[export](/docs/export/); the [README](https://github.com/weftsh/typescript-sdk#readme)
+[export](export.md); the [README](https://github.com/weftsh/typescript-sdk#readme)
 has every method. Anything the SDK does not wrap is in the REST API, described
-in full by [`/openapi.json`](/openapi.json).
+in full by [`/openapi.json`](../openapi.json).

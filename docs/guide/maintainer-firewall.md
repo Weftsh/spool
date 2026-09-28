@@ -1,9 +1,3 @@
----
-layout: ../../layouts/Docs.astro
-title: The maintainer firewall
-description: The design for staged contribution intake — machines spending machine time before humans spend human time — and the two capabilities it deliberately will not have.
----
-
 # The maintainer firewall
 
 **None of this is built. This page is a design, published as one.** There is
@@ -11,7 +5,7 @@ no intake worker, no trust ladder and no style gate in the product today; a
 change reaching a repository today reaches review the moment it is
 registered. What *does* exist, and is unchanged by any of this, is the
 machinery the design sits in front of: [changes, patchsets, `OWNERS`
-approval sufficiency and the land queue](/docs/code-review/). We publish the
+approval sufficiency and the land queue](code-review.md). We publish the
 design ahead of the build for the same reason this site publishes what the
 land queue cannot do as plainly as what it can — a maintainer deciding where
 to host a project is better served by a plan they can argue with than by
@@ -34,7 +28,7 @@ could never have landed would never become a tab a maintainer has to close.
 
 **Checks pass.** Intake would read the `change_checks` your CI already
 posts — that reporting API exists today and is documented under
-[Changes, OWNERS & landing](/docs/code-review/) — and hold the change at the
+[Changes, OWNERS & landing](code-review.md) — and hold the change at the
 door until they are green. Nothing new is invented here; a red check would
 stop a change at intake for the same reason it already stops one at the
 queue.
@@ -124,7 +118,7 @@ just sent you — is a sandboxing product, not a forge feature, and
 shipping a half-built one is how a forge becomes an
 arbitrary-code-execution surface. This is why a change whose commits come from
 another repository is recorded as `blocked` and its
-[workflows](/docs/workflows/) do not start: they were written by the
+[workflows](workflows.md) do not start: they were written by the
 contributor, and running them would hand a stranger a repository token
 and a machine. There is no approval button yet. Branches in the
 repository itself are a different question, and their workflows do run
