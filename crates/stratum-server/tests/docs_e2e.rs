@@ -488,9 +488,10 @@ fn the_local_web_job_reinstalls_when_the_lockfile_moved() {
 /// could act on.
 ///
 /// While namespaces were operator-provisioned this needed a typo to
-/// happen. Signup makes it a stranger's choice, so the denylist has to be
-/// right — and it has to *stay* right, which is what this is for: add a
-/// top-level route without reserving it and this fails.
+/// happen. A handle chosen when accepting an invitation makes it a
+/// newcomer's choice, so the denylist has to be right — and it has to
+/// *stay* right, which is what this is for: add a top-level route
+/// without reserving it and this fails.
 #[test]
 fn no_router_path_can_be_taken_as_a_namespace() {
     const APP: &str = include_str!("../src/app.rs");

@@ -7294,23 +7294,19 @@ fn the_org_wide_query_narrows_by_repository_and_masks_what_it_cannot_see() {
     let (_, out) = as_person(server, &dev, "GET", &q("is:open author:@me repo:app"), None);
     assert_eq!(keys(&out), vec!["Idd000001"], "{out}");
 
-    // A repository this caller may not read, and one that does not
-    // exist, answer the same empty page — so neither tells the other
-    // apart, and neither is confirmed. Another organisation's token may
-    // read none of acme's repositories, so every one of them is that
-    // page for it.
+    // Another organisation's token may read none of acme's
+    // repositories, and is answered exactly as a name that is nobody's
+    // organisation is — whatever it filters on. It used to get an empty
+    // 200, which told it that `acme` exists.
     let rival = server.bootstrap_org("rival");
+    let missing = server.get("/v1/orgs/nobody-holds-this/changes", &rival);
+    assert_eq!(missing.0, 404, "{}", missing.1);
     for repo in ["vault", "web", "nosuchrepo"] {
-        let (st, out) = server.get(&q(&format!("repo:{repo}")), &rival);
-        assert_eq!(st, 200, "{out}");
-        assert!(keys(&out).is_empty(), "repo:{repo} for a rival org: {out}");
+        let answer = server.get(&q(&format!("repo:{repo}")), &rival);
+        assert_eq!(answer, missing, "repo:{repo} for a rival org");
     }
-    let (st, out) = server.get(org, &rival);
-    assert_eq!(st, 200, "{out}");
-    assert!(
-        keys(&out).is_empty(),
-        "the whole org for a rival org: {out}"
-    );
+    let answer = server.get(org, &rival);
+    assert_eq!(answer, missing, "the whole org for a rival org");
     // Anonymous is told to sign in rather than handed any page, for a
     // repository that exists and one that does not.
     for repo in ["vault", "nosuchrepo"] {
@@ -7371,12 +7367,12 @@ fn the_org_wide_query_narrows_by_repository_and_masks_what_it_cannot_see() {
     let (st, out) = server.get(org, "not-a-real-token");
     assert_eq!(st, 401, "{out}");
 
-    // `author:@me` asks who the caller *is*, not what they may do — so
-    // it has to resolve for somebody signed in to this product and not
-    // a member of this organisation. Their page is empty because every
-    // repository is still decided one at a time, but the term itself
-    // must not fall over: a signed-in stranger who got a 401 here would
-    // be told to sign in on a page they are already signed in on.
+    // Somebody signed in to this server who is not in this organisation
+    // is answered as a name nobody holds is — 404, never the 401 that
+    // would tell them to sign in on a page they are signed in on, and
+    // never an empty page that would tell them `acme` exists. Asking
+    // who they are (`author:@me`) or where to look (`repo:`) changes
+    // nothing.
     server
         .admin(&[
             "admin",
@@ -7394,15 +7390,18 @@ fn the_org_wide_query_narrows_by_repository_and_masks_what_it_cannot_see() {
         ])
         .expect("a person in another org");
     let stranger = sign_in(server, "stranger@rival.test");
-    let (st, out) = as_person(server, &stranger, "GET", &q("author:@me"), None);
-    assert_eq!(st, 200, "{out}");
-    assert!(keys(&out).is_empty(), "{out}");
-    // …and resolving who they are gave them no authority: acme's
-    // repositories are as empty a page for them as for any other
-    // organisation's credential, while the viewer above reads them.
-    let (st, out) = as_person(server, &stranger, "GET", &q("repo:web"), None);
-    assert_eq!(st, 200, "{out}");
-    assert!(keys(&out).is_empty(), "{out}");
+    let missing = as_person(
+        server,
+        &stranger,
+        "GET",
+        "/v1/orgs/nobody-holds-this/changes",
+        None,
+    );
+    assert_eq!(missing.0, 404, "{}", missing.1);
+    for terms in ["author:@me", "repo:web", ""] {
+        let answer = as_person(server, &stranger, "GET", &q(terms), None);
+        assert_eq!(answer, missing, "{terms:?} for a signed-in outsider");
+    }
 
     let (st, out) = server.get(&q("assignee:me"), admin);
     assert_eq!(st, 400, "{out}");

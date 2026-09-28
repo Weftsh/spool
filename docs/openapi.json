@@ -1117,16 +1117,16 @@
     "/v1/orgs/{org}/profile": {
       "get": {
         "summary": "An organization's profile",
-        "description": "Display name, description, location, website and contact address. Needs a signed-in caller; with none the answer is 401. An org that has never been edited reads exactly like one whose fields were cleared — there is no second “no profile yet” state for a page to handle.",
+        "description": "Display name, description, location, website and contact address. For anybody in the organization, by session or by token. An org that has never been edited reads exactly like one whose fields were cleared — there is no second “no profile yet” state for a page to handle.",
         "responses": {
           "200": {
             "description": "{ org, display_name, description, location, website, contact_email }"
           },
-          "404": {
-            "description": "No such org"
-          },
           "401": {
-            "description": "Nobody is signed in"
+            "description": "No credential, or one that does not authenticate"
+          },
+          "404": {
+            "description": "No such org, or the caller is not in it — the two are not told apart"
           }
         }
       },
@@ -1183,7 +1183,7 @@
         "security": [],
         "responses": {
           "200": {
-            "description": "{ id, email, name, created_at, orgs: [{ id, name, role }] }"
+            "description": "{ id, email, name, created_at, handle, orgs: [{ id, name, role }] }"
           },
           "401": {
             "description": "not signed in"
@@ -1193,14 +1193,17 @@
     },
     "/v1/auth/accept-invite": {
       "post": {
-        "summary": "Redeem an invitation link, creating the account if this is a new person, and sign in. Single use.",
+        "summary": "Redeem an invitation link and sign in. For a new person this makes the account — the only way, besides an operator's `admin user-create`, that one is made — with its address proved, and its personal namespace: `handle` if given, otherwise made from the address. For an existing account only `invite` matters. Single use; a refusal writes nothing, so the same link works again.",
         "security": [],
         "responses": {
           "201": {
-            "description": "{ id, email, name, created_at, orgs: [...] } and a session cookie"
+            "description": "{ id, email, name, created_at, handle, orgs: [...] } and a session cookie"
           },
           "400": {
-            "description": "invite is unknown, expired, already used, or the name/password is unusable"
+            "description": "invite is unknown, expired or already used; or the name, password or handle is unusable (a bad shape or a reserved word)"
+          },
+          "409": {
+            "description": "the handle asked for is already somebody's namespace; the invitation is untouched"
           }
         }
       }
@@ -1218,38 +1221,6 @@
         }
       }
     },
-    "/v1/auth/signup": {
-      "post": {
-        "summary": "Create an account and its personal namespace, and mail a confirmation link. The handle is checked first and its refusals are plain — namespace names are unique on the server and appear in every clone URL, so \"that one is taken\" gives nothing away. Everything after that answers identically whether or not the address is already registered.",
-        "responses": {
-          "202": {
-            "description": "{ status, detail } — always this, whether a message was sent, the address already has an account (its owner is mailed a note saying nothing was created), or the rate limit was hit"
-          },
-          "400": {
-            "description": "invalid handle, address, name, or a password under 12 characters"
-          },
-          "409": {
-            "description": "that handle is taken or reserved"
-          }
-        }
-      }
-    },
-    "/v1/auth/verify": {
-      "post": {
-        "summary": "Redeem a confirmation link and sign in. Single-use; sets the session cookie.",
-        "responses": {
-          "200": {
-            "description": "the account, as /v1/auth/me returns it"
-          },
-          "401": {
-            "description": "the account is disabled"
-          },
-          "404": {
-            "description": "malformed, unknown, spent, expired, or a reset token presented here"
-          }
-        }
-      }
-    },
     "/v1/auth/github/start": {
       "get": {
         "summary": "Begin signing in with GitHub. Answers a 303 to GitHub's authorization screen and parks a single-use anti-CSRF state in an HttpOnly `weft_ghauth` cookie; the callback refuses unless the `state` it is handed matches that cookie, which is what proves the browser finishing the flow is the one that started it. Takes no credentials — the caller is by definition not signed in yet. A deployment whose App has no OAuth client configured redirects to the dashboard with `github=unavailable` rather than leaving for a URL that cannot work.",
@@ -1262,7 +1233,7 @@
     },
     "/v1/auth/github/callback": {
       "get": {
-        "summary": "GitHub sends a browser here after the authorization screen. The `state` must match the `weft_ghauth` cookie this browser was given, and the `code` is exchanged for the person's token to read `GET /user` and `GET /user/emails`. An account is resolved in three steps: the linked identity, keyed on GitHub's numeric user id so a renamed login still lands on it; then an account whose sign-in address matches one GitHub reports **primary and verified**; then a new account, created with no password and with its address already proved, so it may create immediately without a confirmation mail. Only the `verified` flag is trusted — an unproved primary answers `noemail` and makes nothing. Answers a redirect into the dashboard either way, carrying `github=ok|new|denied|expired|noemail|emailtaken|disabled|unavailable|error`; `ok` and `new` also set the session cookie, and `new` is the only one with onboarding left to do.",
+        "summary": "GitHub sends a browser here after the authorization screen. The `state` must match the `weft_ghauth` cookie this browser was given, and the `code` is exchanged for the person's token to read `GET /user` and `GET /user/emails`. It signs in to an account that already exists and never makes one: the linked identity, keyed on GitHub's numeric user id so a renamed login still lands on it; or, the first time, the account whose sign-in address is the one GitHub reports **primary and verified**, which is then linked. Only the `verified` flag is trusted — an unproved primary answers `noemail`. Answers a redirect into the dashboard either way, carrying `github=ok|noaccount|denied|expired|noemail|disabled|unavailable|error`; only `ok` sets the session cookie.",
         "parameters": [
           {
             "name": "code",
@@ -1299,19 +1270,9 @@
         }
       }
     },
-    "/v1/auth/resend-verification": {
-      "post": {
-        "summary": "Send another confirmation link. Answers identically for a live account, an already-confirmed one, an unknown address and a malformed one.",
-        "responses": {
-          "202": {
-            "description": "{ status, detail }"
-          }
-        }
-      }
-    },
     "/v1/auth/forgot-password": {
       "post": {
-        "summary": "Mail a password-reset link. Same uniform answer as resend-verification. A disabled account gets no link — recovering one an operator switched off would undo the switching off.",
+        "summary": "Mail a password-reset link. Answers identically for a known address, an unknown one, a malformed one and one over the rate limit. A disabled account gets no link — recovering one an operator switched off would undo the switching off.",
         "responses": {
           "202": {
             "description": "{ status, detail }"
@@ -1333,7 +1294,7 @@
             "description": "the account is disabled"
           },
           "404": {
-            "description": "malformed, unknown, spent, expired, or a verification token presented here"
+            "description": "malformed, unknown, spent, expired, or a token of another kind"
           }
         }
       }
@@ -2961,7 +2922,7 @@
     },
     "/v1/orgs/{org}/changes": {
       "get": {
-        "summary": "Every change in the organization the caller may read, newest first — the org-wide list the changeset picker reads, so composing does not begin with a request per repository. Needs a credential: with none the answer is 401. No org-level scope is required beyond that: each repository is authorized exactly as its own changes list is, so a token bound to one repository sees that repository, and a credential from another organization sees an empty list.",
+        "summary": "Every change in the organization the caller may read, newest first — the org-wide list the changeset picker reads, so composing does not begin with a request per repository. Needs a credential: with none the answer is 401. No org-level scope is required beyond that: each repository is authorized exactly as its own changes list is, so a token bound to one repository sees that repository, and a credential from another organization is answered 404, exactly as a name that is nobody's organization is.",
         "parameters": [
           {
             "name": "q",
@@ -3015,13 +2976,13 @@
             "description": "Unknown state, an unrecognised or repeated q term (the message names it), a state and an is: that disagree, or an `after` this list did not mint"
           },
           "401": {
-            "description": "No credential"
+            "description": "no credential, or one that does not authenticate — for an organization that exists and one that does not alike"
           },
           "403": {
             "description": "author:@me or needs:my-approval under a service token, which is nobody's reviewer"
           },
           "404": {
-            "description": "No such organization"
+            "description": "no such organization, or the caller is not in it — the two are not told apart"
           }
         }
       }
@@ -3145,7 +3106,7 @@
         }
       },
       "get": {
-        "summary": "Changesets in the org, newest first — only those whose every member the caller may read",
+        "summary": "Changesets in the org, newest first — only those whose every member the caller may read. A caller from outside the organization is answered as a missing organization is.",
         "parameters": [
           {
             "name": "state",
@@ -3177,6 +3138,12 @@
           },
           "400": {
             "description": "Unknown state"
+          },
+          "401": {
+            "description": "no credential, or one that does not authenticate"
+          },
+          "404": {
+            "description": "no such organization, or the caller is not in it — the two are not told apart"
           }
         }
       }
@@ -4137,7 +4104,7 @@
     },
     "/v1/orgs/{org}/github/install/claim": {
       "post": {
-        "summary": "Connect the browser's parked installation (see `GET /v1/github/setup`) to this organization. Requires org:admin and a verified address; the claim cookie set by the callback is the proof the installation is the person's, and it is spent here. Clears the cookie.",
+        "summary": "Connect the browser's parked installation (see `GET /v1/github/setup`) to this organization. Requires org:admin; the claim cookie set by the callback is the proof the installation is the person's, and it is spent here. Clears the cookie.",
         "responses": {
           "200": {
             "description": "{ org, installation_id, account }"
@@ -4153,7 +4120,7 @@
     },
     "/v1/orgs/{org}/github/install": {
       "post": {
-        "summary": "Begin connecting a GitHub App installation to this organization. Requires org:admin and a verified address. Answers the URL to send the person to, with a single-use state already in it. 501 when the server has no GitHub App configured.",
+        "summary": "Begin connecting a GitHub App installation to this organization. Requires org:admin. Answers the URL to send the person to, with a single-use state already in it. 501 when the server has no GitHub App configured.",
         "responses": {
           "200": {
             "description": "{ url, state, expires_in }"

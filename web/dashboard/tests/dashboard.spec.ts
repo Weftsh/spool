@@ -1385,6 +1385,8 @@ test("someone already signed in accepts with one button, not a new password", as
   await page.goto("/dashboard/#invite=stinv_01inv4_secret");
   await expect(page.getByText(/Accepting adds owner@acme.test/)).toBeVisible();
   await expect(page.getByLabel("Password")).toHaveCount(0);
+  // The account already has its namespace; nothing here may rename it.
+  await expect(page.getByLabel("Handle")).toHaveCount(0);
   await page.getByRole("button", { name: "Accept invitation" }).click();
   await expect(page.getByText("Requests today")).toBeVisible();
   expect(posted).toEqual({ invite: "stinv_01inv4_secret", name: "" });
@@ -1411,101 +1413,6 @@ test("a malformed invitation fragment is ignored rather than sent on", async ({
   expect(called).toBe(false);
 });
 
-test("signing up says what will happen without saying whether it did", async ({
-  page,
-}) => {
-  await mockApi(page);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
-  let posted: Record<string, unknown> | undefined;
-  await page.route("**/v1/auth/signup", async (route) => {
-    posted = route.request().postDataJSON();
-    await route.fulfill({
-      status: 202,
-      json: { status: "check your email", detail: "on its way" },
-    });
-  });
-
-  await page.goto("/dashboard/");
-  await page.getByRole("button", { name: "Create an account" }).click();
-  await page.getByLabel("Your name").fill("Ada Lovelace");
-  await page.getByLabel("Namespace").fill("ada");
-  // The namespace preview is the thing somebody checks before committing
-  // to a name that lands in every clone URL they hand out.
-  await expect(page.getByText("/ada/repo")).toBeVisible();
-  await page.getByLabel("Email").fill("ada@example.test");
-  await page.getByLabel("Password").fill("a long enough password");
-  await page.getByRole("button", { name: "Create account" }).click();
-
-  const status = page.getByRole("status");
-  await expect(status).toContainText("If ada@example.test can receive mail");
-  // It must not claim the account exists — the server refuses to say,
-  // and a page that says "your account is ready" contradicts it.
-  await expect(status).not.toContainText(/account is ready|welcome/i);
-  expect(posted).toEqual({
-    email: "ada@example.test",
-    name: "Ada Lovelace",
-    password: "a long enough password",
-    handle: "ada",
-  });
-  // The form is gone: a form left standing with "Create account" still
-  // lit read as "it did not work" — the first real sign-up clicked it
-  // and was told to check the mail again. What remains is the one thing
-  // to do, the way to ask for the message again, and the way in.
-  await expect(
-    page.getByRole("heading", { name: "Check your email" }),
-  ).toBeVisible();
-  await expect(
-    page.getByRole("button", { name: "Create account" }),
-  ).toHaveCount(0);
-  await expect(page.getByLabel("Password")).toHaveCount(0);
-  // …and not the token form either: the first version of this screen
-  // fell through to it, and showed "Organization / API token" under
-  // "Check your email".
-  await expect(page.getByLabel("API token")).toHaveCount(0);
-  await expect(page.getByLabel("Organization")).toHaveCount(0);
-  let resent: Record<string, unknown> | undefined;
-  await page.route("**/v1/auth/resend-verification", async (route) => {
-    resent = route.request().postDataJSON();
-    await route.fulfill({ status: 202, json: { status: "check your email" } });
-  });
-  await page.getByRole("button", { name: "Send the message again" }).click();
-  await expect(status).toContainText(
-    "Another confirmation link is on its way to ada@example.test",
-  );
-  // The only address the note may name is the one typed. The sender is
-  // the deployment's own STRATUM_MAIL_FROM, which the page cannot know;
-  // naming one sends a person hunting for mail from somebody else.
-  const named = (await status.textContent())?.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g);
-  expect(named).toEqual(["ada@example.test"]);
-  expect(resent).toEqual({ email: "ada@example.test" });
-  await page.getByRole("button", { name: "Sign in instead" }).click();
-  await expect(
-    page.getByRole("button", { name: "Sign in", exact: true }),
-  ).toBeVisible();
-});
-
-test("a refused handle is reported plainly, unlike anything about the address", async ({
-  page,
-}) => {
-  await mockApi(page);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
-  await page.route("**/v1/auth/signup", (r) =>
-    r.fulfill({ status: 409, json: { error: '"dashboard" is reserved' } }),
-  );
-  await page.goto("/dashboard/");
-  await page.getByRole("button", { name: "Create an account" }).click();
-  await page.getByLabel("Your name").fill("Squatter");
-  await page.getByLabel("Namespace").fill("dashboard");
-  await page.getByLabel("Email").fill("s@example.test");
-  await page.getByLabel("Password").fill("a long enough password");
-  await page.getByRole("button", { name: "Create account" }).click();
-  await expect(page.getByRole("alert")).toContainText("is reserved");
-});
-
 test("asking for a reset link says the same thing either way", async ({
   page,
 }) => {
@@ -1530,47 +1437,31 @@ test("asking for a reset link says the same thing either way", async ({
   expect(posted).toEqual({ email: "who@example.test" });
 });
 
-test("a confirmation link redeems on arrival and signs the person in", async ({
+/// A link from before accounts were invitation-only.
+///
+/// The server stopped sending `#verify=` links, and `POST
+/// /v1/auth/verify` is gone. One can still be sitting in somebody's
+/// inbox. Opening it must land on the ordinary way in — not on a
+/// "Confirming your address" card spinning on a request that can only
+/// 404, and not by sending the token anywhere at all.
+test("an old confirmation link lands on sign-in and sends nothing", async ({
   page,
 }) => {
   await mockApi(page);
   await page.route("**/v1/auth/me", (r) =>
     r.fulfill({ status: 401, json: { error: "not signed in" } }),
   );
-  let posted: Record<string, unknown> | undefined;
-  await page.route("**/v1/auth/verify", async (route) => {
-    posted = route.request().postDataJSON();
-    await route.fulfill({ status: 200, json: ME });
+  const asked: string[] = [];
+  await page.route("**/v1/auth/verify", (r) => {
+    asked.push(r.request().url());
+    return r.fulfill({ status: 404, json: { error: "not found" } });
   });
-  // Straight from the mailbox: no button to press, because the link was
-  // the button.
-  await page.goto("/dashboard/#verify=weftv_01_secret");
-  await expect(page.getByText("Requests today")).toBeVisible();
-  await expect.poll(() => new URL(page.url()).hash).toBe("");
-  expect(posted).toEqual({ token: "weftv_01_secret" });
-});
-
-test("a spent confirmation link says so instead of retrying forever", async ({
-  page,
-}) => {
-  await mockApi(page);
-  await page.route("**/v1/auth/me", (r) =>
-    r.fulfill({ status: 401, json: { error: "not signed in" } }),
-  );
-  await page.route("**/v1/auth/verify", (r) =>
-    r.fulfill({
-      status: 404,
-      json: { error: "this confirmation link is not valid any more" },
-    }),
-  );
-  await page.goto("/dashboard/#verify=weftv_spent_link");
-  await expect(
-    page.getByRole("heading", { name: "Link expired" }),
-  ).toBeVisible();
-  await page.getByRole("button", { name: "Go to sign in" }).click();
+  await page.goto("/dashboard/#verify=weftv_from_an_old_mail");
   await expect(
     page.getByRole("button", { name: "Sign in", exact: true }),
   ).toBeVisible();
+  await expect(page.getByText(/Confirming your address/)).toHaveCount(0);
+  expect(asked).toEqual([]);
 });
 
 test("a reset link asks for the new password and warns what it costs", async ({
@@ -1601,34 +1492,48 @@ test("a reset link asks for the new password and warns what it costs", async ({
   });
 });
 
-test("an unconfirmed account is told what is blocked and can ask again", async ({
+/// A dead link is not a retryable error: "try again" about a link that
+/// can never work again sends somebody round a loop. The server's own
+/// words for it, and the one way forward.
+test("a spent reset link says so instead of asking again", async ({
   page,
 }) => {
-  const unconfirmed = { ...ME, verified_at: null };
   await mockApi(page);
-  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: unconfirmed }));
-  let resent: Record<string, unknown> | undefined;
-  await page.route("**/v1/auth/resend-verification", async (route) => {
-    resent = route.request().postDataJSON();
-    await route.fulfill({ status: 202, json: { status: "check your email" } });
-  });
-
-  await page.goto("/dashboard/");
-  const banner = page.getByRole("status").filter({ hasText: "Confirm" });
-  await expect(banner).toContainText("to create repositories");
-  await banner.getByRole("button", { name: "Send it again" }).click();
-  await expect(page.getByRole("status")).toContainText(
-    "Another confirmation link is on its way",
+  await page.route("**/v1/auth/me", (r) =>
+    r.fulfill({ status: 401, json: { error: "not signed in" } }),
   );
-  // Saying the previous link is dead matters: somebody with two messages
-  // open otherwise clicks the older one and is told it is invalid.
-  await expect(page.getByRole("status")).toContainText("no longer works");
-  expect(resent).toEqual({ email: "owner@acme.test" });
+  await page.route("**/v1/auth/reset-password", (r) =>
+    r.fulfill({
+      status: 404,
+      json: { error: "this reset link is not valid any more" },
+    }),
+  );
+  await page.goto("/dashboard/#reset=weftrs_spent_link");
+  await page.getByLabel("New password").fill("a different long password");
+  await page.getByRole("button", { name: "Set password" }).click();
+  await expect(
+    page.getByRole("heading", { name: "Reset link expired" }),
+  ).toBeVisible();
+  // No password field left to fill in for a link that cannot work.
+  await expect(page.getByLabel("New password")).toHaveCount(0);
+  await page.getByRole("button", { name: "Go to sign in" }).click();
+  await expect(
+    page.getByRole("button", { name: "Sign in", exact: true }),
+  ).toBeVisible();
 });
 
-test("a confirmed account sees no banner", async ({ page }) => {
+/// Every account's address was proved when the account was made — the
+/// invitation reached it, or an operator vouched for it — so `me` no
+/// longer says when it was confirmed, and nothing may read that silence
+/// as "unconfirmed". A banner keyed on a missing `verified_at` would
+/// greet every single person with a nag they can do nothing about.
+test("no account is asked to confirm its address", async ({ page }) => {
   await signInAsPerson(page);
-  await expect(page.getByText(/to create repositories/)).toHaveCount(0);
+  await expect(page.getByText("Requests today")).toBeVisible();
+  await expect(page.getByText(/confirm/i)).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: /send it again/i }),
+  ).toHaveCount(0);
 });
 
 /// The case the manual browser pass caught and everything else missed.
@@ -1638,41 +1543,10 @@ test("a confirmed account sees no banner", async ({ page }) => {
 /// clicks a link in their mail client: the browser sees only a fragment
 /// change, which is a same-document navigation — no reload, no
 /// re-mount — so a page that reads the token once at boot does nothing
-/// at all. That is the ordinary case, not the exotic one.
-test("a mailed link works when the dashboard is already open", async ({
-  page,
-}) => {
-  const unconfirmed = { ...ME, verified_at: null };
-  await mockApi(page);
-  await page.route("**/v1/auth/me", (r) => r.fulfill({ json: unconfirmed }));
-  let verified: Record<string, unknown> | undefined;
-  await page.route("**/v1/auth/verify", async (route) => {
-    verified = route.request().postDataJSON();
-    await route.fulfill({ status: 200, json: ME });
-  });
-
-  // Already signed in, already looking at the dashboard, told to confirm.
-  await page.goto("/dashboard/");
-  await expect(page.getByText(/to create repositories/)).toBeVisible();
-
-  // The click from the mail client: same document, fragment only.
-  await page.evaluate(() => {
-    window.location.hash = "verify=weftv_from_the_inbox";
-  });
-
-  // Wait on the thing under test, not on a proxy for it. The dashboard
-  // was already visible before the hash changed, and the banner vanishes
-  // the instant the confirming card mounts — so both are satisfied
-  // before the round trip finishes, and reading the URL then catches it
-  // mid-flight. The cleared fragment only exists once it is done.
-  await expect.poll(() => new URL(page.url()).hash).toBe("");
-  await expect(page.getByText("Requests today")).toBeVisible();
-  await expect(page.getByText(/to create repositories/)).toHaveCount(0);
-  expect(verified).toEqual({ token: "weftv_from_the_inbox" });
-});
-
-/// The same hazard for the other two mailed links.
-test("an invitation and a reset link also work without a reload", async ({
+/// at all. That is the ordinary case, not the exotic one. (It was first
+/// seen on the account-confirmation link, which is gone; the link that
+/// proves an *added* address has the same shape and its own test.)
+test("an invitation and a reset link work without a reload", async ({
   page,
 }) => {
   await mockApi(page);

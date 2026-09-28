@@ -55,7 +55,7 @@ pub async fn list(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -79,7 +79,7 @@ pub async fn set_role(
     headers: HeaderMap,
     Json(body): Json<RoleBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -106,7 +106,7 @@ pub async fn remove(
     Path((org_name, user_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -130,7 +130,7 @@ pub async fn invite(
     headers: HeaderMap,
     Json(body): Json<InviteBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -194,7 +194,7 @@ pub async fn list_invites(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -222,7 +222,7 @@ pub async fn revoke_invite(
     Path((org_name, invite_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };

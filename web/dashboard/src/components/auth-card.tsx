@@ -12,7 +12,6 @@ export function AuthCard(props: {
   footer?: React.ReactNode;
   submit: string;
   busy?: boolean;
-  disabled?: boolean;
 }) {
   return (
     <div className="flex min-h-screen items-center justify-center px-5">
@@ -37,11 +36,7 @@ export function AuthCard(props: {
             {props.note}
           </p>
         )}
-        <Button
-          size="lg"
-          className="w-full"
-          disabled={props.busy || props.disabled}
-        >
+        <Button size="lg" className="w-full" disabled={props.busy}>
           {props.busy ? "Working\u2026" : props.submit}
         </Button>
         {props.footer}

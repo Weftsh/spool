@@ -983,8 +983,9 @@ mod tests {
         let r = repo(&db, &org, "widget");
         let bob = named(&db, "bob");
         // An account with no personal namespace has no name to be
-        // listed under. It is a real state, not a hypothetical: signup
-        // creates the account and the namespace is claimed afterwards.
+        // listed under. It is a real state, not a hypothetical: an
+        // account made by an older `user-create` has none until
+        // `admin repair-identities` gives it one.
         let ghost = crate::users::create(&db, "ghost@example.com", "ghost", None)
             .unwrap()
             .id;

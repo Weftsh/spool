@@ -66,15 +66,6 @@ export const TOP_LEVEL = [
 /// it is worth suspecting anywhere a user-supplied path is resolved.
 const SAME_SITE = "https://stratum.invalid";
 
-/// Which form `/login` opens on. Anything that is not exactly `signup`
-/// is sign-in: an unknown mode is a typo in a link, and a typo should
-/// land somebody on the ordinary door rather than on nothing.
-export type LoginMode = "signin" | "signup";
-
-export function loginMode(candidate: string | null): LoginMode {
-  return candidate === "signup" ? "signup" : "signin";
-}
-
 export function safeNext(candidate: string | null): string {
   if (!candidate) return "/";
   try {
@@ -91,12 +82,11 @@ export type Match =
   /// the path; this table deliberately does not re-decide it, because
   /// that dispatch is covered by ~75 tests that assert on those URLs.
   | { kind: "dash" }
-  /// `/login`, and `/login?mode=signup` for the marketing site's "Sign
-  /// up free" button. `mode` is a query parameter rather than a
-  /// `/signup` path because a new first path segment is a new entry in
-  /// `TOP_LEVEL`, which is a server-side reservation *and* an entry in
-  /// `webassets.rs`'s `SPA_SEGMENTS` — three files for one link.
-  | { kind: "login"; next: string; mode: LoginMode }
+  /// `/login`: the one door, and it only signs in. There is no form to
+  /// make an account — accounts come from an invitation or an operator —
+  /// so a `?mode=signup` left over in an old link or bookmark is
+  /// ignored and lands on sign-in, which says how to get one.
+  | { kind: "login"; next: string }
   /// `/`, which has no page of its own: it is the way in, and the way in
   /// is the dashboard. `App.tsx` moves the browser there rather than
   /// rendering the overview under a second address.
@@ -200,11 +190,7 @@ export function match(path: string, query: URLSearchParams): Match {
     // ever accepted: `?next=https://elsewhere/` on a login page is an
     // open redirect, and an open redirect on a login page is a phishing
     // kit somebody else gets to host on our domain.
-    return {
-      kind: "login",
-      next: safeNext(query.get("next")),
-      mode: loginMode(query.get("mode")),
-    };
+    return { kind: "login", next: safeNext(query.get("next")) };
   }
   // The header's search box has to land somewhere. `search` was already
   // a reserved name for exactly this.

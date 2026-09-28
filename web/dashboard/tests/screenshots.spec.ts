@@ -130,10 +130,6 @@ const ME = {
   email: "ada@acme.dev",
   name: "Ada Lovelace",
   created_at: NOW - 400 * 86_400_000,
-  // Proved long ago. Without it the frame led with the "confirm your
-  // address to create repositories" banner — an onboarding nag, shown
-  // to every prospect as the first thing the product says.
-  verified_at: NOW - 400 * 86_400_000,
   handle: "ada",
   orgs: [{ id: "01org", name: "acme", role: "owner" }],
 };

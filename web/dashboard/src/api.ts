@@ -34,9 +34,6 @@ export interface Me {
   email: string;
   name: string;
   created_at: number;
-  /// When the address was proved. `null` means the account may sign in
-  /// and look around but not create anything.
-  verified_at: number | null;
   /// The account's handle, which is also the name of its personal
   /// namespace. Person-shaped routes are addressed by it, so a client
   /// that does not know its own handle cannot ask about itself.
@@ -1604,9 +1601,6 @@ export const api = {
       body: { email, password },
     });
   },
-  /// Accept an invitation. Creates the account when the address is new;
-  /// an existing account is attached to the org instead, and its
-  /// password is not needed or changed.
   /// Create an organization, owned by the signed-in person. Ready at
   /// once; `detail` is the server's sentence about what it holds.
   createOrg(name: string): Promise<{
@@ -1615,27 +1609,6 @@ export const api = {
     detail: string;
   }> {
     return raw("/v1/orgs", "", { method: "POST", body: { name } });
-  },
-  /// Create an account and its personal namespace. Always resolves the
-  /// same way whether or not the address is already registered — the
-  /// server refuses to say, and so does this.
-  signup(body: {
-    email: string;
-    name: string;
-    password: string;
-    handle: string;
-  }): Promise<{ status: string; detail: string }> {
-    return raw("/v1/auth/signup", "", { method: "POST", body });
-  },
-  /// Redeem a confirmation link. Signs in on success.
-  verifyEmail(token: string): Promise<Me> {
-    return raw("/v1/auth/verify", "", { method: "POST", body: { token } });
-  },
-  resendVerification(email: string): Promise<{ status: string }> {
-    return raw("/v1/auth/resend-verification", "", {
-      method: "POST",
-      body: { email },
-    });
   },
   forgotPassword(email: string): Promise<{ status: string }> {
     return raw("/v1/auth/forgot-password", "", {
@@ -1661,10 +1634,25 @@ export const api = {
       body: { invite },
     });
   },
-  acceptInvite(invite: string, name: string, password?: string): Promise<Me> {
+  /// Accept an invitation — the only way anybody gets an account here
+  /// short of an operator making one on the server. Creates the account
+  /// when the address is new; an existing account is attached to the
+  /// org instead, and its password and handle are not needed or changed.
+  ///
+  /// `handle` is sent only when the person typed one. Left out, the
+  /// server makes it from the invited address (`handleFrom` shows the
+  /// same name before anybody submits), suffixing it if that name is
+  /// taken. Asked for and taken, it is a `409` and nothing was written:
+  /// the same link accepts again with another.
+  acceptInvite(
+    invite: string,
+    name: string,
+    password?: string,
+    handle?: string,
+  ): Promise<Me> {
     return raw("/v1/auth/accept-invite", "", {
       method: "POST",
-      body: { invite, name, password },
+      body: { invite, name, password, handle },
     });
   },
   logout(): Promise<void> {
@@ -2769,11 +2757,11 @@ export const api = {
   },
   /// Spend the link that proves an **added** address.
   ///
-  /// Deliberately not `verifyEmail` — that one already exists above and
-  /// is a different act: it proves the address you signed up with, from
-  /// a page nobody is signed in on. This one is signed in, names the
-  /// account, and is how somebody claims the address their commits
-  /// already carry.
+  /// The address an account signs in with needs no proving: it was
+  /// proved when the account was made, by the invitation reaching it or
+  /// by the operator who made it. This is for the others. It is signed
+  /// in, names the account, and is how somebody claims the address their
+  /// commits already carry.
   ///
   /// Retroactive: the server re-walks the repositories this person can
   /// reach, so commits they authored under the address before today

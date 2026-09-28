@@ -71,33 +71,6 @@ fn token_url(public_url: &str, key: &str, token: &str) -> String {
     )
 }
 
-/// The link a verification mail carries — also what `admin verify-link`
-/// prints, for an address the mail could not reach.
-pub fn verification_url(public_url: &str, token: &str) -> String {
-    token_url(public_url, "verify", token)
-}
-
-/// "Confirm your address."
-pub fn verification(to: &str, public_url: &str, token: &str) -> Message {
-    let url = verification_url(public_url, token);
-    Message {
-        to: to.to_string(),
-        subject: "Confirm your email address".to_string(),
-        text: format!(
-            "Welcome to Weft. Confirm this address to finish setting up\n\
-             your account:\n\
-             \n\
-             {url}\n\
-             \n\
-             The link works once and expires in 24 hours. Until you confirm,\n\
-             you can sign in and look around but not create repositories.\n\
-             \n\
-             If you didn't sign up, ignore this — the account cannot be used\n\
-             without the password whoever created it chose.\n"
-        ),
-    }
-}
-
 /// "Set a new password."
 ///
 /// Says plainly that nothing has changed yet, because the message a
@@ -123,43 +96,11 @@ pub fn password_reset(to: &str, public_url: &str, token: &str) -> Message {
     }
 }
 
-/// "You already have an account."
-///
-/// Sent when somebody signs up with an address that is already
-/// registered. The API answers identically either way, so this message
-/// is the only thing that tells anyone anything — and it goes to the
-/// mailbox's owner, who is the one person entitled to know.
-///
-/// It is also the answer to a real dead end: without it, somebody who
-/// forgot they had an account sees "check your email", receives nothing,
-/// and has no idea why.
-pub fn account_exists(to: &str, public_url: &str) -> Message {
-    let base = public_url.trim_end_matches('/');
-    Message {
-        to: to.to_string(),
-        subject: "You already have a Weft account".to_string(),
-        text: format!(
-            "Somebody just tried to sign up with this address, and it already\n\
-             has an account here. Nothing was created and nothing changed.\n\
-             \n\
-             If that was you, sign in instead:\n\
-             {base}/dashboard/\n\
-             \n\
-             If you have forgotten the password, ask for a reset link from\n\
-             the same screen. If it wasn't you, you can ignore this — but it\n\
-             is worth knowing somebody has your address.\n"
-        ),
-    }
-}
-
 /// "Confirm this address so your commits count."
 ///
-/// Deliberately not [`verification`]: that message is about finishing an
-/// account, and somebody who receives it for an address they never
-/// signed up with has no idea what it refers to. This one names the
-/// account that claimed the address and says what happens if it was not
-/// them — which matters more here than at signup, because the claim is
-/// made by whoever is already signed in somewhere else.
+/// Names the account that claimed the address and says what happens if
+/// it was not them: the claim is made by whoever is signed in somewhere
+/// else, and the recipient may have no account here at all.
 pub fn address_verification(to: &str, handle: &str, public_url: &str, token: &str) -> Message {
     let url = token_url(public_url, "verify-email", token);
     Message {
@@ -392,9 +333,7 @@ mod tests {
                 "https://x.example",
                 "t_1",
             ),
-            verification("a@example.com", "https://x.example", "t_2"),
             password_reset("a@example.com", "https://x.example", "t_3"),
-            account_exists("a@example.com", "https://x.example"),
             address_verification("a@example.com", "bo", "https://x.example", "t_4"),
             change_activity(&ChangeActivity {
                 to: "a@example.com",
@@ -420,7 +359,7 @@ mod tests {
 
         assert_eq!(
             every.len(),
-            7,
+            5,
             "a template was added or removed; add it here so it is checked too"
         );
 
@@ -436,9 +375,8 @@ mod tests {
         }
     }
 
-    /// The claim message must name the account that made the claim, and
-    /// must not read like the signup one — the recipient may have no
-    /// account here at all.
+    /// The claim message must name the account that made the claim — the
+    /// recipient may have no account here at all.
     #[test]
     fn the_address_claim_names_the_account_and_one_working_link() {
         let m = address_verification(
@@ -490,16 +428,7 @@ mod tests {
     /// verification link says what is blocked until you click, the reset
     /// link says it ends every other session.
     #[test]
-    fn the_token_messages_say_what_the_link_does() {
-        let v = verification("new@example.com", "https://x.example", "weftv_1_abc");
-        assert_eq!(v.subject, "Confirm your email address");
-        assert!(v
-            .text
-            .contains("https://x.example/dashboard/#verify=weftv_1_abc"));
-        assert!(v.text.contains("not create repositories"), "{}", v.text);
-        assert!(v.text.contains("24 hours"), "{}", v.text);
-        v.validate().unwrap();
-
+    fn the_reset_message_says_what_the_link_does() {
         let r = password_reset("known@example.com", "https://x.example/", "weftrs_2_def");
         assert_eq!(r.subject, "Reset your Weft password");
         assert!(r
@@ -515,22 +444,8 @@ mod tests {
             r.text
         );
         r.validate().unwrap();
-
-        // Sent when the address is already taken: it must say plainly
-        // that nothing happened, and point at the two ways forward.
-        let e = account_exists("known@example.com", "https://x.example/");
-        assert_eq!(e.subject, "You already have a Weft account");
-        assert!(e.text.contains("Nothing was created"), "{}", e.text);
-        assert!(e.text.contains("https://x.example/dashboard/"));
-        assert!(!e.text.contains("com//dashboard"));
-        assert!(e.text.contains("reset link"), "{}", e.text);
-        e.validate().unwrap();
-
-        // Both carry exactly one link, so a reader cannot click the
-        // wrong one.
-        for m in [&v, &r] {
-            assert_eq!(m.text.matches("https://").count(), 1, "{}", m.text);
-        }
+        // Exactly one link, so a reader cannot click the wrong one.
+        assert_eq!(r.text.matches("https://").count(), 1, "{}", r.text);
     }
 
     /// What a changeset mail has to say before the reader opens it: the

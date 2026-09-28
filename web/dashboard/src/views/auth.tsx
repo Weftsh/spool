@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useState } from "react";
-import { api, type Me, type Role, type Session } from "@/api";
+import { useEffect, useRef, useState } from "react";
+import { api, ApiError, type Me, type Role, type Session } from "@/api";
 import { AuthCard } from "@/components/auth-card";
 import {
   GithubSigninBanner,
@@ -8,84 +8,49 @@ import {
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
+import { handleFromAddress } from "@/lib/handle";
 
-/// Redeeming a confirmation or a reset link.
+/// Redeeming a password-reset link.
 ///
-/// One component for both because they are one shape: a token out of a
-/// mailbox, redeemed once, signing the person in. They differ in what
-/// they ask for — a reset needs the new password, a confirmation needs
-/// nothing — and in what a dead link means, which is the part worth
-/// saying differently.
-export function RedeemLink(props: {
-  kind: "verify" | "reset";
+/// A token out of a mailbox, redeemed once with the new password, which
+/// signs the person in. The one other thing worth getting right is what
+/// a dead link means: saying "try again" about a link that can never
+/// work again sends somebody round a loop.
+export function ResetPassword(props: {
   token: string;
   onDone: (me: Me) => void;
   onDismissed: () => void;
 }) {
-  const { kind, token } = props;
+  const { token } = props;
   const [password, setPassword] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [dead, setDead] = useState(false);
-  const [ran, setRan] = useState(false);
 
-  const redeem = useCallback(async () => {
+  async function redeem() {
     setBusy(true);
     setError(null);
     try {
-      props.onDone(
-        kind === "verify"
-          ? await api.verifyEmail(token)
-          : await api.resetPassword(token, password),
-      );
+      props.onDone(await api.resetPassword(token, password));
     } catch (err) {
       const message = err instanceof Error ? err.message : String(err);
-      // A dead link is not a retryable error: saying "try again" about a
-      // link that can never work again sends somebody round a loop.
       if (/not valid any more/.test(message)) setDead(true);
       else setError(message);
     } finally {
       setBusy(false);
     }
-  }, [kind, token, password, props]);
-
-  // A confirmation link has nothing to ask for, so it redeems on
-  // arrival: making somebody click "confirm" after clicking a link that
-  // said "confirm" is a step with nothing behind it.
-  useEffect(() => {
-    if (kind === "verify" && !ran) {
-      setRan(true);
-      void redeem();
-    }
-  }, [kind, ran, redeem]);
+  }
 
   if (dead) {
     return (
       <AuthCard
-        title={kind === "verify" ? "Link expired" : "Reset link expired"}
-        blurb={
-          kind === "verify"
-            ? "This confirmation link is not valid any more \u2014 it may already have been used, or it may have expired. Sign in and ask for another."
-            : "This reset link is not valid any more \u2014 it may already have been used, or it may have expired. Ask for a new one from the sign-in screen."
-        }
+        title="Reset link expired"
+        blurb="This reset link is not valid any more — it may already have been used, or it may have expired. Ask for a new one from the sign-in screen."
         onSubmit={(e) => {
           e.preventDefault();
           props.onDismissed();
         }}
         submit="Go to sign in"
-      />
-    );
-  }
-
-  if (kind === "verify") {
-    return (
-      <AuthCard
-        title="Confirming your address"
-        blurb="One moment."
-        onSubmit={(e) => e.preventDefault()}
-        error={error}
-        submit="Confirming\u2026"
-        disabled
       />
     );
   }
@@ -126,18 +91,23 @@ export function RedeemLink(props: {
   );
 }
 
-/// The screen an emailed invitation link lands on.
+/// The screen an emailed invitation link lands on — and, for somebody
+/// who has no account yet, the only way to get one. There is no sign-up:
+/// accounts on this server are made by invitation, or by an operator on
+/// the server itself. The address needs no confirming afterwards, because
+/// the invitation reaching it was the proof.
 ///
 /// Two shapes, chosen by whether somebody is already signed in here.
 /// Signed in: one button, because the account exists and the invitation
-/// only has to be attached to it. Not signed in: name and password,
-/// because accepting may be creating the account.
+/// only has to be attached to it. Not signed in: name, password and an
+/// optional handle, because accepting may be creating the account.
 ///
 /// What it deliberately does *not* do is ask the server whether the
 /// address already has an account so it can pick the right form. That
 /// question is an existence oracle for anyone holding a link, and the
 /// same reason sign-in answers identically for a wrong password and an
-/// unknown address.
+/// unknown address. An existing account that accepts through the long
+/// form simply has its name, password and handle ignored.
 export function AcceptInvite(props: {
   token: string;
   me: Me | null;
@@ -147,7 +117,13 @@ export function AcceptInvite(props: {
   const { token, me } = props;
   const [name, setName] = useState("");
   const [password, setPassword] = useState("");
+  const [handle, setHandle] = useState("");
   const [error, setError] = useState<string | null>(null);
+  // A handle somebody already has, said against the field it is about.
+  // The server wrote nothing, so the same link accepts again with
+  // another — the form stays exactly as it was, only this changes.
+  const [handleError, setHandleError] = useState<string | null>(null);
+  const handleInput = useRef<HTMLInputElement>(null);
   const [busy, setBusy] = useState(false);
   const [invitation, setInvitation] = useState<{
     org: string;
@@ -172,21 +148,43 @@ export function AcceptInvite(props: {
     };
   }, [token]);
 
+  // The name the server will make if the field is left empty, shown
+  // before anybody submits. A hint, not a promise: the server adds a
+  // short suffix when this one is taken or reserved.
+  const derived = invitation ? handleFromAddress(invitation.email) : "";
+  const chosen = handle.trim();
+
   async function submit(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
     setError(null);
+    setHandleError(null);
     try {
       const who = me
         ? await api.acceptInvite(token, "")
-        : await api.acceptInvite(token, name.trim(), password);
+        : await api.acceptInvite(
+            token,
+            name.trim(),
+            password,
+            // Only what was typed. Sending the derived name would turn
+            // "make me one" into "I asked for this one", which the
+            // server refuses on a clash rather than suffixing.
+            chosen || undefined,
+          );
       props.onAccepted(who);
     } catch (err) {
-      setError(
-        `Could not accept this invitation: ${
-          err instanceof Error ? err.message : err
-        }`,
-      );
+      if (!me && chosen && err instanceof ApiError && err.status === 409) {
+        setHandleError(
+          `${err.message}. Choose another, or leave it empty and one is made for you. This invitation still works.`,
+        );
+        handleInput.current?.focus();
+      } else {
+        setError(
+          `Could not accept this invitation: ${
+            err instanceof Error ? err.message : err
+          }`,
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -210,7 +208,7 @@ export function AcceptInvite(props: {
                     ? ` Accepting adds ${me.email}, the account you are signed in as.`
                     : " Choose a password and you're in. The link works once."
                 }`
-              : "Checking your invitation\u2026"}
+              : "Checking your invitation…"}
         </p>
         {!me && !dead && (
           <>
@@ -235,6 +233,53 @@ export function AcceptInvite(props: {
               autoComplete="new-password"
               required
             />
+            {/* Optional, and said so: the server makes one from the
+                invited address when this is empty, and the placeholder
+                is that name. It is asked at all because it goes in
+                every clone URL the person hands out. */}
+            <Label htmlFor="handle">
+              Handle <span className="font-normal text-ink-3">(optional)</span>
+            </Label>
+            <Input
+              id="handle"
+              ref={handleInput}
+              className="mb-1 font-mono"
+              value={handle}
+              onChange={(e) => {
+                setHandle(e.target.value);
+                setHandleError(null);
+              }}
+              placeholder={derived}
+              autoComplete="off"
+              autoCapitalize="none"
+              spellCheck={false}
+              aria-invalid={handleError ? true : undefined}
+              aria-describedby={
+                handleError ? "handle-error handle-hint" : "handle-hint"
+              }
+            />
+            {handleError && (
+              <p
+                id="handle-error"
+                className="mb-1 text-sm text-serious"
+                role="alert"
+              >
+                {handleError}
+              </p>
+            )}
+            <p id="handle-hint" className="mb-3 text-xs text-ink-3">
+              Your own repositories live at{" "}
+              <code className="font-mono">/{chosen || derived || "you"}/repo</code>
+              .
+              {!chosen && derived && (
+                <>
+                  {" "}
+                  Left empty, it is{" "}
+                  <code className="font-mono">{derived}</code>, with a short
+                  suffix if somebody already has that.
+                </>
+              )}
+            </p>
           </>
         )}
         {error && (
@@ -244,7 +289,7 @@ export function AcceptInvite(props: {
         )}
         {!dead && (
           <Button size="lg" className="w-full" disabled={busy || !invitation}>
-            {busy ? "Accepting\u2026" : "Accept invitation"}
+            {busy ? "Accepting…" : "Accept invitation"}
           </Button>
         )}
         <button
@@ -256,7 +301,7 @@ export function AcceptInvite(props: {
             ? "Go to sign in"
             : me
               ? "Not now"
-              : "I already have an account \u2014 sign in instead"}
+              : "I already have an account — sign in instead"}
         </button>
       </form>
     </div>
@@ -264,39 +309,31 @@ export function AcceptInvite(props: {
 }
 
 /// What each mode of the sign-in screen is for, in its own words: the
-/// heading, and one line under it. Sign-up's line is the reason to finish
-/// the form, said once more at the moment somebody decides whether to.
-const AUTH_HEADINGS: Record<
-  "person" | "token" | "signup" | "forgot",
-  [string, string]
-> = {
-  person: ["Sign in to Weft", "Welcome back."],
-  signup: [
-    "Create your Weft account",
-    "One account for every organization you work in.",
-  ],
-  forgot: [
-    "Reset your password",
-    "We will email you a link to choose a new one.",
-  ],
-  token: [
-    "Sign in with a token",
-    "For scripts, CI and service accounts.",
-  ],
-};
+/// heading, and one line under it.
+const AUTH_HEADINGS: Record<"person" | "token" | "forgot", [string, string]> =
+  {
+    person: ["Sign in", "Welcome back."],
+    forgot: [
+      "Reset your password",
+      "We will email you a link to choose a new one.",
+    ],
+    token: ["Sign in with a token", "For scripts, CI and service accounts."],
+  };
 
-/// Sign in as a person, or — for service callers and for anyone whose
-/// account has not been created yet — with a raw API token.
+/// Sign in as a person, or — for scripts, CI and service accounts —
+/// with a raw API token.
 ///
 /// The person path is the default because pasting an org-wide token into
 /// a browser hands a long-lived credential to every script on the page;
 /// a session cookie is HttpOnly and cannot be read at all.
+///
+/// There is no way to make an account here. Accounts on this server are
+/// made by an organization's invitation or by whoever runs the server,
+/// and the screen says so where "Create an account" used to be — a
+/// visitor with no account has to be told who to ask, not left hunting
+/// for a door that is not there.
 export function Login(props: {
   onSignedIn: (s: Session, me: Me | null) => void;
-  /// Which form to open on. `/login?mode=signup` is where the site's
-  /// "Sign up free" lands, and a button that says sign up must not open
-  /// a form that says sign in. Absent means sign-in, the default above.
-  initialMode?: "person" | "signup";
   /// How a trip through GitHub came back, when it came back refused.
   ///
   /// Every one of those redirects lands *here*, signed out, so this is
@@ -308,16 +345,7 @@ export function Login(props: {
   /// signed-out visitors here with an installation waiting.
   notice?: string;
 }) {
-  // `sent` is the screen after a sign-up: the form is gone, because a
-  // form that stays put with its button still lit reads as "it did not
-  // work, try again" — and trying again is what the server rate-limits.
-  // What is left is the one thing to do (read the mail), the way to ask
-  // for the message again, and the way in.
-  const [mode, setMode] = useState<
-    "person" | "token" | "signup" | "forgot" | "sent"
-  >(props.initialMode ?? "person");
-  const [name, setName] = useState("");
-  const [handle, setHandle] = useState("");
+  const [mode, setMode] = useState<"person" | "token" | "forgot">("person");
   const [note, setNote] = useState<string | null>(null);
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -332,23 +360,6 @@ export function Login(props: {
     setError(null);
     setNote(null);
     try {
-      if (mode === "signup") {
-        // The answer is deliberately the same whether or not the address
-        // was already registered, so this says the same thing too. It
-        // must not read as "your account is ready" — nothing is, until
-        // the link in the message is clicked.
-        await api.signup({
-          email: email.trim(),
-          name: name.trim(),
-          password,
-          handle: handle.trim(),
-        });
-        setNote(
-          `If ${email.trim()} can receive mail here, a confirmation link is on its way. Click it to finish setting up your account.`,
-        );
-        setMode("sent");
-        return;
-      }
       if (mode === "forgot") {
         await api.forgotPassword(email.trim());
         setNote(
@@ -370,35 +381,8 @@ export function Login(props: {
       }
     } catch (err) {
       const what =
-        mode === "signup"
-          ? "Could not create that account"
-          : mode === "forgot"
-            ? "Could not send a reset link"
-            : "Could not sign in";
+        mode === "forgot" ? "Could not send a reset link" : "Could not sign in";
       setError(`${what}: ${err instanceof Error ? err.message : err}`);
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  /// The message again, for an inbox that has nothing. Same answer
-  /// either way, for the same reason sign-up's is.
-  async function resend() {
-    setBusy(true);
-    setError(null);
-    try {
-      await api.resendVerification(email.trim());
-      setNote(
-        // No sender named: the address mail comes from is the
-        // deployment's own (STRATUM_MAIL_FROM), which this page does not
-        // know. It used to name the hosted product's, which on any other
-        // deployment sent a person looking for mail nobody would send.
-        `Another confirmation link is on its way to ${email.trim()}, if it can receive mail here. Check the spam folder too.`,
-      );
-    } catch (err) {
-      setError(
-        `Could not send the message again: ${err instanceof Error ? err.message : err}`,
-      );
     } finally {
       setBusy(false);
     }
@@ -418,11 +402,9 @@ export function Login(props: {
         onSubmit={submit}
         className="w-full max-w-sm rounded-xl border border-borderline bg-surface-1 p-6 shadow-[var(--shadow-1)]"
       >
-        {/* The mark goes home: somebody who clicked "Sign up" on the
-            marketing site and wants to read one more page had no way back
-            but the browser's button. The heading says what this screen is
-            for — it used to read "Weft Dashboard" on every mode, sign-up
-            included, and was a <span>, so the page had no heading at all. */}
+        {/* The mark goes home. The heading says what this screen is
+            for — it used to read "Weft Dashboard" on every mode, and was
+            a <span>, so the page had no heading at all. */}
         <a
           href="/"
           className="mb-5 inline-flex items-center gap-2 rounded-sm text-sm font-semibold tracking-tight text-ink focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand"
@@ -455,35 +437,21 @@ export function Login(props: {
           </svg>
           Weft
         </a>
-        {mode !== "sent" && (
-          <div className="mb-5">
-            <h1 className="text-xl font-semibold tracking-tight">
-              {AUTH_HEADINGS[mode][0]}
-            </h1>
-            <p className="mt-1 text-sm text-ink-3">{AUTH_HEADINGS[mode][1]}</p>
-          </div>
-        )}
-        {mode === "sent" && (
-          <div className="mb-3">
-            <h1 className="text-xl font-semibold tracking-tight">
-              Check your email
-            </h1>
-            <p className="mt-1 text-sm text-ink-3">
-              The account is not finished until the link in the message is
-              clicked. Nothing else to do here.
-            </p>
-          </div>
-        )}
+        <div className="mb-5">
+          <h1 className="text-xl font-semibold tracking-tight">
+            {AUTH_HEADINGS[mode][0]}
+          </h1>
+          <p className="mt-1 text-sm text-ink-3">{AUTH_HEADINGS[mode][1]}</p>
+        </div>
         {props.githubOutcome && (
           <GithubSigninBanner outcome={props.githubOutcome} />
         )}
-        {/* The fast way in, above the form rather than below it: GitHub
-            has already proved the address, so this path skips the
-            confirmation mail entirely and lands on picking repositories
-            to mirror. A full-page link, not a fetch — the flow leaves
-            for GitHub and comes back to our callback, and an anchor
-            works with no script running. */}
-        {(mode === "person" || mode === "signup") && (
+        {/* Above the form rather than below it. It signs in to an
+            account this server already has, found by the address GitHub
+            has proved; it never makes one. A full-page link, not a
+            fetch — the flow leaves for GitHub and comes back to our
+            callback, and an anchor works with no script running. */}
+        {mode === "person" && (
           <>
             <Button asChild size="lg" variant="outline" className="w-full">
               <a href="/v1/auth/github/start">
@@ -510,36 +478,7 @@ export function Login(props: {
             </div>
           </>
         )}
-        {mode === "signup" && (
-          <>
-            <Label htmlFor="name">Your name</Label>
-            <Input
-              id="name"
-              className="mb-3"
-              value={name}
-              onChange={(e) => setName(e.target.value)}
-              placeholder="Ada Lovelace"
-              autoComplete="name"
-              autoFocus
-              required
-            />
-            <Label htmlFor="handle">Namespace</Label>
-            <Input
-              id="handle"
-              className="mb-3 font-mono"
-              value={handle}
-              onChange={(e) => setHandle(e.target.value)}
-              placeholder="ada"
-              required
-            />
-            <p className="-mt-2 mb-3 text-xs text-ink-3">
-              Your repositories will live at{" "}
-              <code className="font-mono">/{handle.trim() || "you"}/repo</code>.
-              Pick carefully — it goes in every clone URL you hand out.
-            </p>
-          </>
-        )}
-        {mode === "person" || mode === "signup" || mode === "forgot" ? (
+        {mode === "person" || mode === "forgot" ? (
           <>
             <Label htmlFor="email">Email</Label>
             <Input
@@ -550,14 +489,10 @@ export function Login(props: {
               placeholder="you@example.com"
               type="email"
               autoComplete="username"
-              // First field of sign-in and reset, third of sign-up. Two
-              // autoFocus props on one form and the later one wins, so
-              // sign-up used to open with the cursor in Email, below the
-              // name and namespace it had not asked for yet.
-              autoFocus={mode !== "signup"}
+              autoFocus
               required
             />
-            {mode !== "forgot" && (
+            {mode === "person" && (
               <>
                 <Label htmlFor="password">Password</Label>
                 <Input
@@ -566,15 +501,13 @@ export function Login(props: {
                   value={password}
                   onChange={(e) => setPassword(e.target.value)}
                   type="password"
-                  autoComplete={
-                    mode === "signup" ? "new-password" : "current-password"
-                  }
+                  autoComplete="current-password"
                   required
                 />
               </>
             )}
           </>
-        ) : mode === "token" ? (
+        ) : (
           <>
             <Label htmlFor="org">Organization</Label>
             <Input
@@ -597,7 +530,7 @@ export function Login(props: {
               required
             />
           </>
-        ) : null}
+        )}
         {error && (
           <p className="mb-3 text-sm text-serious" role="alert">
             {error}
@@ -608,35 +541,17 @@ export function Login(props: {
             {note}
           </p>
         )}
-        {mode === "sent" ? (
-          <Button
-            type="button"
-            size="lg"
-            variant="outline"
-            className="w-full"
-            disabled={busy}
-            onClick={() => void resend()}
-          >
-            {busy ? "Sending…" : "Send the message again"}
-          </Button>
-        ) : (
-          <Button size="lg" className="w-full" disabled={busy}>
-            {busy
-              ? "Checking…"
-              : mode === "signup"
-                ? "Create account"
-                : mode === "forgot"
-                  ? "Send a reset link"
-                  : "Sign in"}
-          </Button>
-        )}
+        <Button size="lg" className="w-full" disabled={busy}>
+          {busy
+            ? "Checking…"
+            : mode === "forgot"
+              ? "Send a reset link"
+              : "Sign in"}
+        </Button>
         {[
           mode === "person"
-            ? { to: "signup" as const, label: "Create an account" }
-            : { to: "person" as const, label: "Sign in instead" },
-          mode === "person"
             ? { to: "forgot" as const, label: "Forgot your password?" }
-            : null,
+            : { to: "person" as const, label: "Sign in instead" },
           mode === "person"
             ? {
                 to: "token" as const,
@@ -664,14 +579,19 @@ export function Login(props: {
               {x.label}
             </button>
           ))}
+        {mode === "person" && (
+          <p className="mt-4 border-t border-borderline pt-4 text-sm text-ink-2">
+            No account yet? Accounts on this server are made by invitation.
+            Ask an admin of your organization to invite you, or whoever runs
+            this server to add you, then use the link in the email.
+          </p>
+        )}
         <p className="mt-3 text-xs text-ink-3">
           {mode === "token"
             ? "Needs at least org:read. The token stays in your browser."
-            : mode === "signup" || mode === "sent"
-              ? "You can sign in and look around straight away. Creating repositories needs the address confirmed."
-              : mode === "forgot"
-                ? "We answer the same way whether or not the address has an account here."
-                : "Your session is an HttpOnly cookie — no script on this page can read it."}
+            : mode === "forgot"
+              ? "We answer the same way whether or not the address has an account here."
+              : "Your session is an HttpOnly cookie — no script on this page can read it."}
         </p>
       </form>
     </div>

@@ -885,7 +885,6 @@ async function asAuthor(page: Page, id = "01ADAADAADAADAADAADAADAADA") {
         name: "Ada",
         handle: "ada",
         created_at: Date.now(),
-        verified_at: Date.now(),
         orgs: [{ id: "01org", name: "acme", role: "viewer" }],
       },
     }),

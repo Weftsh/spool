@@ -264,7 +264,7 @@ pub fn spawn_on_free_port(build: impl Fn(&str) -> Command) -> (Child, String) {
 /// What a trip through the GitHub sign-in callback ended in.
 pub struct GithubSignin {
     pub status: u16,
-    /// The `github=` word in the redirect — `ok`, `new`, `expired`,
+    /// The `github=` word in the redirect — `ok`, `noaccount`, `expired`,
     /// `noemail` and the rest. Pulled out because every assertion in the
     /// suite is about this and a substring match on the whole URL would
     /// pass for `notyours` when it meant `yours`.
@@ -428,21 +428,12 @@ impl Server {
 
     /// Run `stratum-server <args>` against this server's store and DB.
     pub fn admin(&self, args: &[&str]) -> Result<String, String> {
-        self.admin_with_env(args, &[])
-    }
-
-    /// `admin`, with extra environment — for a command that reads the
-    /// deployment's own variables (`STRATUM_PUBLIC_URL`) when its flag is
-    /// left out, the way the task definition supplies them.
-    pub fn admin_with_env(&self, args: &[&str], env: &[(&str, &str)]) -> Result<String, String> {
-        let mut cmd = admin_command(&self.bin);
-        cmd.env("STRATUM_STORE_URL", &self.store_url)
+        let out = admin_command(&self.bin)
+            .env("STRATUM_STORE_URL", &self.store_url)
             .env("STRATUM_DB_URL", &self.db_url)
-            .args(args);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        let out = cmd.output().expect("run admin command");
+            .args(args)
+            .output()
+            .expect("run admin command");
         let stdout = String::from_utf8_lossy(&out.stdout).to_string();
         if out.status.success() {
             Ok(stdout)

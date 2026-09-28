@@ -29,8 +29,7 @@ use serde::{Deserialize, Serialize};
 use stratum_control::auth::Scope;
 use stratum_control::issues::{self, Comment, Counts, Filter, Issue, Label};
 
-/// The caller as a **verified** person, or a response explaining why
-/// there is none.
+/// The caller as a person, or a response explaining why there is none.
 ///
 /// An issue has an author, and a service token is not one. The sentence
 /// says which of the two fixes apply — sign in, or stop using a
@@ -38,31 +37,10 @@ use stratum_control::issues::{self, Comment, Counts, Filter, Issue, Label};
 /// sends people to re-mint a token that will fail in exactly the same
 /// way.
 ///
-/// **The verification check is the second half and it is not optional.**
-/// Every other create path in this API calls `authx::require_verified`
-/// before letting a caller make something that costs storage. Filing an
-/// issue is a create path that needs nothing stronger than `RepoRead` —
-/// a viewer may file — which makes it the widest create door on the
-/// server, and it would have been the only one of them not to check. It
-/// costs a legitimate contributor a click they have already made.
-///
-/// It is checked on the resolved **person** rather than through
-/// `authx::require_verified`, and the reason is not that the latter is
-/// weaker — it gates sessions perfectly well at the five call sites
-/// that use it, because `authx::require` builds a `Principal` with a
-/// `user_id` for a cookie caller. (An earlier version of this comment
-/// said the opposite. It was wrong, and it was wrong in the direction
-/// that would have sent somebody to add redundant checks at five sites
-/// that already work.)
-///
-/// The reason is that this helper is about a *person*, and resolves one
-/// through `caller_person` rather than reading it off the principal
+/// Resolved through `caller_person` rather than read off the principal
 /// `rest_repo_auth` returned: a token's person, or else the browser
-/// session's, and nobody for a repo-bound token. For a session or an
-/// unbound token that is the person the principal names; for a
-/// repo-bound token it is deliberately nobody, because filing is a
-/// person's act. The resolved person is the one thing every door here
-/// produces, so it is what the check is made on.
+/// session's, and nobody for a repo-bound token, because filing is a
+/// person's act.
 fn person(state: &SharedState, headers: &HeaderMap) -> Result<String, Response> {
     let who = caller_person(state, headers)?.ok_or_else(|| {
         json_error(
@@ -70,15 +48,7 @@ fn person(state: &SharedState, headers: &HeaderMap) -> Result<String, Response> 
             "filing and commenting are a person's acts — sign in, or use a session rather than a service token",
         )
     })?;
-    match stratum_control::usertokens::is_verified(&state.db, &who) {
-        Ok(true) => Ok(who),
-        Ok(false) => Err(json_error(
-            StatusCode::FORBIDDEN,
-            "confirm your email address before filing or commenting — check your \
-             inbox for the link we sent, or ask for another one",
-        )),
-        Err(e) => Err(internal(e)),
-    }
+    Ok(who)
 }
 
 #[derive(Serialize)]

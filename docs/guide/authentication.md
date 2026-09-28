@@ -152,6 +152,34 @@ answers the same 404, so a link cannot be used to ask which invitations
 exist. It is a POST, not a GET, because a token in a path or query lands
 in every access log between the browser and here.
 
+### Accepting an invitation
+
+```bash
+curl -X POST https://spool.example.com/v1/auth/accept-invite \
+  -H "Content-Type: application/json" \
+  -d '{ "invite": "stinv_01hx…_…", "name": "Dev Eloper",
+        "password": "a long enough password", "handle": "dev" }'
+```
+
+For somebody new, this makes the account and signs them in (`201`, with
+a session cookie). `name` and `password` are required; `handle` is
+optional. The address needs no confirming: the invitation reached it,
+and that is the proof a confirmation link would have been.
+
+For somebody who already has an account on this server, only `invite`
+matters: the account joins the organization at the invited role, keeps
+its password and its handle, and is signed in.
+
+The **handle** is the new account's personal namespace — the `you` in
+`/you/repo`. It holds repositories of the person's own, such as their
+[forks](forks.md), and nobody else's: a personal namespace cannot have
+members, so a team's work belongs in an organization. Left out, it is
+made from the part of the address before the `@` (`dev.eloper@acme.dev`
+becomes `dev-eloper`), with a short suffix if that name is taken or
+reserved. Asked for and refused, it is refused plainly — `400` for a bad
+shape or a reserved word, `409` for one already taken — and nothing is
+written, so the same link works again with another name.
+
 ### Configuring mail
 
 `STRATUM_MAIL_TRANSPORT` picks one of four, and `STRATUM_MAIL_FROM` is
@@ -177,101 +205,53 @@ private network) and fine until credentials are involved. Setting
 is already private with `STRATUM_MAIL_SMTP_ALLOW_CLEARTEXT_AUTH=1`. On
 AWS, use `ses`, which is HTTPS.
 
-## Signing yourself up
+## How people get accounts
 
-Anybody who can reach your server can sign up. An account starts with
-its own personal namespace and no organizations: it sees nothing of
-anybody else's until an organization invites it.
+There is no signing yourself up. An account comes from one of two
+places, and both prove its address on the way in:
 
-```bash
-curl -X POST https://spool.example.com/v1/auth/signup \
-  -H "Content-Type: application/json" \
-  -d '{ "email": "you@example.dev", "name": "Your Name",
-        "password": "a long enough password", "handle": "you" }'
-```
+- **An invitation** from an admin of an organization, [accepted](#accepting-an-invitation)
+  by the person it was mailed to.
+- **An operator**, on the server. This is how the very first person gets
+  in — there is nobody yet to invite them — and how an operator adds
+  people in bulk:
 
-The **handle** is your personal namespace — the `you` in `/you/repo`.
-It holds repositories of your own, such as your [forks](forks.md), and
-nobody else: a personal namespace cannot have members, so a team's work
-belongs in an organization. The handle is asked for rather than derived
-from your address, because it appears in every clone URL you hand out.
-It is validated and its refusals are plain (`400` for a bad shape or a
-reserved word, `409` for one already taken): namespace names are unique
-on the server and are not secrets, so "that one is taken" gives nothing
-away.
+  ```bash
+  stratum-server admin user-create --org acme \
+    --email you@acme.dev --name "Your Name" --password '…' --role owner
+  ```
 
-Everything after the handle is **uniform**. Signup always answers `202`
-with the same body, whether a confirmation message was sent, the address
-already has an account, or you have asked too many times — any
-difference would be a way to ask who has an account here. When the
-address is already registered, its owner gets a message saying so and
-that nothing was created; that way somebody who forgot they had an
-account is not left staring at "check your email" with an empty inbox.
+  `--role` defaults to `owner`; `--handle` picks the personal namespace,
+  which is otherwise made from the address exactly as an invitation
+  makes it. Run against an address that already has an account, it adds
+  that account to the organization instead.
 
-Rate limits are per address and global, not per source: behind a proxy
-this server does not see a peer address it can trust, and a limit that
-`X-Forwarded-For` can bypass is worse than an honest global one.
-
-### Signing up with GitHub instead
+### Signing in with GitHub
 
 When your server has a GitHub App configured, the sign-in screen offers
-**Continue with GitHub**. Press it and there is no
-confirmation message at all. The round trip is the ordinary OAuth one —
-`GET /v1/auth/github/start` sends you to GitHub's authorization screen
-and GitHub returns you to `GET /v1/auth/github/callback` — and what
-makes it safe to skip the server's own mail is that GitHub has already done the
-work: `GET /user/emails` reports which of your addresses GitHub itself
-sent a link to and saw clicked.
+**Continue with GitHub**. It signs you in to an account you already
+have here; it never makes one. The round trip is the ordinary OAuth
+one — `GET /v1/auth/github/start` sends you to GitHub's authorization
+screen and GitHub returns you to `GET /v1/auth/github/callback`, which
+redirects back into the dashboard with the outcome in `?github=`.
 
-**Only that flag is trusted.** The address has to be your **primary**
-one and GitHub has to report it **verified**; anything else — an
-unproved primary, or a GitHub App that was never granted the
-*Email addresses* permission — lands you back on the sign-in screen
-saying so, with the password path still open. We never read `GET
-/user`'s own `email` field: that is whatever you chose to publish,
-GitHub does not check it, and trusting it would let somebody claim your
-account here by typing your address into a profile.
+The first time, the account is found by address, and **only one address
+is trusted**: the one GitHub reports as your **primary** and
+**verified** — GitHub itself sent a link to it and saw it clicked. It
+has to be the address your account here signs in with. An unproved
+primary, or a GitHub App never granted the *Email addresses* permission,
+lands you back on the sign-in screen saying so (`noemail`), with the
+password path still open; an address that matches nobody here says that
+too (`noaccount`), and the fix is an invitation. We never read `GET
+/user`'s own `email` field: that is whatever you chose to publish, GitHub
+does not check it, and trusting it would let somebody claim your account
+here by typing your address into a profile.
 
-An account made this way has **no password** and its address is proved
-on arrival, so it can create a repository immediately. Your GitHub
-login becomes your handle, suffixed if that name is reserved or already
-taken; set a password later from **Settings** if you want the second
-way in.
-
-If you already have an account here whose sign-in address is the one
-GitHub proved, this **links to it** rather than refusing — same account,
-same organizations, a second door. One exception, and it is deliberate:
-if that account had never confirmed its address, its password is
-cleared and its sessions ended at the moment you prove the address.
-Anyone can sign up with an address they do not own; that account can do
-nothing, but it sits on the address with a password its maker knows, and
-handing it to you intact would hand you an account somebody else can
-still open.
-
-The account is keyed on GitHub's **numeric user id**, never your login.
-Renaming yourself on GitHub still lands you on your own account, and
-whoever claims your old login next gets nothing.
-
-### Confirming, and what is blocked until you do
-
-```bash
-curl -X POST https://spool.example.com/v1/auth/verify \
-  -H "Content-Type: application/json" -d '{ "token": "weftv_…" }'
-```
-
-Confirming signs you in — somebody holding a link from their own inbox
-has proved as much as the sign-in form asks for.
-
-An unconfirmed account **may sign in, look around, and read whatever its
-role allows. It may not create a repository or a mirror.** That is the
-line: everything cheap stays open, everything that costs storage or an
-outbound fetch does not. `POST /v1/auth/resend-verification` sends
-another link, and issuing one spends the previous one.
-
-**Service tokens are exempt.** A token with no user behind it was minted
-by somebody who is confirmed, and every token minted before addresses
-were proved at all is one of these — CI does not stop working because a
-colleague has not read their email.
+That first sign-in links your GitHub account to this one, keyed on
+GitHub's **numeric user id**, never your login. After it, the address no
+longer matters: renaming yourself on GitHub, or changing your primary
+address there, still lands you on your own account, and whoever claims
+your old login next gets nothing.
 
 ### Forgotten passwords
 
@@ -283,23 +263,16 @@ curl -X POST https://spool.example.com/v1/auth/reset-password \
   -d '{ "token": "weftrs_…", "new_password": "a different long password" }'
 ```
 
-A reset link lives for an hour (a confirmation link, for a day), works
-once, and **ends every other session on the account** — whoever asked for
-it may have done so because somebody else was signed in. It also counts
-as proof of the address, so it finishes a signup that was abandoned. A
-verification link presented to the reset endpoint is refused, and the
-reverse too: the token's row says what it is for.
+A reset link lives for an hour, works once, and **ends every other
+session on the account** — whoever asked for it may have done so because
+somebody else was signed in. `forgot-password` answers `202` with the
+same body whether or not the address has an account, and its limits are
+per address and global rather than per source: behind a proxy this
+server does not see a peer address it can trust, and a limit that
+`X-Forwarded-For` can bypass is worse than an honest global one.
 
 A disabled account gets no reset link. Recovering an account an operator
 switched off would undo the switching off.
-
-The very first account is created from the command line on the server,
-because there is nobody yet to invite it:
-
-```bash
-stratum-server admin user-create --org acme \
-  --email you@acme.dev --name "Your Name" --password '…' --role owner
-```
 
 ## Minting and revoking tokens
 

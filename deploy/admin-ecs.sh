@@ -14,7 +14,7 @@
 # Usage: admin-ecs.sh <subcommand> [flags…]
 #   admin-ecs.sh bootstrap --org acme
 #   admin-ecs.sh user-create --org acme --email you@example.com --password '…'
-#   admin-ecs.sh verify-link --email person@example.com
+#   admin-ecs.sh user-disable --email person@example.com
 set -euo pipefail
 
 [ $# -ge 1 ] || { >&2 echo "usage: admin-ecs.sh <admin subcommand> [flags…]"; exit 2; }

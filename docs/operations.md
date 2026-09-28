@@ -289,11 +289,12 @@ transport even on a deployment that has no TLS name yet.
 
 ## Mail
 
-Mail carries address confirmation, password resets, invitations and
-notifications. With the default `null` transport it is dropped, and the
-dashboard says so where it matters; people you create with `admin
-user-create` do not need it, and `admin verify-link` covers a
-confirmation mail that never arrived.
+Mail carries invitations, password resets, confirmations of the extra
+addresses people add to their accounts, and notifications. With the
+default `null` transport it is dropped, and the dashboard says so where
+it matters: an invitation's link is also shown to the admin who made it,
+to deliver by hand, and people you create with `admin user-create` need
+no mail at all.
 
 - **`smtp`** — `STRATUM_MAIL_SMTP_HOST`, `STRATUM_MAIL_FROM`, and
   optionally `STRATUM_MAIL_SMTP_USER`/`_PASSWORD`. This build has **no
@@ -418,7 +419,6 @@ stratum-server admin user-create --org NAME --email ADDR --password SECRET \
     [--name N] [--role R] [--handle H]               # an account, added to the org
 stratum-server admin user-disable --email ADDR       # offboarding
 stratum-server admin user-enable  --email ADDR       # …and undoing it
-stratum-server admin verify-link  --email ADDR [--public-url URL]
 stratum-server admin repair-identities [--dry-run]   # accounts missing a handle
 ```
 
@@ -430,13 +430,11 @@ stratum-server admin repair-identities [--dry-run]   # accounts missing a handle
 - **Tokens** are shown once at mint and stored only as SHA-256 hashes.
   Revoking one (`DELETE /v1/orgs/{org}/tokens/{id}`, or the dashboard) is
   immediate; there is no verification cache.
-- **`user-create`** on an address that already has an account adds the
-  membership instead of failing. It derives a handle from the address;
-  `--handle` picks another when that one is taken.
-- **`verify-link`** prints the address-confirmation link a mail would
-  have carried — for a mail that bounced or was never sent. One use, 24
-  hours. It does not mark the address verified by itself.
-  `STRATUM_PUBLIC_URL` (or `--public-url`) is what the link points at.
+- **`user-create`** is one of the two ways an account is made — the
+  other is an invitation; nobody signs themselves up. On an address that
+  already has an account it adds the membership instead of failing. It
+  derives a handle from the address (`dev.eloper@` becomes
+  `dev-eloper`); `--handle` picks another when that one is taken.
 - **`repair-identities`** gives a handle and personal namespace to any
   account made without one (by an older `user-create`). It names every
   account it could not repair and why; nothing is changed with

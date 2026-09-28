@@ -8,6 +8,10 @@
 
 use crate::Server;
 
+/// The password of every account [`Browser::person`] and
+/// [`Browser::stranger`] make.
+pub const PASSWORD: &str = "a long enough password";
+
 pub struct Browser<'a> {
     server: &'a Server,
     /// Public so a suite can forge one — a session cookie is a bearer
@@ -77,10 +81,56 @@ impl<'a> Browser<'a> {
         b
     }
 
+    /// Somebody made the way this server makes people — an operator's
+    /// `admin user-create` at `role` in `org`, which must exist, with
+    /// `handle` as their personal namespace — and signed in with
+    /// [`PASSWORD`].
+    ///
+    /// There is no signing yourself up: an account comes from an
+    /// operator or from an invitation, and this is the operator's door.
+    /// For somebody who must have no role in the organisation under
+    /// test, see [`Browser::stranger`].
+    pub fn person(
+        server: &'a Server,
+        org: &str,
+        role: &str,
+        handle: &str,
+        email: &str,
+    ) -> Browser<'a> {
+        server.admin_json(&[
+            "admin",
+            "user-create",
+            "--org",
+            org,
+            "--role",
+            role,
+            "--email",
+            email,
+            "--name",
+            handle,
+            "--password",
+            PASSWORD,
+            "--handle",
+            handle,
+        ]);
+        Browser::signed_in(server, email, PASSWORD)
+    }
+
+    /// A person with no role anywhere but their own: an organisation
+    /// made for them, `{handle}-org`, and their personal namespace
+    /// `handle`. The stranger a masked 404, a fork gate or a membership
+    /// check is about.
+    pub fn stranger(server: &'a Server, handle: &str, email: &str) -> Browser<'a> {
+        let org = format!("{handle}-org");
+        server.bootstrap_org(&org);
+        Browser::person(server, &org, "owner", handle, email)
+    }
+
     /// Invite `email` into `org` as `role` from this session, which must
     /// be an admin of `org`, and accept the invitation from a fresh
-    /// browser — the link is the credential, so no password is needed
-    /// for a person who already has an account.
+    /// browser. The link is the credential: a person who already has an
+    /// account needs no password, and one who does not is made with
+    /// [`PASSWORD`] and a handle made from their address.
     ///
     /// Every repository is private to its organisation, so this is how a
     /// second person comes to read one: to fork it, to open a change
@@ -100,7 +150,7 @@ impl<'a> Browser<'a> {
         let (st, out) = them.req(
             "POST",
             "/v1/auth/accept-invite",
-            Some(serde_json::json!({ "invite": link, "name": email })),
+            Some(serde_json::json!({ "invite": link, "name": email, "password": PASSWORD })),
         );
         assert_eq!(st, 201, "{email} accepting the invite into {org}: {out}");
     }

@@ -79,7 +79,7 @@ fn builder(
         )
 }
 
-/// A verified person who owns `org`, signed in — the shape a real
+/// A person who owns `org`, signed in — the shape a real
 /// connect arrives in, since the callback is a browser landing.
 fn owner_browser<'a>(
     server: &'a Server,
@@ -591,32 +591,6 @@ fn an_install_begun_on_github_is_parked_and_claimed_after_sign_in() {
     let (st, out) = forger.req("POST", "/v1/orgs/beta/github/install/claim", None);
     assert_eq!(st, 404, "{out}");
 
-    // An unproved address cannot claim, the same as it cannot connect.
-    let (st, out) = server.post(
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "email": "stranger@example.test",
-            "name": "A Stranger",
-            "password": "a long enough password",
-            "handle": "stranger",
-        })),
-    );
-    assert_eq!(st, 202, "{out}");
-    let (_, _, set) = server.follow_setup_full("?installation_id=4002&code=code_owning_4002", None);
-    let claim3 = set.unwrap().split(';').next().unwrap().to_string();
-    let mut stranger = stratum_testkit::browser::Browser::new(&server);
-    assert_eq!(
-        stranger.login("stranger@example.test", "a long enough password"),
-        200
-    );
-    let session = stranger.cookie.clone().unwrap();
-    stranger.cookie = Some(format!("{session}; {claim3}"));
-    let (st, out) = stranger.req("POST", "/v1/orgs/stranger/github/install/claim", None);
-    assert_eq!(
-        st, 403,
-        "an unproved address claimed an installation: {out}"
-    );
     assert!(server.healthy());
 }
 
@@ -1233,45 +1207,6 @@ fn a_local_origin_is_created_without_being_probed() {
     assert_eq!(st, 200, "{out}");
     assert_eq!(out["state"], "ready", "{out}");
     assert_eq!(out["commit"], tip, "{out}");
-
-    assert!(server.healthy(), "still serving");
-}
-
-/// An unproved address cannot connect somebody else's source.
-#[test]
-fn an_unverified_account_cannot_connect_github() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("connect-unverified");
-    let scratch = Scratch::new("connect-unverified");
-    let gh = fake_github::spawn();
-    let server = spawn(&bucket.base_url, &scratch, "connect_unv", &gh.base_url);
-
-    let (st, out) = server.post(
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "email": "stranger@example.test",
-            "name": "A Stranger",
-            "password": "a long enough password",
-            "handle": "stranger",
-        })),
-    );
-    assert_eq!(st, 202, "{out}");
-
-    // Signed in, unproved, and in their own namespace — where they are
-    // the owner, so the only thing standing between them and connecting
-    // an app is the verification check.
-    let mut browser = stratum_testkit::browser::Browser::new(&server);
-    assert_eq!(
-        browser.login("stranger@example.test", "a long enough password"),
-        200
-    );
-    let (st, out) = browser.req(
-        "POST",
-        "/v1/orgs/stranger/github/install",
-        Some(serde_json::json!({})),
-    );
-    assert_eq!(st, 403, "an unproved address connected GitHub: {out}");
 
     assert!(server.healthy(), "still serving");
 }

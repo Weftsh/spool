@@ -5,6 +5,7 @@
 //! clone smoke with fsck on every product (I11).
 
 use std::time::{Duration, Instant};
+use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::{self, Scratch};
 use stratum_testkit::{CountingProxy, Minio, Server};
 
@@ -989,6 +990,102 @@ fn an_unparseable_token_tells_a_stranger_whether_a_private_repository_exists() {
         );
     }
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
+}
+
+/// **A missing organization is masked exactly as one the caller may not
+/// see.** Every repository-shaped route masks a missing *repository*, but
+/// a missing *organization* used to answer a bare 404 before any
+/// credential was looked at, while an existing one asked who you were
+/// (401) or, to somebody with no role in it, hid behind 404 — so a
+/// signed-out caller could list every organization on the server by
+/// status code. Worse, every personal namespace is a person's handle, so
+/// the same probe listed the people. And the two organization-wide lists
+/// answered an outsider an empty `200` where a missing name answered
+/// 404, which told any signed-in person which organizations exist.
+///
+/// So: for every organization-level and repository-level route, and for
+/// every kind of caller that is not inside — nobody, a made-up token, a
+/// token from another organization, the session of a person from
+/// another organization — an organization that exists, a person's
+/// handle, and a name that is nobody's answer identically.
+#[test]
+fn a_missing_organization_is_masked_exactly_as_one_the_caller_may_not_see() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("hard-orgmask");
+    let scratch = Scratch::new("orgmask");
+    let server = spawn_server(&bucket.base_url, &scratch, &[]);
+    let acme = server.bootstrap_org("acme");
+    let rival = server.bootstrap_org("rival");
+    create_repo(&server, &acme, "acme", "app");
+    // A person in acme, so their handle is one of the names probed.
+    Browser::person(&server, "acme", "member", "ada", "ada@acme.test");
+    let mut outsider = Browser::stranger(&server, "sam", "sam@rival.test");
+
+    let suffixes = [
+        "/repos",
+        "/repos/app",
+        "/repos/app/changes",
+        "/repos/app/files/README.md",
+        "/members",
+        "/invites",
+        "/tokens",
+        "/teams",
+        "/audit",
+        "/changes",
+        "/changesets",
+        "/runners",
+        "/runner-groups",
+        "/runner-policy",
+        "/profile",
+        "/ssh-keys",
+        "/usage",
+    ];
+    for suffix in suffixes {
+        let ghost = format!("/v1/orgs/ghost-nobody-made{suffix}");
+        for real in ["acme", "ada"] {
+            let path = format!("/v1/orgs/{real}{suffix}");
+            for (who, tok) in [
+                ("nobody", ""),
+                ("a made-up token", "weft_bogus_bogus"),
+                ("rival's token", rival.as_str()),
+            ] {
+                let a = server.req("GET", &path, tok, None);
+                let b = server.req("GET", &ghost, tok, None);
+                assert_eq!(
+                    a.0, b.0,
+                    "{who}: {path} answered {} ({}) but a missing organization {} ({})",
+                    a.0, a.1, b.0, b.1
+                );
+                assert!(
+                    matches!(a.0, 401 | 404),
+                    "{who} reached {path}: {} {}",
+                    a.0,
+                    a.1
+                );
+            }
+            let a = outsider.req("GET", &path, None);
+            let b = outsider.req("GET", &ghost, None);
+            assert_eq!(
+                a.0, b.0,
+                "an outsider's session: {path} answered {} ({}) but a missing organization {} ({})",
+                a.0, a.1, b.0, b.1
+            );
+            assert_eq!(a.0, 404, "an outsider's session reached {path}: {}", a.1);
+        }
+    }
+    // The members still get their answers: masking is for outsiders.
+    let (st, body) = server.req("GET", "/v1/orgs/acme/changes", &acme, None);
+    assert_eq!(st, 200, "{body}");
+    let (st, body) = server.req("GET", "/v1/orgs/acme/changesets", &acme, None);
+    assert_eq!(st, 200, "{body}");
+    // A token minted in the organization reads its profile — it used to
+    // be refused as "not signed in" — and so does a member's session.
+    let (st, body) = server.req("GET", "/v1/orgs/acme/profile", &acme, None);
+    assert_eq!(st, 200, "{body}");
+    let mut ada = Browser::signed_in(&server, "ada@acme.test", stratum_testkit::browser::PASSWORD);
+    let (st, body) = ada.req("GET", "/v1/orgs/acme/profile", None);
+    assert_eq!(st, 200, "{body}");
+    assert!(server.healthy());
 }
 
 /// **A credential that dies between the round trips of one operation.**

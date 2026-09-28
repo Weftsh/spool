@@ -48,17 +48,6 @@ pub async fn create_org(
         Ok(u) => u,
         Err(r) => return r,
     };
-    // The same wall repositories are behind: an unproved address must
-    // not be able to take names.
-    if !matches!(
-        stratum_control::usertokens::is_verified(&state.db, &user.id),
-        Ok(true)
-    ) {
-        return json_error(
-            StatusCode::FORBIDDEN,
-            "confirm your email address before creating an organization",
-        );
-    }
     let name = body.name.trim().to_string();
     if let Err(e) = stratum_control::registry::valid_namespace_name("organization", &name) {
         return json_error(StatusCode::BAD_REQUEST, e);

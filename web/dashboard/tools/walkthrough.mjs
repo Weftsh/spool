@@ -68,19 +68,28 @@ const EXPECTED = {
   // pages, and is told no, which is the point.
   "the front door, signed out": [401],
   "login form": [401], // the boot probe: nobody is signed in yet
-  // Signing up through GitHub starts and ends signed out: the boot probe
-  // before the round trip, and again after the sign-out that returns the
-  // pass to the state it found.
-  "signing up with GitHub": [401],
+  // A stranger at the door: the boot probe, and the removed sign-up
+  // route answering 404 — which is the point, asked on purpose and only
+  // of that one route.
+  "a stranger is told how to get an account": [
+    401,
+    { status: 404, url: /\/v1\/auth\/signup$/ },
+  ],
+  // GitHub knows the person and this server does not, so the round trip
+  // starts and ends signed out: the boot probe before and after, and
+  // the stage's own `me` check proving nobody was signed in.
+  "GitHub never makes an account": [401],
   // Every GitHub refusal lands on the sign-in screen by design, so this
   // stage is signed out for all of them and meets the probe each time.
   "signing in with GitHub, refused": [401],
-  // A stranger arriving at the dashboard for the first time: the same
-  // boot probe, before they have an account at all.
-  "signing up as a stranger": [401],
   // The recipient's browser has never been here: the same boot probe,
   // from a context with no cookie, before the invitation is accepted.
-  "joining from the emailed link": [401],
+  // The 409 is the handle somebody already has, asked for on purpose to
+  // see the form keep the person on the invitation.
+  "joining from the emailed link": [
+    401,
+    { status: 409, url: /\/v1\/auth\/accept-invite$/ },
+  ],
   "wrong password": [401],
   // A signed-out context arriving from GitHub's install page: the boot
   // probe asks "am I signed in?" and is told no, which is the point.
@@ -337,206 +346,130 @@ await step("the front door, signed out", async () => {
   await shot(page, "02-signed-out-repo", "a private repository's address, signed out: sign in first");
 });
 
-// The funnel a stranger runs, before any of the signed-in work below.
-// This is the one path where nobody has vouched for you and nothing has
-// been set up on your behalf, so it is the one most worth driving by
-// hand: sign up, read the message, click the link, hit the wall, get
-// past it. It leaves an account behind, which is what a signup does.
-const NEWCOMER = `newcomer-${Date.now()}`;
-const NEWCOMER_EMAIL = `${NEWCOMER}@example.dev`;
-
-await step("signing up as a stranger", async () => {
-  await page.goto(`${BASE}/dashboard/`, { waitUntil: "networkidle" });
-  await page.getByRole("button", { name: "Create an account" }).click();
-  await page.getByLabel("Your name").fill("New Comer");
-  await page.getByLabel("Namespace").fill(NEWCOMER);
-  // The namespace preview is what somebody checks before committing to
-  // a name that appears in every clone URL they hand out.
-  if (!(await page.getByText(`/${NEWCOMER}/repo`).isVisible())) {
+// The way in for somebody with no account. There is none to make here:
+// accounts come from an organization's invitation or from whoever runs
+// the server, so the sign-in screen has to say so — a visitor hunting
+// for "Create an account" otherwise finds nothing and learns nothing.
+// `/login?mode=signup` is where old sign-up links point, so it is the
+// address this starts from. And the route is asked directly as well:
+// a form that is gone from the page proves nothing about a server that
+// would still make the account.
+await step("a stranger is told how to get an account", async () => {
+  await page.goto(`${BASE}/login?mode=signup`, { waitUntil: "networkidle" });
+  await page.getByLabel("Email").waitFor({ timeout: 15000 });
+  const how = await page
+    .getByText(/No account yet\?/)
+    .textContent()
+    .catch(() => null);
+  if (!how || !/made by invitation/.test(how)) {
     problems.push({
       where: stage,
       kind: "content",
-      text: "the signup form does not show where repositories will live",
+      text: `the sign-in screen does not say accounts are made by invitation: ${how}`,
     });
   }
-  await page.getByLabel("Email").fill(NEWCOMER_EMAIL);
-  await page.getByLabel("Password").fill("a long enough password");
-  await shot(page, "04a-signup", "signing up: name, namespace, address");
-  await page.getByRole("button", { name: "Create account" }).click();
-  await page.getByRole("status").waitFor({ timeout: 15000 });
-  const said = await page.getByRole("status").textContent();
-  console.log(`  said: ${said?.trim()}`);
-  // It must not claim the account exists: the server refuses to say, and
-  // a page that says otherwise contradicts it.
-  if (/account is ready|welcome/i.test(said ?? "")) {
-    problems.push({
-      where: stage,
-      kind: "content",
-      text: `signup claimed more than the server will confirm: ${said}`,
-    });
-  }
-  // Nothing left to fill in: the form is gone, and so is every other
-  // form — the screen once fell through to "Organization / API token".
-  for (const label of ["Password", "API token", "Organization"]) {
-    if ((await page.getByLabel(label).count()) > 0)
+  for (const [what, found] of [
+    [
+      "a Create account button",
+      page.getByRole("button", { name: /create (an )?account/i }),
+    ],
+    ["a name field", page.getByLabel("Your name")],
+    ["a namespace field", page.getByLabel("Namespace")],
+  ]) {
+    if ((await found.count()) > 0)
       problems.push({
         where: stage,
         kind: "content",
-        text: `after signing up the screen still shows a "${label}" field`,
+        text: `the sign-in screen still offers ${what}`,
       });
   }
-  if ((await page.getByRole("button", { name: "Create account" }).count()) > 0)
-    problems.push({
-      where: stage,
-      kind: "content",
-      text: "after signing up the screen still offers Create account",
+  await shot(
+    page,
+    "04a-no-signup",
+    "no way to sign yourself up, and the screen says who to ask",
+  );
+  const status = await page.evaluate(async () => {
+    const r = await fetch("/v1/auth/signup", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        email: `stranger-${Date.now()}@example.dev`,
+        name: "A Stranger",
+        password: "a long enough password",
+        handle: `stranger-${Date.now()}`,
+      }),
     });
-  await shot(page, "04b-signup-sent", "the same answer either way, and nothing left to fill in");
-});
-
-await step("confirming from the message", async () => {
-  if (!MAIL_DIR) return;
-  let mail = null;
-  for (let i = 0; i < 50 && !mail; i++) {
-    for (const name of fs.readdirSync(MAIL_DIR)) {
-      if (!name.endsWith(".json")) continue;
-      const m = JSON.parse(fs.readFileSync(path.join(MAIL_DIR, name), "utf8"));
-      if (m.to === NEWCOMER_EMAIL) mail = m;
-    }
-    if (!mail) await new Promise((r) => setTimeout(r, 100));
-  }
-  if (!mail) {
-    problems.push({
-      where: stage,
-      kind: "behaviour",
-      text: `no confirmation message for ${NEWCOMER_EMAIL}`,
-    });
-    return;
-  }
-  console.log(`  subject: ${mail.subject}`);
-
-  // Sign in *before* confirming, and prove the wall is really there —
-  // this is the state the whole verification feature exists to create,
-  // and it has never been seen in a browser until now. The form is still
-  // on the signup screen showing "check your email", so the way back is
-  // the same link a real person would take.
-  await page.getByRole("button", { name: "Sign in instead" }).click();
-  await page.getByLabel("Email").fill(NEWCOMER_EMAIL);
-  await page.getByLabel("Password").fill("a long enough password");
-  await page.getByRole("button", { name: "Sign in", exact: true }).click();
-  await page.getByText("Requests today").waitFor({ timeout: 15000 });
-  const banner = page.getByRole("status").filter({ hasText: "Confirm" });
-  if (!(await banner.isVisible())) {
-    problems.push({
-      where: stage,
-      kind: "behaviour",
-      text: "an unconfirmed account is not told that anything is blocked",
-    });
-  }
-  await shot(page, "04c-unconfirmed", "signed in, and told what is blocked");
-
-  const link = mail.text.match(/https?:\/\/\S+/)?.[0];
-  if (!link || !link.startsWith(BASE)) {
-    problems.push({
-      where: stage,
-      kind: "content",
-      text: `the confirmation link points somewhere else: ${link}`,
-    });
-    return;
-  }
-  await page.goto(link, { waitUntil: "networkidle" });
-  await page.getByText("Requests today").waitFor({ timeout: 15000 });
-  if (new URL(page.url()).hash !== "") {
+    return r.status;
+  });
+  if (status !== 404)
     problems.push({
       where: stage,
       kind: "security",
-      text: `the confirmation token is still in the address bar: ${page.url()}`,
+      text: `POST /v1/auth/signup answered ${status}; accounts are invitation-only and the route should be gone (404)`,
     });
-  }
-  if (
-    await page
-      .getByText(/to create repositories/)
-      .isVisible()
-      .catch(() => false)
-  ) {
-    problems.push({
-      where: stage,
-      kind: "behaviour",
-      text: "the banner survived confirmation",
-    });
-  }
-  await shot(page, "04d-confirmed", "confirmed — the banner is gone");
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await page.getByLabel("Email").waitFor({ timeout: 10000 });
 });
 
-// Signing up through GitHub is the fast path, and the whole claim it
-// makes is that there is no confirmation mail in it: GitHub has already
-// proved the address, so the account is usable the moment it lands.
-// Both halves of that are checked here — the banner that nags an
-// unproved account must be absent, and the screen must be the one that
-// asks what to mirror, because being dropped on an empty overview is
-// how an onboarding that exists gets missed.
-await step("signing up with GitHub", async () => {
+// GitHub signs somebody in to an account they already have, and never
+// makes one. The stand-in GitHub's default person is `octocat`, whose
+// proved primary address (octocat@example.com) belongs to nobody the
+// stack seeds — so a real round trip through the button must come back
+// `noaccount`, still signed out, sending them to ask for an invitation.
+// Nothing here is stubbed: the button goes to our start route, which
+// parks the anti-CSRF cookie and sends the browser to the provider, and
+// the provider redirects back to our callback.
+//
+// What this does not show is a GitHub sign-in that *succeeds*: the
+// fake's people all have `@example.com` addresses and the stack's
+// accounts are `@acme.dev`, so there is nobody to link, and this stage
+// claims nothing about that half.
+await step("GitHub never makes an account", async () => {
   await page.goto(`${BASE}/dashboard/`, { waitUntil: "networkidle" });
-  await shot(page, "04e-github-button", "the fast way in, above the form");
-  // A real leave and a real return: the button goes to our start route,
-  // which parks the anti-CSRF cookie and sends the browser to the
-  // provider, and the provider redirects back to our callback. Nothing
-  // here is stubbed, so the cookie check is a check this really passes.
+  await shot(page, "04b-github-button", "GitHub is offered beside the password form");
   await page.getByRole("link", { name: "Continue with GitHub" }).click();
-  await page.waitForURL(/\/dashboard\//, { timeout: 20000 });
+  await page.waitForURL(/\/dashboard\/.*github=/, { timeout: 20000 });
 
-  const url = page.url();
-  if (!/github=new/.test(url)) {
+  const outcome = new URL(page.url()).searchParams.get("github");
+  if (outcome !== "noaccount") {
     problems.push({
       where: stage,
       kind: "behaviour",
-      text: `signing up with GitHub did not land on a new account: ${url}`,
-    });
-    return;
-  }
-  // The point of the feature. An account made this way is proved, so the
-  // "confirm your email" banner must not be on screen.
-  if (
-    await page
-      .getByText(/confirm your email/i)
-      .first()
-      .isVisible()
-      .catch(() => false)
-  ) {
-    problems.push({
-      where: stage,
-      kind: "behaviour",
-      text: "an account GitHub proved is still being asked to confirm its address",
+      text: `a GitHub identity nobody here has came back github=${outcome}, not noaccount: ${page.url()}`,
     });
   }
-  // And it lands on the thing the sign-up went to GitHub *for*.
-  await page
-    .getByRole("button", { name: /Install the GitHub app|Back/ })
+  const said = await page
+    .getByRole("status")
+    .filter({ hasText: /GitHub/ })
     .first()
-    .waitFor({ timeout: 15000 });
+    .textContent()
+    .catch(() => null);
+  if (!said || !/invitation/i.test(said)) {
+    problems.push({
+      where: stage,
+      kind: "content",
+      text: `github=${outcome} does not send the person to an invitation: ${said}`,
+    });
+  }
+  // Nobody was signed in, and so nothing was made to sign in to.
+  const me = await page.evaluate(async () => (await fetch("/v1/auth/me")).status);
+  if (me !== 401) {
+    problems.push({
+      where: stage,
+      kind: "security",
+      text: `after github=${outcome}, /v1/auth/me answered ${me}: a GitHub identity with no account here was signed in`,
+    });
+  }
+  if ((await page.getByLabel("Email").count()) === 0) {
+    problems.push({
+      where: stage,
+      kind: "behaviour",
+      text: `github=${outcome} left no other way to sign in`,
+    });
+  }
   await shot(
     page,
-    "04f-github-onboard",
-    "proved on arrival, and asked what to mirror",
+    "04c-github-noaccount",
+    "GitHub knows them, this server does not: ask for an invitation",
   );
-
-  // It can create immediately — the gate every other path only passes
-  // after a link is clicked. Proved by doing it, not by reading a flag.
-  await page.goto(`${BASE}/dashboard/new`, { waitUntil: "networkidle" });
-  await page.getByRole("tab", { name: "Empty repository" }).click();
-  await page.getByLabel("Repository name").fill("first-repo");
-  await page.getByRole("button", { name: "Create repository" }).click();
-  await page.getByText("first-repo").first().waitFor({ timeout: 15000 });
-  await shot(
-    page,
-    "04g-github-created",
-    "no confirmation mail, and creating works at once",
-  );
-
-  await page.getByRole("button", { name: "Sign out" }).click();
-  await page.getByLabel("Email").waitFor({ timeout: 10000 });
 });
 
 // Every refusal lands on the signed-out screen, which is the only place
@@ -545,8 +478,8 @@ await step("signing up with GitHub", async () => {
 // stage exists to catch.
 await step("signing in with GitHub, refused", async () => {
   for (const [outcome, needle] of [
+    ["noaccount", /invitation/i],
     ["noemail", /confirmed/i],
-    ["emailtaken", /different account/i],
     ["denied", /cancelled at GitHub/i],
   ]) {
     await page.goto(`${BASE}/dashboard/?github=${outcome}`, {
@@ -562,6 +495,14 @@ await step("signing in with GitHub, refused", async () => {
         where: stage,
         kind: "content",
         text: `github=${outcome} says nothing a person can act on: ${said}`,
+      });
+    }
+    // Nor may it send them to a door that is not there.
+    if (said && /sign(ing)? ?up|create an account/i.test(said)) {
+      problems.push({
+        where: stage,
+        kind: "content",
+        text: `github=${outcome} offers a sign-up that does not exist: ${said}`,
       });
     }
     // The way in must still be there. A refusal that also hides the
@@ -647,7 +588,10 @@ await step("settings / members", async () => {
 
 // A fresh address each run: an outstanding invitation for the same
 // person is refused, which is correct and not what these steps are for.
+// The handle the new hire asks for is fresh for the same reason: a
+// personal namespace outlives the membership the run removes again.
 const NEWHIRE = `newhire-${Date.now()}@acme.dev`;
+const NEWHIRE_HANDLE = `hire-${Date.now()}`;
 let emailedLink = null;
 
 await step("settings / invite", async () => {
@@ -760,16 +704,60 @@ await step("joining from the emailed link", async () => {
       text: "the accept screen does not name the address and role it was sent for",
     });
   }
+  // The handle is optional, and what an empty field gets is on screen
+  // before anybody submits: the part of the address before the `@`,
+  // which for this run's address is already a legal handle.
+  const derived = NEWHIRE.split("@")[0];
+  const placeholder = await joiner
+    .getByLabel("Handle")
+    .getAttribute("placeholder")
+    .catch(() => null);
+  if (placeholder !== derived) {
+    problems.push({
+      where: stage,
+      kind: "content",
+      text: `the handle field says an empty one becomes "${placeholder}"; the server makes "${derived}" for ${NEWHIRE}`,
+    });
+  }
   await shot(
     joiner,
     "08b-accept-invite",
-    "the screen the emailed link lands on — it names the org, the address and the role",
+    "the screen the emailed link lands on — it names the org, the address and the role, and the handle an empty field gets",
   );
   await joiner.getByLabel("Your name").fill("New Hire");
   await joiner.getByLabel("Password").fill("a long enough password");
+  // A handle somebody already has — the organization's own name. The
+  // server refuses it with nothing written, so the form has to keep the
+  // person on the invitation with the refusal against that field, and
+  // the same link has to work with another.
+  await joiner.getByLabel("Handle").fill("acme");
+  await joiner.getByRole("button", { name: "Accept invitation" }).click();
+  await joiner.locator("#handle-error").waitFor({ timeout: 10000 });
+  if (
+    (await joiner.getByLabel("Handle").getAttribute("aria-invalid")) !== "true"
+  ) {
+    problems.push({
+      where: stage,
+      kind: "content",
+      text: "a taken handle is refused, but the handle field is not marked as the one at fault",
+    });
+  }
+  if (!(await joiner.getByRole("heading", { name: "Join acme" }).isVisible())) {
+    problems.push({
+      where: stage,
+      kind: "behaviour",
+      text: "a taken handle took the person off the invitation",
+    });
+  }
+  await shot(
+    joiner,
+    "08c-handle-taken",
+    "a handle somebody has: said on the field, and the link still works",
+  );
+  await joiner.getByLabel("Handle").fill(NEWHIRE_HANDLE);
   await joiner.getByRole("button", { name: "Accept invitation" }).click();
   await joiner.getByText("Requests today").waitFor({ timeout: 15000 });
-  await shot(joiner, "08c-joined", "joined, and signed straight in");
+  await shot(joiner, "08d-joined", "joined with the handle asked for, and signed straight in");
   if (new URL(joiner.url()).hash !== "") {
     problems.push({
       where: stage,
@@ -777,6 +765,32 @@ await step("joining from the emailed link", async () => {
       text: `the invitation token is still in the address bar: ${joiner.url()}`,
     });
   }
+  // The account is the one asked for: its handle, and its own namespace
+  // beside the organization it joined.
+  const handle = await joiner.evaluate(
+    async () => (await (await fetch("/v1/auth/me")).json()).handle,
+  );
+  if (handle !== NEWHIRE_HANDLE) {
+    problems.push({
+      where: stage,
+      kind: "behaviour",
+      text: `joined asking for the handle ${NEWHIRE_HANDLE}; the account's handle is ${handle}`,
+    });
+  }
+  await joiner.getByRole("combobox", { name: "Organization" }).click();
+  if (
+    !(await joiner
+      .getByRole("option", { name: NEWHIRE_HANDLE, exact: true })
+      .isVisible()
+      .catch(() => false))
+  ) {
+    problems.push({
+      where: stage,
+      kind: "content",
+      text: `the new account's own namespace, ${NEWHIRE_HANDLE}, is not in the organization switcher`,
+    });
+  }
+  await joiner.keyboard.press("Escape");
   await audit(joiner, stage);
   await joinerCtx.close();
 

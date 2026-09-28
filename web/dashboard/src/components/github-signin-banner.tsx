@@ -7,14 +7,20 @@
 /// gets its sentence *and* its next step, because every one of them has
 /// one — usually "use an email address and password", which still works.
 ///
-/// `ok` and `new` are deliberately absent. They are successes, the
-/// session cookie is set, and a banner congratulating somebody for
-/// signing in is noise.
+/// GitHub only ever signs somebody in to an account this server already
+/// has; it never makes one. So `noaccount` — GitHub said who you are,
+/// and nobody here is you — is an ordinary answer, and its next step is
+/// the only way anybody gets an account: an invitation.
+///
+/// `ok` is deliberately absent. It is a success, the session cookie is
+/// set, and a banner congratulating somebody for signing in is noise.
+/// `new` and `emailtaken` are gone with the sign-up they belonged to; a
+/// stale link carrying either reads as no outcome at all.
 export type GithubSigninOutcome =
+  | "noaccount"
   | "denied"
   | "expired"
   | "noemail"
-  | "emailtaken"
   | "disabled"
   | "unavailable"
   | "error";
@@ -23,10 +29,10 @@ export function githubOutcomeOf(
   value: string | null,
 ): GithubSigninOutcome | null {
   switch (value) {
+    case "noaccount":
     case "denied":
     case "expired":
     case "noemail":
-    case "emailtaken":
     case "disabled":
     case "unavailable":
     case "error":
@@ -38,14 +44,14 @@ export function githubOutcomeOf(
 
 export function githubOutcomeLine(o: GithubSigninOutcome): string {
   switch (o) {
+    case "noaccount":
+      return "GitHub told us who you are, but nobody on this server is you. Accounts here are made by invitation: ask an admin of your organization to invite you, and accept the invitation from the email. If you already have an account under a different address, sign in with that address and its password.";
     case "denied":
       return "You cancelled at GitHub, so nothing was signed in. Try again, or use an email address and password.";
     case "expired":
       return "That sign-in was not finished in the browser that started it, or it had already been used. Press Continue with GitHub again.";
     case "noemail":
-      return "GitHub did not give us an address it has confirmed. Verify your primary email address on GitHub and allow Weft to read it, then try again — or sign up with an email address and password instead.";
-    case "emailtaken":
-      return "Your GitHub address is already listed on a different account here as an additional address. Remove it there first, or sign in to that account with its own email address and password.";
+      return "GitHub did not give us an address it has confirmed. Verify your primary email address on GitHub and allow this server to read it, then try again. Signing in with your email address and password still works.";
     case "disabled":
       return "This account has been disabled. Ask an owner of your organization to re-enable it.";
     case "unavailable":

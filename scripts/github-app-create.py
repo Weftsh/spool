@@ -30,8 +30,10 @@ nobody needs any more is easy to see and take away:
   * `email_addresses: read` — an *account* permission, used by signing in
     with GitHub (`api/github_auth.rs`): `GET /user/emails` under the
     signed-in person's token is how the server learns that GitHub has
-    proved their primary address. Without it that call is refused and
-    every GitHub sign-up falls back to a confirmation mail.
+    proved their primary address, which is what links a first GitHub
+    sign-in to the account here with that address. Without it that call
+    is refused and GitHub sign-in answers `noemail`; the password path
+    still works.
 
 One event: `push`, which the webhook at `<public-url>/webhooks/github`
 turns into a mirror sync (`mirror/webhook.rs`). Every other event GitHub

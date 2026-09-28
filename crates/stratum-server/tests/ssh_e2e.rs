@@ -1330,7 +1330,8 @@ fn a_disabled_account_reaches_nothing_it_used_to() {
 /// refused in the second with "this key is already registered" — able to
 /// clone from one of them only. Survivable while orgs were
 /// operator-provisioned; unavoidable the moment everyone has their own
-/// namespace plus any org they join, which is what signup brings.
+/// namespace plus any org they join, which is what every account now
+/// arrives with.
 #[test]
 fn one_personal_key_clones_from_every_namespace_its_owner_belongs_to() {
     let minio = Minio::shared();

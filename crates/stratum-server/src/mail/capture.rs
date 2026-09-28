@@ -1,10 +1,10 @@
 //! A transport that writes mail to a directory instead of sending it.
 //!
 //! This is product code rather than a test double, and deliberately: the
-//! manual browser pass has to be able to sign up, open the verification
-//! mail and click the link, on a machine with no relay and no AWS
+//! manual browser pass has to be able to invite somebody, open the
+//! invitation and follow its link, on a machine with no relay and no AWS
 //! account. A fake that only existed inside `cargo test` would leave the
-//! most important funnel in the product exercised only by unit tests.
+//! only way a person joins the server exercised only by unit tests.
 //!
 //! One JSON file per message, named by arrival order and recipient, so a
 //! reader can find the newest mail for an address without parsing all of
@@ -141,9 +141,9 @@ mod tests {
         std::fs::remove_dir_all(&dir).ok();
     }
 
-    /// The filename is derived from a recipient, and a recipient is
-    /// attacker-supplied at signup. Traversal and separators must not
-    /// survive into the path.
+    /// The filename is derived from a recipient, and a recipient is typed
+    /// by somebody — an address to invite, or one to reset. Traversal
+    /// and separators must not survive into the path.
     #[test]
     fn a_hostile_recipient_cannot_steer_the_write() {
         let dir = tmp("capture-hostile");
@@ -164,7 +164,7 @@ mod tests {
     }
 
     /// An unwritable directory is a configuration error, and reported as
-    /// one at construction — not on the first signup.
+    /// one at construction — not on the first invitation.
     #[test]
     fn an_unusable_directory_fails_at_construction() {
         let file = tmp("capture-file");

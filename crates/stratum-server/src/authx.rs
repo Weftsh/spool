@@ -215,7 +215,7 @@ pub fn session_principal(
         Some(r) => {
             SessionAuth::Principal(Principal::for_user(org_id, &session.user_id, r.scopes()))
         }
-        None => SessionAuth::NoAccess(session.user_id),
+        None => SessionAuth::NoAccess,
     })
 }
 
@@ -226,17 +226,45 @@ pub fn session_principal(
 /// same masked answer a foreign API token gets: whether an org exists
 /// must not depend on which kind of credential asked.
 ///
-/// `NoAccess` still names the person: somebody signed in who is not a
-/// member of this org. A door that authorizes answers it with the masked
-/// 404 all the same, but a question about *who* is asking rather than
-/// what they may do still has an answer — the org-wide change list
-/// resolves `author:@me` from it and answers with what they may read
-/// there, which is nothing, rather than telling a signed-in person to
-/// sign in.
+/// `NoAccess` is somebody signed in who is not a member of this org, and
+/// every door answers it with the masked 404 — the org-wide lists too,
+/// which once resolved `author:@me` for an outsider and answered an
+/// empty page, telling them the org existed.
 pub enum SessionAuth {
     None,
-    NoAccess(String),
+    NoAccess,
     Principal(Principal),
+}
+
+/// The caller's principal in this organisation, or the answer a missing
+/// organisation gets.
+///
+/// For the organisation-wide lists — every change, every changeset —
+/// whose rows are then filtered repository by repository. Filtering
+/// alone answers somebody with no role here an empty `200`, where a
+/// name that is nobody's answers `404`: a status code that says which
+/// organisations exist. Nobody outside an organisation can read any of
+/// its repositories (a per-repository grant needs a membership to
+/// stand on), so an outsider is told what a missing name tells them —
+/// 401 when they are not authenticated at all, 404 when they are.
+///
+/// A token counts as inside when it was minted in this organisation —
+/// including one bound to a single repository, whose rows the filter
+/// then narrows to that repository; a session counts when its person
+/// holds a role here.
+pub fn principal_in_org(
+    db: &ControlDb,
+    headers: &HeaderMap,
+    org_id: &str,
+) -> Result<Principal, Response> {
+    match principal_opt(db, headers, Challenge::None)? {
+        Some(p) if p.org_id == org_id => Ok(p),
+        Some(_) => Err(masked(db, headers)),
+        None => match session_principal(db, headers, org_id, None)? {
+            SessionAuth::Principal(p) => Ok(p),
+            SessionAuth::NoAccess | SessionAuth::None => Err(masked(db, headers)),
+        },
+    }
 }
 
 /// Verify the presented token, if any. Err = a response to return as-is.
@@ -254,36 +282,6 @@ pub fn principal_opt(
             Ok(None) => Err(unauthorized(challenge)),
             Err(e) => Err((StatusCode::INTERNAL_SERVER_ERROR, e).into_response()),
         },
-    }
-}
-
-/// Refuse a person who has not proved their email address.
-///
-/// The line is "cheap things stay open, things that cost us money do
-/// not": an unverified account may sign in, look around and read
-/// whatever its role allows, but may not create a repository or a
-/// mirror. That is where signup abuse actually lands — an address nobody
-/// holds, turned into storage and outbound fetches.
-///
-/// **Service tokens are exempt.** A token with no `user_id` was minted
-/// by somebody who is verified, and every token minted before addresses
-/// were proved at all is one of these. CI does not stop working because
-/// the person who set it up has not read their email.
-pub fn require_verified(
-    db: &stratum_control::ControlDb,
-    principal: &Principal,
-) -> Result<(), axum::response::Response> {
-    let Some(user_id) = &principal.user_id else {
-        return Ok(());
-    };
-    match stratum_control::usertokens::is_verified(db, user_id) {
-        Ok(true) => Ok(()),
-        Ok(false) => Err(crate::api::json_error(
-            axum::http::StatusCode::FORBIDDEN,
-            "confirm your email address before creating anything — check your \
-             inbox for the link we sent, or ask for another one",
-        )),
-        Err(e) => Err(crate::api::internal(e)),
     }
 }
 
@@ -310,7 +308,7 @@ pub fn require(
         },
         None => match session_principal(db, headers, org_id, repo_id)? {
             SessionAuth::Principal(p) => p,
-            SessionAuth::NoAccess(_) => return Err(not_found()),
+            SessionAuth::NoAccess => return Err(not_found()),
             SessionAuth::None => return Err(unauthorized(Challenge::None)),
         },
     };

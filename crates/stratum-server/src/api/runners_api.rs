@@ -170,7 +170,7 @@ pub async fn get_policy(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -189,7 +189,7 @@ pub async fn patch_policy(
     headers: HeaderMap,
     Json(body): Json<PolicyBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -219,7 +219,7 @@ pub async fn list_groups(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -241,7 +241,7 @@ pub async fn create_group(
     headers: HeaderMap,
     Json(body): Json<GroupBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -272,7 +272,7 @@ pub async fn patch_group(
     headers: HeaderMap,
     Json(body): Json<GroupBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -301,7 +301,7 @@ pub async fn delete_group(
     Path((org_name, id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -326,7 +326,7 @@ pub async fn list(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -355,7 +355,7 @@ pub async fn remove(
     Path((org_name, id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -387,7 +387,7 @@ pub async fn registration_token(
     headers: HeaderMap,
     body: Option<Json<TokenBody>>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };

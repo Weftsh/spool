@@ -45,7 +45,7 @@ pub async fn create(
     headers: HeaderMap,
     Json(body): Json<CreateMirrorBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -53,11 +53,6 @@ pub async fn create(
         Ok(p) => p,
         Err(r) => return r,
     };
-    // Creating costs storage and outbound fetches, so it is the line an
-    // unproved address does not cross.
-    if let Err(r) = authx::require_verified(&state.db, &principal) {
-        return r;
-    }
     if let Err(r) = crate::api::refuse_public(body.public) {
         return r;
     }

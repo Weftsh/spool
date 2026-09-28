@@ -3321,7 +3321,40 @@ const MIGRATIONS: &[&str] = &[
         repo_stars, follows, pinned_items
     CASCADE;
     "#,
+    // Accounts nobody proved, from a build that let anybody sign up.
+    ACCOUNTS_NOBODY_PROVED,
 ];
+
+/// Close every door into an account whose address was never proved.
+///
+/// A build with open sign-up let anybody register an address they did
+/// not hold, and held the account back behind a confirmation gate until
+/// somebody clicked the mailed link. The gate is gone — every account
+/// made now has its address proved on the way in, by the invitation
+/// that reached it or the operator who made it — so an account left over
+/// unproved would keep a password, sessions, tokens and SSH keys its
+/// maker holds, and then be handed to the real owner of the mailbox when
+/// they accept an invitation or sign in with GitHub, with the maker's
+/// credentials still working.
+///
+/// So its credentials go: the password is cleared, and every session,
+/// token and SSH key is revoked. The account and everything it holds
+/// stay, and the owner of the mailbox gets in the way the address
+/// proves itself — a reset link, an invitation to it, or GitHub vouching
+/// for it — each of which marks it proved. On a database that never had
+/// open sign-up there is no such account and this changes nothing.
+pub(crate) const ACCOUNTS_NOBODY_PROVED: &str = r#"
+    UPDATE sessions SET revoked_at = (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
+     WHERE revoked_at IS NULL
+       AND user_id IN (SELECT id FROM users WHERE verified_at IS NULL);
+    UPDATE tokens SET revoked_at = (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
+     WHERE revoked_at IS NULL
+       AND user_id IN (SELECT id FROM users WHERE verified_at IS NULL);
+    UPDATE ssh_keys SET revoked_at = (EXTRACT(EPOCH FROM now()) * 1000)::BIGINT
+     WHERE revoked_at IS NULL
+       AND user_id IN (SELECT id FROM users WHERE verified_at IS NULL);
+    UPDATE users SET password_hash = NULL WHERE verified_at IS NULL;
+"#;
 
 /// The sync `postgres` client drives its own internal runtime with
 /// `block_on`, which panics if the calling thread carries any tokio
@@ -3599,6 +3632,101 @@ mod tests {
     /// An operator reading their own database should see the product
     /// they run. And a table nothing reads is a table a future edit can
     /// start writing to without noticing it was supposed to be gone.
+    /// An account left unproved by open sign-up keeps nothing its maker
+    /// could use; a proved one next to it is untouched.
+    ///
+    /// Run by executing the migration again over a state it would have
+    /// met — every statement in it is idempotent — and the list is
+    /// checked to hold it, so a test of the SQL is a test of the upgrade.
+    #[test]
+    fn an_account_nobody_proved_keeps_no_credential_its_maker_holds() {
+        assert!(MIGRATIONS.contains(&ACCOUNTS_NOBODY_PROVED));
+        let db = ControlDb::open(&stratum_testkit::pg::test_db_url("db_unproved")).unwrap();
+        let org = crate::registry::create_org(&db, "acme").unwrap();
+        let squat = crate::users::create(&db, "squat@acme.test", "Squat", Some("a long enough pw"))
+            .unwrap();
+        let real =
+            crate::users::create(&db, "real@acme.test", "Real", Some("a long enough pw")).unwrap();
+        crate::usertokens::mark_verified(&db, &real.id).unwrap();
+        for u in [&squat, &real] {
+            crate::members::add(&db, &org.id, &u.id, crate::members::Role::Member, None).unwrap();
+            crate::sessions::create(&db, &u.id, 3600).unwrap();
+            let now = crate::ids::now_ms();
+            db.lock()
+                .execute(
+                    "INSERT INTO tokens (id, org_id, hash, scopes, created_at, user_id) \
+                     VALUES ($1, $2, $3, 'repo:read', $4, $5)",
+                    &[
+                        &format!("t-{}", u.id),
+                        &org.id,
+                        &format!("h-{}", u.id),
+                        &now,
+                        &u.id,
+                    ],
+                )
+                .unwrap();
+            db.lock()
+                .execute(
+                    "INSERT INTO ssh_keys (id, org_id, token_id, algo, pubkey, \
+                     fingerprint_sha256, created_at, user_id) \
+                     VALUES ($1, $2, $3, 'ssh-ed25519', 'AAAA', $1, $4, $5)",
+                    &[
+                        &format!("k-{}", u.id),
+                        &org.id,
+                        &format!("t-{}", u.id),
+                        &now,
+                        &u.id,
+                    ],
+                )
+                .unwrap();
+        }
+
+        db.lock()
+            .transaction(|tx| tx.batch_execute(ACCOUNTS_NOBODY_PROVED))
+            .unwrap();
+
+        let live = |table: &str, user: &str| -> i64 {
+            db.lock()
+                .query_one(
+                    &format!(
+                        "SELECT count(*) FROM {table} WHERE user_id = $1 AND revoked_at IS NULL"
+                    ),
+                    &[&user],
+                )
+                .unwrap()
+                .get(0)
+        };
+        for table in ["sessions", "tokens", "ssh_keys"] {
+            assert_eq!(
+                live(table, &squat.id),
+                0,
+                "{table} left live for the unproved account"
+            );
+            assert_eq!(
+                live(table, &real.id),
+                1,
+                "{table} revoked for a proved account"
+            );
+        }
+        assert!(
+            crate::users::authenticate(&db, "squat@acme.test", "a long enough pw")
+                .unwrap()
+                .is_none(),
+            "the maker's password still opens the account"
+        );
+        assert!(
+            crate::users::authenticate(&db, "real@acme.test", "a long enough pw")
+                .unwrap()
+                .is_some()
+        );
+        // The account itself, and its place in the org, are kept for the
+        // owner of the mailbox to recover.
+        assert_eq!(
+            crate::members::role_of(&db, &org.id, &squat.id).unwrap(),
+            Some(crate::members::Role::Member)
+        );
+    }
+
     #[test]
     fn a_migrated_database_has_none_of_the_hosted_editions_tables() {
         let db = ControlDb::open(&stratum_testkit::pg::test_db_url("db_dropped")).unwrap();

@@ -172,6 +172,7 @@ answers would be an enumeration oracle: ask for a name, read the status
 code, and you have learned whether somebody else's repository exists.
 The git wire answers the same way.
 
-Namespace names are not masked. They are unique on the server and
-claimed first-come, so signup already answers "does `acme` exist?" to
-anyone who asks; pretending otherwise here would be theatre.
+A missing organization is masked the same way as a missing repository:
+asking for `ghost/app` and `acme/app` with no role in either gets one
+answer, so the status code cannot be used to list the organizations, or
+the people — a personal namespace is somebody's handle — on a server.

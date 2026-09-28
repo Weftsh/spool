@@ -123,7 +123,6 @@ describe("match", () => {
     expect(at("/login", "next=/acme/widget")).toEqual({
       kind: "login",
       next: "/acme/widget",
-      mode: "signin",
     });
     for (const hostile of [
       "next=https://elsewhere.test/",
@@ -137,40 +136,24 @@ describe("match", () => {
       "next=/\\/elsewhere.test",
       "next=\\\\elsewhere.test/p",
     ])
-      expect(at("/login", hostile)).toEqual({
-        kind: "login",
-        next: "/",
-        mode: "signin",
-      });
+      expect(at("/login", hostile)).toEqual({ kind: "login", next: "/" });
   });
 
-  it("opens the sign-up form when the site's button asks for it", () => {
-    // The marketing site's "Sign up free" lands here. Without `mode`
-    // the visitor got the sign-in form and had to find the "Create an
-    // account" link under it — a button that said "sign up" and led to
-    // a form that said "sign in".
-    expect(at("/login", "mode=signup")).toEqual({
-      kind: "login",
-      next: "/",
-      mode: "signup",
-    });
-    // Anything else is sign-in: a typo in a link should land on the
-    // ordinary door, not on nothing.
-    expect(at("/login", "mode=register")).toEqual({
-      kind: "login",
-      next: "/",
-      mode: "signin",
-    });
-    expect(at("/login")).toEqual({ kind: "login", next: "/", mode: "signin" });
-    // The mode and the return address are independent; asking for one
-    // must not drop the other, and the open-redirect guard still holds.
+  it("has no sign-up form to open, whatever an old link asks for", () => {
+    // Accounts come from an invitation or an operator; `/login` only
+    // signs in. `?mode=signup` used to open a create-account form, and a
+    // bookmark or an old link carrying it must land on the one door
+    // rather than on a form the server no longer answers.
+    for (const q of ["mode=signup", "mode=register", ""])
+      expect(at("/login", q)).toEqual({ kind: "login", next: "/" });
+    // The return address still rides along, and the open-redirect guard
+    // still holds, with the old mode beside it.
     expect(at("/login", "mode=signup&next=/acme/widget")).toEqual({
       kind: "login",
       next: "/acme/widget",
-      mode: "signup",
     });
     expect(at("/login", "mode=signup&next=https://elsewhere.test/")).toEqual(
-      { kind: "login", next: "/", mode: "signup" },
+      { kind: "login", next: "/" },
     );
   });
 

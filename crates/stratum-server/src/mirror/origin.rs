@@ -2132,9 +2132,10 @@ mod app_tests {
     ///
     /// These bodies came off real github.com on 2026-09-13 via
     /// `scripts/manual-github-signin.sh fixtures`, with addresses and
-    /// the login scrubbed and the *shape* kept. The whole GitHub
-    /// sign-up rests on one field in them — `verified`, on the `primary`
-    /// entry — and until this ran, that field was something we had
+    /// the login scrubbed and the *shape* kept. Linking a first GitHub
+    /// sign-in to an account here rests on one field in them —
+    /// `verified`, on the `primary` entry — and until this ran, that
+    /// field was something we had
     /// asserted about GitHub rather than seen.
     ///
     /// The fake in `stratum-testkit` answers the same two routes. If it

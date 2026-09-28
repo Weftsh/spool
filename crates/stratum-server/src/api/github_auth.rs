@@ -1,4 +1,4 @@
-//! Signing in with GitHub, and trusting the address GitHub proved.
+//! Signing in with GitHub, to an account this server already has.
 //!
 //! Two routes and no credentials of their own, exactly like the install
 //! callback next door in [`crate::api::github_api`] — and for the same
@@ -6,37 +6,31 @@
 //! every answer here is a redirect back into the dashboard with the
 //! outcome in the query string, never a JSON error body.
 //!
-//! # Why this may skip the confirmation mail
+//! # It never makes an account
 //!
-//! Our own sign-up mails a link because an address typed into a form is
-//! a claim, not a fact, and everything that costs money is gated on
-//! proving it ([`crate::authx::require_verified`]). GitHub has already
-//! done that work: `GET /user/emails` reports which addresses it has
-//! itself sent a link to and seen clicked. So an account created here
-//! is created **already proved** — `users.verified_at` stamped on
-//! arrival — and the gate then passes with no change to any of its call
-//! sites. That is the entire mechanism, and it is worth being precise
-//! about what is being trusted: the `verified` flag, on the `primary`
-//! address, and nothing else. An unproved primary lands on the password
-//! path with its confirmation mail, unchanged.
+//! Accounts on this server are made by invitation or by an operator —
+//! there is no signing yourself up, and GitHub is not a way around
+//! that. So GitHub can sign somebody in to an account they already
+//! have, and nothing more: a GitHub identity that matches nobody here is
+//! refused with `noaccount`, and the dashboard tells the person to ask
+//! for an invitation.
 //!
-//! # The two things that would be an account takeover
+//! A match is one of two things. A link made on an earlier sign-in,
+//! keyed on GitHub's numeric id; or, the first time, the account whose
+//! address is the one GitHub reports as the person's **primary** and
+//! **verified** address — GitHub has sent a link to it and seen it
+//! clicked, and every account here proved its own address when it was
+//! made (or, left unproved by a build with open sign-up, has had every
+//! credential its maker held taken away). Nothing else GitHub says is
+//! trusted.
 //!
-//! **Keying on the login.** A GitHub login is renameable, and a
-//! released one becomes claimable by somebody else. An identity keyed
-//! on the name would hand whoever takes it next the account it used to
-//! mean, so [`stratum_control::identities`] keys on the numeric id and
-//! this module never looks an account up by login at all.
+//! # Why never the login
 //!
-//! **Adopting a waiting account.** Anyone can sign up with an address
-//! they do not own and never confirm it. That account can do nothing —
-//! which is the confirmation gate working — but it holds the address
-//! with a password its maker knows. If the real owner of the mailbox
-//! then arrives here, handing them that account as-is would hand them
-//! one the first person can still open. So an account whose address was
-//! never proved has its password cleared and its sessions revoked at
-//! the moment somebody else proves the address. See
-//! [`stratum_control::users::clear_password`].
+//! A GitHub login is renameable, and a released one becomes claimable
+//! by somebody else. An identity keyed on the name would hand whoever
+//! takes it next the account it used to mean, so
+//! [`stratum_control::identities`] keys on the numeric id and this
+//! module never looks an account up by login at all.
 
 use crate::app::SharedState;
 use crate::mail::templates::urlencode;
@@ -47,8 +41,6 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use stratum_control::identities::{self, GITHUB as PROVIDER};
 use stratum_control::ids::token_secret;
-use stratum_control::profiles;
-use stratum_control::registry;
 use stratum_control::sessions;
 use stratum_control::users;
 use stratum_control::usertokens;
@@ -163,24 +155,20 @@ pub struct CallbackParams {
 
 /// Where the sign-in ended, in the one word the dashboard says it in.
 ///
-/// * `ok` — signed in to an account that already existed.
-/// * `new` — signed in to an account created just now, which is the
-///   only case with anything left to do: pick repositories to mirror.
+/// * `ok` — signed in.
+/// * `noaccount` — GitHub said who this is, and nobody here is them.
+///   Accounts are made by invitation; this is never a way to make one.
 /// * `denied` — the person declined at GitHub's screen.
 /// * `expired` — the state did not match the browser's cookie, or the
 ///   code was refused. One answer for both: neither tells the person
 ///   anything they can act on beyond "start again".
 /// * `noemail` — GitHub has no proved primary address for them, or the
 ///   App may not read addresses. The password path still works.
-/// * `emailtaken` — that address already belongs to another account
-///   here. Said plainly, unlike sign-up's uniform answer, because GitHub
-///   has just proved this person owns the mailbox: they are not probing
-///   for somebody else's account, they are locked out of their own.
 /// * `disabled` — the account exists and is switched off.
 /// * `unavailable` — no OAuth client configured on this server.
 /// * `error` — GitHub did not answer, or the control plane failed.
 enum Landing {
-    SignedIn { user_id: String, fresh: bool },
+    SignedIn { user_id: String },
     Refused(&'static str),
 }
 
@@ -263,8 +251,8 @@ pub async fn callback(
             return back("error");
         }
     };
-    let (user_id, fresh) = match landing {
-        Landing::SignedIn { user_id, fresh } => (user_id, fresh),
+    let user_id = match landing {
+        Landing::SignedIn { user_id } => user_id,
         Landing::Refused(outcome) => return back(outcome),
     };
 
@@ -299,29 +287,22 @@ pub async fn callback(
                 header::SET_COOKIE,
                 crate::api::auth_api::set_cookie(&state, &session, sessions::DEFAULT_TTL_SECS),
             ),
-            (
-                header::LOCATION,
-                dashboard(&state, if fresh { "new" } else { "ok" }),
-            ),
+            (header::LOCATION, dashboard(&state, "ok")),
         ],
     )
         .into_response()
 }
 
-/// Which account this GitHub identity is, creating one if it is nobody.
+/// Which account this GitHub identity is, if any.
 ///
-/// Three steps, in this order, and the order is the security argument:
-/// the link we already hold beats the address, and the address is only
+/// The link we already hold beats the address, and the address is only
 /// consulted when GitHub has proved it.
 fn resolve(state: &SharedState, ident: &GithubIdentity) -> Result<Landing, String> {
     // 1. A link we already hold. Keyed on the numeric id, so a person
     //    who renamed themselves on GitHub since last time still lands on
     //    their own account.
     if let Some(user_id) = identities::user_for(&state.db, PROVIDER, &ident.id)? {
-        return Ok(Landing::SignedIn {
-            user_id,
-            fresh: false,
-        });
+        return Ok(Landing::SignedIn { user_id });
     }
 
     // 2. An address GitHub has proved, matching an account here.
@@ -329,152 +310,15 @@ fn resolve(state: &SharedState, ident: &GithubIdentity) -> Result<Landing, Strin
         return Ok(Landing::Refused("noemail"));
     };
     if let Some(user) = users::by_email(&state.db, &email)? {
-        // The pre-hijacking defence. An account that never proved this
-        // address does not get to keep a credential once somebody else
-        // proves it — see this module's header.
-        //
-        // Before the link, not after, and the order is the point: these
-        // are three statements and any of them can fail. Clearing first
-        // fails *closed* — the waiting password is gone and the sign-in
-        // is not finished, which the same trip repairs on its next
-        // attempt. Linking first would fail *open*: signed in, linked,
-        // and the password the defence exists to kill still working,
-        // with nothing to say it did not happen.
-        if user.verified_at.is_none() {
-            users::clear_password(&state.db, &user.id)?;
-            sessions::revoke_all_for_user(&state.db, &user.id)?;
-        }
         identities::link(&state.db, &user.id, PROVIDER, &ident.id)?;
-        // Proved on both sides now. A no-op for an account that had
-        // already confirmed.
+        // GitHub has proved the address. A no-op for every account made
+        // since sign-up closed; for one left unproved by open sign-up —
+        // its maker's credentials already taken away — this is the owner
+        // of the mailbox arriving.
         usertokens::mark_verified(&state.db, &user.id)?;
-        return Ok(Landing::SignedIn {
-            user_id: user.id,
-            fresh: false,
-        });
+        return Ok(Landing::SignedIn { user_id: user.id });
     }
 
-    // 3. Nobody here. A new account, with no password at all and its
-    //    address proved on arrival.
-    //
-    //    `users.email` said nobody signs in with this address, which is
-    //    not the same as nobody holding it: `user_emails` is keyed on
-    //    the address platform-wide, so it may be a *secondary* on
-    //    somebody's account. Asked rather than discovered from a failed
-    //    INSERT, so the person hears the one thing they can act on
-    //    instead of a 500. An unproved claim does not lose to GitHub's
-    //    proof here — taking an address off another account is a bigger
-    //    decision than a sign-in should make on its own.
-    if profiles::address_is_held(&state.db, &email)? {
-        return Ok(Landing::Refused("emailtaken"));
-    }
-    let name = ident.name.clone().unwrap_or_else(|| ident.login.clone());
-    let user = users::create(&state.db, &email, &name, None)?;
-    claim_namespace(state, &user.id, &ident.login)?;
-    identities::link(&state.db, &user.id, PROVIDER, &ident.id)?;
-    usertokens::mark_verified(&state.db, &user.id)?;
-    Ok(Landing::SignedIn {
-        user_id: user.id,
-        fresh: true,
-    })
-}
-
-/// A personal namespace for somebody who never typed one.
-///
-/// Their GitHub login: the name they already answer to, and the one
-/// their URLs elsewhere already use. It can be unavailable for two
-/// reasons — reserved here (`settings`, `dashboard`) or already
-/// somebody else's — and neither is worth stopping a sign-up over, so
-/// the fallback is the same name with a random suffix. Somebody who
-/// dislikes the result can rename; somebody who never gets an account
-/// cannot.
-///
-/// This must not be skipped on failure. An account with no handle is a
-/// *half-made* account and both halves it is missing are silent: it is
-/// attributed to nobody, and it has nowhere to put a fork. See
-/// [`stratum_control::users::without_handle`].
-fn claim_namespace(state: &SharedState, user_id: &str, login: &str) -> Result<(), String> {
-    let base = handle_base(login);
-    if registry::create_personal_namespace(&state.db, user_id, &base, None).is_ok() {
-        return Ok(());
-    }
-    let alt = format!("{base}-{}", &token_secret()[..6]);
-    registry::create_personal_namespace(&state.db, user_id, &alt, None).map(|_| ())
-}
-
-/// A GitHub login, as a namespace name this server will accept.
-///
-/// Pure, and separated from the database call above so it can be tested
-/// exhaustively without one. The output is always a legal
-/// [`registry::valid_name`]: non-empty, within the length bound, and
-/// built from the allowed alphabet — which is what lets the caller treat
-/// a refusal from the database as "taken or reserved" rather than
-/// having to tell three failures apart.
-fn handle_base(login: &str) -> String {
-    let cleaned: String = login
-        .to_lowercase()
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-        .take(60)
-        .collect();
-    let trimmed = cleaned.trim_matches(|c| c == '-' || c == '_');
-    if trimmed.is_empty() {
-        // GitHub logins cannot actually be empty or all-punctuation, but
-        // a name in every URL forever is not the place to find out we
-        // were right about somebody else's validation rules.
-        "user".to_string()
-    } else {
-        trimmed.to_string()
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_login_becomes_a_legal_namespace_name() {
-        assert_eq!(handle_base("ada"), "ada");
-        // GitHub allows mixed case; namespaces here are lowercase.
-        assert_eq!(handle_base("AdaLovelace"), "adalovelace");
-        assert_eq!(handle_base("ada-lovelace"), "ada-lovelace");
-        // A leading dash or underscore would be a name that reads as a
-        // flag in every command line it appears in.
-        assert_eq!(handle_base("-ada-"), "ada");
-        assert_eq!(handle_base("_ada_"), "ada");
-        // Anything outside the alphabet is dropped, never substituted:
-        // a dot would make `.` -prefixed names reachable, and `valid_name`
-        // refuses those.
-        assert_eq!(handle_base("ada.lovelace"), "adalovelace");
-        assert_eq!(handle_base("ada/../root"), "adaroot");
-        // Length is bounded well inside the 100-byte limit, leaving room
-        // for the suffix the caller may add.
-        assert_eq!(handle_base(&"a".repeat(200)).len(), 60);
-        // Nothing usable left is still a legal name.
-        assert_eq!(handle_base("---"), "user");
-        assert_eq!(handle_base(""), "user");
-        assert_eq!(handle_base("!!!"), "user");
-    }
-
-    /// Every output above is one `create_personal_namespace` will accept
-    /// on its own terms, which is the property the caller relies on.
-    #[test]
-    fn every_derived_name_passes_the_registry_rules() {
-        for login in [
-            "ada",
-            "AdaLovelace",
-            "-ada-",
-            "ada.lovelace",
-            "ada/../root",
-            "---",
-            "",
-            &"a".repeat(200),
-        ] {
-            let base = handle_base(login);
-            assert!(
-                registry::valid_name(&base),
-                "{login:?} derived {base:?}, which the registry refuses"
-            );
-        }
-    }
+    // 3. Nobody here. Not an account: those are made by invitation.
+    Ok(Landing::Refused("noaccount"))
 }

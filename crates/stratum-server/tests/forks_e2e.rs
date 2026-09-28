@@ -23,18 +23,15 @@
 //!   serve content it never copied, and it must be as private as every
 //!   other repository.
 
-use stratum_testkit::browser::Browser;
+use stratum_testkit::browser::{Browser, PASSWORD};
 use stratum_testkit::gitcli::{self, Scratch};
-use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
-
-const PASSWORD: &str = "a long enough password";
 
 /// What asking for a public repository is told, word for word.
 const NO_PUBLIC: &str = "this server has no public repositories: every repository is private \
                          to its organization — omit \"public\" or set it to false";
 
-fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Server {
+fn spawn(store_url: &str, scratch: &Scratch, hint: &str) -> Server {
     // Both fork jobs are background workers, and this suite waits on
     // their results. At the production intervals (5s and 30s) that is
     // most of the runtime of every test here, spent asleep.
@@ -42,7 +39,6 @@ fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Serv
         store_url,
         scratch,
         hint,
-        mail,
         &[
             ("STRATUM_FORK_POLL_SECS", "1"),
             ("STRATUM_PROMOTE_POLL_SECS", "1"),
@@ -53,52 +49,14 @@ fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Serv
 /// A server with the given environment — the worker switched off, so a
 /// fork can be observed in the state it passes through rather than the
 /// one it lands in.
-fn spawn_with(
-    store_url: &str,
-    scratch: &Scratch,
-    hint: &str,
-    mail: &Mailbox,
-    extra: &[(&str, &str)],
-) -> Server {
+fn spawn_with(store_url: &str, scratch: &Scratch, hint: &str, extra: &[(&str, &str)]) -> Server {
     let mut b = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"));
-    for (k, v) in mail.env() {
-        b = b.env(k, v);
-    }
     for (k, v) in extra {
         b = b.env(k, *v);
     }
     b.start()
-}
-
-fn urldecode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v as char);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn mailed_token(mail: &Mailbox, address: &str, key: &str) -> String {
-    let msg = mail.wait_for(address, std::time::Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let marker = format!("#{key}=");
-    let raw = link
-        .split_once(&marker)
-        .unwrap_or_else(|| panic!("{link} carries no #{key}="))
-        .1;
-    urldecode(raw)
 }
 
 /// A token minted by `browser` in `org`, optionally bound to one repo.
@@ -110,63 +68,6 @@ fn mint(browser: &mut Browser, org: &str, scopes: &[&str], repo: Option<&str>) -
     let (st, minted) = browser.req("POST", &format!("/v1/orgs/{org}/tokens"), Some(body));
     assert_eq!(st, 201, "mint a token in {org}: {minted}");
     minted["token"].as_str().expect("token").to_string()
-}
-
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let token = mailed_token(mail, email, "verify");
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
-}
-
-/// Sign somebody up and deliberately leave the link unredeemed.
-///
-/// `admin user-create` cannot produce this: it marks its accounts
-/// verified. Only an unredeemed signup leaves a person who owns a
-/// namespace while `verified_at` is still null — which is every new
-/// account on the way in, and the only shape that reaches
-/// `require_verified` on the fork path.
-fn signup_unverified<'a>(server: &'a Server, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let mut b = Browser::new(server);
-    let (st, _) = b.req(
-        "POST",
-        "/v1/auth/login",
-        Some(serde_json::json!({ "email": email, "password": PASSWORD })),
-    );
-    assert_eq!(
-        st, 200,
-        "an unverified account must still be able to sign in"
-    );
-    b
 }
 
 /// An organization owned by the person signed in to `owner`.
@@ -206,10 +107,10 @@ fn repo(owner: &mut Browser, org: &str, name: &str, seed: bool) {
 /// namespace is `bob`, where nobody from acme has a role — which is
 /// where his forks land, and the whole reason a fork is two
 /// authorities rather than one.
-fn acme_with_a_viewer<'a>(server: &'a Server, mail: &Mailbox) -> (Browser<'a>, Browser<'a>) {
-    let mut ada = signup(server, mail, "ada", "ada@example.com");
+fn acme_with_a_viewer<'a>(server: &'a Server) -> (Browser<'a>, Browser<'a>) {
+    let mut ada = Browser::stranger(server, "ada", "ada@example.com");
     create_org(&mut ada, "acme");
-    let bob = signup(server, mail, "bob", "bob@example.com");
+    let bob = Browser::stranger(server, "bob", "bob@example.com");
     ada.invite_and_accept("acme", "bob@example.com", "viewer");
     (ada, bob)
 }
@@ -245,10 +146,9 @@ fn forking_into_a_named_namespace_obeys_that_namespace_s_rules() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-named");
     let scratch = Scratch::new("forks-named");
-    let mail = Mailbox::temp("forks-named");
-    let server = spawn(&bucket.base_url, &scratch, "forks_named", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks_named");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
 
     // Naming a target you own works, and is a different code path from
@@ -340,10 +240,9 @@ fn forking_twice_hands_back_the_fork_you_already_have() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-twice");
     let scratch = Scratch::new("forks-twice");
-    let mail = Mailbox::temp("forks-twice");
-    let server = spawn(&bucket.base_url, &scratch, "forks_twice", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks_twice");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
 
     let (st, first) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
@@ -405,71 +304,67 @@ fn forking_twice_hands_back_the_fork_you_already_have() {
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
 
-/// An unproved address cannot fork, and every account has somewhere to
-/// fork into.
+/// Somebody new, let in by an invitation, has somewhere to fork into the
+/// moment they arrive.
 ///
-/// Two claims in one test because they are two halves of the same door.
-/// The first is the gate: forking creates a repository, and creating is
-/// what `require_verified` protects. The second is the invariant that
-/// keeps the handler's "no personal namespace to fork into" refusal
-/// unreachable — every account arrives with a handle and a namespace in
-/// the same transaction, from either door. That guard stays because it
-/// sits on a path where being wrong means a fork with nowhere to go;
-/// this asserts the invariant rather than the arm, so a third door that
-/// ever mints a user without a namespace is named by a test instead of
-/// being caught silently in production.
+/// Forking with no target means "into my own namespace", so an account
+/// with no namespace has no answer — and the handler's refusal for that
+/// case is meant to be unreachable, because every account is made with a
+/// handle and a namespace in the same transaction, from either door.
+/// The invitation is the door a person with no account comes through,
+/// and it used to make the account and nothing else. This asserts the
+/// invariant through the thing it is for, over HTTP, with a handle
+/// nobody typed: made from the address, the dot a dash.
 #[test]
-fn forking_takes_a_proved_address_and_a_namespace_to_land_in() {
+fn an_invited_newcomer_arrives_with_a_namespace_to_fork_into() {
     let minio = Minio::shared();
-    let bucket = minio.bucket("forks-unproved");
-    let scratch = Scratch::new("forks-unproved");
-    let mail = Mailbox::temp("forks-unproved");
-    let server = spawn(&bucket.base_url, &scratch, "forks_unproved", &mail);
+    let bucket = minio.bucket("forks-newcomer");
+    let scratch = Scratch::new("forks-newcomer");
+    let server = spawn(&bucket.base_url, &scratch, "forks_newcomer");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     create_org(&mut ada, "acme");
     repo(&mut ada, "acme", "widget", true);
 
-    // Given read access the only way there is — a role in acme — so the
-    // refusal below cannot be the read check wearing another hat.
-    let mut unproved = signup_unverified(&server, "unproved", "unproved@example.com");
-    ada.invite_and_accept("acme", "unproved@example.com", "viewer");
-    let (st, me) = unproved.req("GET", "/v1/auth/me", None);
+    // No account for this address before the invitation: accepting it is
+    // what makes one.
+    ada.invite_and_accept("acme", "new.comer@example.com", "viewer");
+    let mut newcomer = Browser::signed_in(&server, "new.comer@example.com", PASSWORD);
+    let (st, me) = newcomer.req("GET", "/v1/auth/me", None);
     assert_eq!(st, 200, "{me}");
-    // Read *after* accepting: an invitation to an existing account does
-    // not prove its address, and if it ever starts to, this fixture
-    // stops proving anything and must say so.
+    assert_eq!(me["handle"], "new-comer", "{me}");
     assert!(
-        me["verified_at"].is_null(),
-        "the fixture is verified, so this proves nothing: {me}"
-    );
-    // The invariant: they own a namespace already, so the handler's
-    // "nowhere to fork into" refusal is not what stops them.
-    assert_eq!(me["handle"], "unproved", "{me}");
-    assert!(
-        me["orgs"]
-            .as_array()
-            .is_some_and(|a| a.iter().any(|o| o["name"] == "unproved")),
-        "an account arrived without a namespace to fork into: {me}"
+        me["orgs"].as_array().is_some_and(|a| a
+            .iter()
+            .any(|o| o["name"] == "new-comer" && o["role"] == "owner")),
+        "an invited account arrived without a namespace of its own: {me}"
     );
 
-    let (st, body) = unproved.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
-    assert_eq!(st, 403, "an unproved address forked a repository: {body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("confirm your email"),
-        "the refusal must say what to do about it: {body}"
+    // A fork with no target lands there, and is theirs alone: ada, who
+    // owns the source, has no role in it.
+    let (st, body) = newcomer.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
+    assert_eq!(st, 202, "an invited viewer could not fork: {body}");
+    assert_eq!(body["org"], "new-comer", "{body}");
+    assert_eq!(
+        await_fork(&mut newcomer, "/v1/orgs/new-comer/repos/widget"),
+        "ready"
     );
-    let (st, _) = unproved.req("GET", "/v1/orgs/unproved/repos/widget", None);
-    assert_eq!(st, 404, "a refused fork left a repository behind");
+    let (st, _) = ada.req("GET", "/v1/orgs/new-comer/repos/widget", None);
+    assert_eq!(
+        st, 404,
+        "a personal namespace was readable by somebody else"
+    );
 
-    // Reading is untouched — the gate is on creating, not on existing.
-    let (st, body) = unproved.req("GET", "/v1/orgs/acme/repos/widget", None);
-    assert_eq!(st, 200, "an unproved member was refused a read: {body}");
+    // And it is a namespace they own, not one they were parked in: they
+    // make a repository of their own there.
+    let (st, body) = newcomer.req(
+        "POST",
+        "/v1/orgs/new-comer/repos",
+        Some(serde_json::json!({ "name": "notes" })),
+    );
+    assert_eq!(st, 201, "{body}");
 
-    assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
+    assert!(server.healthy());
 }
 
 /// The fork listing obeys the repository's own visibility.
@@ -478,11 +373,10 @@ fn listing_forks_of_a_repository_you_may_not_read_is_refused() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-listing");
     let scratch = Scratch::new("forks-listing");
-    let mail = Mailbox::temp("forks-listing");
-    let server = spawn(&bucket.base_url, &scratch, "forks_listing", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks_listing");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
+    let mut bob = Browser::stranger(&server, "bob", "bob@example.com");
     // `"public": false` is still accepted — it is what every repository
     // is — so a client that always sends it keeps working.
     let (st, body) = ada.req(
@@ -531,10 +425,9 @@ fn a_reader_forks_and_clones_what_they_never_copied() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-e2e");
     let scratch = Scratch::new("forks-e2e");
-    let mail = Mailbox::temp("forks");
-    let server = spawn(&bucket.base_url, &scratch, "forks", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", false);
 
     // Give it real content, so the fork has something to actually serve.
@@ -638,10 +531,9 @@ fn forking_crosses_two_organizations_so_it_takes_a_session_not_a_token() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-token");
     let scratch = Scratch::new("forks-token");
-    let mail = Mailbox::temp("forks-token");
-    let server = spawn(&bucket.base_url, &scratch, "forks-token", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-token");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
 
     // bob's token from his own namespace: it can write where the fork
@@ -756,10 +648,9 @@ fn a_fork_is_private_to_its_namespace_and_cannot_be_published() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-private");
     let scratch = Scratch::new("forks-private");
-    let mail = Mailbox::temp("forks-private");
-    let server = spawn(&bucket.base_url, &scratch, "forks-private", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-private");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
 
     let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
@@ -842,10 +733,9 @@ fn a_fork_is_counted_only_for_people_who_may_read_it() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-hidden");
     let scratch = Scratch::new("forks-hidden");
-    let mail = Mailbox::temp("forks-hidden");
-    let server = spawn(&bucket.base_url, &scratch, "forks-hidden", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-hidden");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
     create_org(&mut bob, "bobco");
 
@@ -914,7 +804,7 @@ fn a_fork_is_counted_only_for_people_who_may_read_it() {
 
     // Somebody with no role in acme does not get a smaller list; they
     // get the answer a missing repository gets.
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
     let (st, _) = carl.req("GET", "/v1/orgs/acme/repos/widget/forks", None);
     assert_eq!(st, 404);
     let (st, _) = server.req("GET", "/v1/orgs/acme/repos/widget/forks", "", None);
@@ -939,10 +829,9 @@ fn deleting_a_fork_takes_it_out_of_the_count_immediately() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-deleted");
     let scratch = Scratch::new("forks-deleted");
-    let mail = Mailbox::temp("forks-deleted");
-    let server = spawn(&bucket.base_url, &scratch, "forks-deleted", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-deleted");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
 
     let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
@@ -986,10 +875,9 @@ fn deleting_an_upstream_promotes_its_forks_instead_of_stranding_them() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-promote-e2e");
     let scratch = Scratch::new("forks-promote-e2e");
-    let mail = Mailbox::temp("forks-promote-e2e");
-    let server = spawn(&bucket.base_url, &scratch, "forks-promote-e2e", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-promote-e2e");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", false);
 
     let work = scratch.path().join("seed");
@@ -1057,10 +945,9 @@ fn forking_something_that_is_not_there_and_forking_with_a_bad_credential() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-absent");
     let scratch = Scratch::new("forks-absent");
-    let mail = Mailbox::temp("forks-absent");
-    let server = spawn(&bucket.base_url, &scratch, "forks-absent", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-absent");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     create_org(&mut ada, "acme");
     repo(&mut ada, "acme", "widget", true);
 
@@ -1106,10 +993,9 @@ fn forking_an_empty_repository_gives_an_empty_repository() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-empty-src");
     let scratch = Scratch::new("forks-empty-src");
-    let mail = Mailbox::temp("forks-empty-src");
-    let server = spawn(&bucket.base_url, &scratch, "forks-empty-src", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-empty-src");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", false);
 
     let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
@@ -1137,19 +1023,17 @@ fn a_fork_stays_pending_while_the_worker_is_switched_off() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-worker-off");
     let scratch = Scratch::new("forks-worker-off");
-    let mail = Mailbox::temp("forks-worker-off");
     let server = spawn_with(
         &bucket.base_url,
         &scratch,
         "forks-worker-off",
-        &mail,
         &[
             ("STRATUM_FORK_POLL_SECS", "0"),
             ("STRATUM_PROMOTE_POLL_SECS", "0"),
         ],
     );
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
 
     let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
@@ -1176,18 +1060,16 @@ fn a_fork_whose_upstream_vanishes_first_reports_failed_rather_than_pending() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-upstream-gone");
     let scratch = Scratch::new("forks-upstream-gone");
-    let mail = Mailbox::temp("forks-upstream-gone");
     let mut server = spawn_with(
         &bucket.base_url,
         &scratch,
         "forks-upstream-gone",
-        &mail,
         // Off, so the delete lands between the fork's acceptance and its
         // job — which is the window this is about.
         &[("STRATUM_FORK_POLL_SECS", "0")],
     );
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
     // Minted before the restart: a token outlives the process where a
     // session cookie's `Browser` does not. Minted in bob's own
@@ -1230,10 +1112,9 @@ fn forking_under_a_name_the_forge_will_not_take_is_a_refusal_not_a_crash() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-badname");
     let scratch = Scratch::new("forks-badname");
-    let mail = Mailbox::temp("forks-badname");
-    let server = spawn(&bucket.base_url, &scratch, "forks-badname", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-badname");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     repo(&mut ada, "acme", "widget", true);
 
     let (st, body) = bob.req(
@@ -1262,13 +1143,12 @@ fn forking_takes_a_person_and_a_repository_you_may_read() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forks-refusals");
     let scratch = Scratch::new("forks-refusals");
-    let mail = Mailbox::temp("forks-refusals");
-    let server = spawn(&bucket.base_url, &scratch, "forks-refusals", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forks-refusals");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     create_org(&mut ada, "acme");
     repo(&mut ada, "acme", "widget", true);
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
 
     // Somebody signed in with no role in acme cannot fork what they
     // cannot see, and is told the same thing a missing name tells them.

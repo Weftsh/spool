@@ -8,7 +8,7 @@
 
 import { expect, test } from "@playwright/test";
 
-import { signIn } from "./fixtures";
+import { mockApi, signIn } from "./fixtures";
 
 /// Outcome, the verdict, and the next step — a banner that only
 /// says what went wrong is a dead end with better wording.
@@ -59,4 +59,27 @@ test("a good connect, and no connect at all, show no warning", async ({
   await expect(
     page.getByRole("status").filter({ hasText: /GitHub/ }),
   ).toHaveCount(0);
+});
+
+test("an install begun on GitHub asks somebody signed out to sign in, and nothing else", async ({
+  page,
+}) => {
+  // The installation is parked until somebody signed in says which
+  // organization it belongs to. Nobody can make an account on the way —
+  // accounts come by invitation — so the notice must not offer one.
+  await mockApi(page);
+  await page.route("**/v1/auth/me", (r) =>
+    r.fulfill({ status: 401, json: { error: "not signed in" } }),
+  );
+  await page.goto("/dashboard/?connect=claim");
+  const notice = page
+    .getByRole("status")
+    .filter({ hasText: /installation is ready to connect/ });
+  await expect(notice).toContainText(
+    "Sign in, and then choose the organization it belongs to.",
+  );
+  await expect(notice).not.toContainText(/create an account|sign up/i);
+  await expect(
+    page.getByRole("button", { name: "Sign in", exact: true }),
+  ).toBeVisible();
 });

@@ -24,10 +24,9 @@ use crate::ids::{now_ms, token_secret, ulid};
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
-/// A verification link for an additional address. A day, matching the
-/// signup link in [`crate::usertokens`] — long enough to survive a mail
-/// queue and a night's sleep, short enough that a link left in an old
-/// inbox is not a live credential.
+/// A verification link for an additional address. A day — long enough
+/// to survive a mail queue and a night's sleep, short enough that a link
+/// left in an old inbox is not a live credential.
 pub const EMAIL_VERIFY_TTL_SECS: i64 = 24 * 3600;
 
 /// Bounds on hostile input (I13). Every one of these is a string
@@ -88,7 +87,7 @@ pub struct Profile {
     pub user_id: String,
     /// The namespace name — `/{handle}` — which is also the `orgs` row.
     pub handle: String,
-    /// The account's own name, as sign-up recorded it.
+    /// The account's own name, as it was made with.
     pub name: String,
     /// What they would rather be called, if anything.
     pub display_name: Option<String>,
@@ -457,35 +456,6 @@ pub fn add_email(db: &ControlDb, user_id: &str, address: &str) -> Result<AddEmai
     Ok(AddEmail::Added(format!("{address}:{secret}")))
 }
 
-/// Is this address spoken for at all — proved, or merely claimed?
-///
-/// Deliberately a different question from [`user_for_author`], which
-/// cannot see an unproved claim and must not: an unverified row grants
-/// nothing and authorship must never resolve through one. This asks
-/// what `user_emails`' primary key would answer, which is whether an
-/// INSERT of this address would collide.
-///
-/// It exists for the GitHub sign-in, where the collision that matters
-/// is in that key rather than in `users.email`. An address can be a
-/// *secondary* on somebody's account while being nobody's sign-in
-/// address, so `users::by_email` says "free" and the insert then fails
-/// — a 500 for a state the person could act on if they were told.
-pub fn address_is_held(db: &ControlDb, address: &str) -> Result<bool, String> {
-    let address = crate::users::normalize_email(address);
-    if !crate::users::valid_email(&address) {
-        // Unstorable, so definitionally unheld — and never let a hostile
-        // string reach the query.
-        return Ok(false);
-    }
-    db.lock()
-        .query_opt(
-            "SELECT user_id FROM user_emails WHERE address = $1",
-            &[&address],
-        )
-        .map(|r| r.is_some())
-        .map_err(|e| format!("address holder: {e}"))
-}
-
 /// Spend a verification link, returning the address it proved.
 ///
 /// Verification and stamping are one statement, exactly as
@@ -718,9 +688,8 @@ mod tests {
         ControlDb::open(&stratum_testkit::pg::test_db_url(hint)).unwrap()
     }
 
-    /// A person with their personal namespace, as signup makes them —
-    /// including the click on the confirmation link, without which the
-    /// account exists but has proved nothing.
+    /// A person with their personal namespace and a proved address, as
+    /// an invitation or `admin user-create` makes them.
     fn person(db: &ControlDb, handle: &str, email: &str) -> (String, String) {
         let u = crate::users::create(db, email, handle, Some("a long enough password")).unwrap();
         crate::usertokens::mark_verified(db, &u.id).unwrap();
@@ -745,46 +714,13 @@ mod tests {
         .unwrap()
     }
 
-    /// `address_is_held` answers the primary key's question, which is a
-    /// different one from [`user_for_author`]'s: an unproved claim still
-    /// occupies the address, and the GitHub sign-in has to know that
-    /// before it tries to insert.
-    #[test]
-    fn a_held_address_is_held_whether_or_not_it_was_ever_proved() {
-        let db = db("profiles_held");
-        let (bob, _) = person(&db, "bob", "bob@example.com");
-
-        // Nobody's.
-        assert!(!address_is_held(&db, "carol@example.com").unwrap());
-        // The sign-in address, which `users::create` puts here too.
-        assert!(address_is_held(&db, "bob@example.com").unwrap());
-        // Case and surrounding space are normalized, exactly as the key
-        // stores them — otherwise `Carol@` would read as free and then
-        // collide on insert.
-        assert!(address_is_held(&db, "  BOB@Example.COM ").unwrap());
-
-        // A claim nobody has proved still holds the address, and this is
-        // the case that differs from `user_for_author`.
-        let AddEmail::Added(_) = add_email(&db, &bob, "carol@example.com").unwrap() else {
-            panic!("claim refused");
-        };
-        assert!(address_is_held(&db, "carol@example.com").unwrap());
-        assert_eq!(user_for_author(&db, "carol@example.com").unwrap(), None);
-
-        // A string that cannot be stored is definitionally unheld, and
-        // never reaches the query.
-        for hostile in ["", "not-an-address", "nul\0@example.com"] {
-            assert!(!address_is_held(&db, hostile).unwrap(), "{hostile:?}");
-        }
-    }
-
     #[test]
     fn a_profile_reads_back_what_was_written_and_clears_what_was_cleared() {
         let db = db("profiles");
         let (user, _) = person(&db, "ada", "ada@example.com");
 
         // Absent before anything is set, and the account's own name is
-        // there from signup.
+        // there from the start.
         let (p, _) = by_handle(&db, "ada").unwrap().unwrap();
         assert_eq!(p.name, "ada");
         assert_eq!(p.display_name, None);

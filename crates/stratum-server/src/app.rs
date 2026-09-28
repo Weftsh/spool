@@ -215,12 +215,6 @@ pub fn router(state: SharedState) -> Router {
             "/v1/orgs/:org/github/install/claim",
             post(crate::api::github_api::claim_install),
         )
-        .route("/v1/auth/signup", post(crate::api::auth_api::signup))
-        .route("/v1/auth/verify", post(crate::api::auth_api::verify_email))
-        .route(
-            "/v1/auth/resend-verification",
-            post(crate::api::auth_api::resend_verification),
-        )
         .route(
             "/v1/auth/forgot-password",
             post(crate::api::auth_api::forgot_password),
@@ -825,7 +819,7 @@ pub fn router(state: SharedState) -> Router {
         // is its own route.
         .route("/dashboard/", get(crate::webassets::dashboard))
         .route("/dashboard/*path", get(crate::webassets::dashboard))
-        .fallback(get(crate::webassets::fallback))
+        .fallback(crate::webassets::fallback)
         .layer(axum::extract::DefaultBodyLimit::max(BODY_LIMIT))
         .with_state(state)
 }
@@ -902,10 +896,23 @@ async fn prometheus() -> Response {
         .into_response()
 }
 
-pub fn org_or_404(state: &AppState, org_name: &str) -> Result<Org, Response> {
+/// A namespace by name, or the answer a namespace the caller may not
+/// see gets.
+///
+/// A bare 404 for a missing name, where an existing one asks who you
+/// are, is an existence oracle over every organization *and every
+/// person* on the server — a personal namespace is its owner's handle,
+/// so an anonymous caller could list the staff by status code. A
+/// missing namespace is masked exactly as a missing repository is: 401
+/// to somebody who is not authenticated, 404 to somebody who is.
+pub fn org_or_masked(
+    state: &AppState,
+    headers: &HeaderMap,
+    org_name: &str,
+) -> Result<Org, Response> {
     match registry::org_by_name(&state.db, org_name) {
         Ok(Some(o)) => Ok(o),
-        Ok(None) => Err(authx::not_found()),
+        Ok(None) => Err(authx::masked(&state.db, headers)),
         Err(e) => Err(crate::api::internal(e)),
     }
 }
@@ -956,7 +963,13 @@ fn resolve_repo(
     org_name: &str,
     repo_name: &str,
 ) -> Result<Option<(Org, Repo)>, Response> {
-    let org = org_or_404(state, org_name)?;
+    // A missing namespace is a missing repository: the callers mask
+    // `None` and the two cannot be told apart.
+    let org = match registry::org_by_name(&state.db, org_name) {
+        Ok(Some(o)) => o,
+        Ok(None) => return Ok(None),
+        Err(e) => return Err(crate::api::internal(e)),
+    };
     match registry::repo_by_name(&state.db, &org.id, repo_name.trim_end_matches(".git")) {
         Ok(Some(r)) => Ok(Some((org, r))),
         Ok(None) => Ok(None),
@@ -990,10 +1003,8 @@ pub fn repo_or_404(
 /// answered 401 to both, and REST did not — the two front doors
 /// disagreed about the same repository.
 ///
-/// Note what is *not* masked: whether the namespace exists. Namespace
-/// names are globally unique and claimed first-come, so signup already
-/// answers that question to anyone who asks, and pretending otherwise
-/// here would be theatre.
+/// A missing namespace is masked the same way: `ghost/app` and
+/// `acme/app` answer alike to somebody with no role in either.
 pub fn repo_or_masked(
     state: &AppState,
     headers: &HeaderMap,
@@ -1051,7 +1062,7 @@ pub fn rest_repo_auth(
             authx::SessionAuth::Principal(p) => p,
             // Signed in but not a member here: masked, exactly like a
             // foreign token.
-            authx::SessionAuth::NoAccess(_) => return Err(authx::not_found()),
+            authx::SessionAuth::NoAccess => return Err(authx::not_found()),
             authx::SessionAuth::None => return Err(authx::unauthorized(authx::Challenge::None)),
         },
     };

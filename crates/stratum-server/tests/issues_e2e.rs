@@ -16,17 +16,14 @@
 //! file the issue, and they can do anything, so it passes against a
 //! guard that would refuse every real reporter.
 //!
-//! Three negatives carry as much weight as the happy path, and each is
+//! Two negatives carry as much weight as the happy path, and each is
 //! a different question:
 //!
 //! - somebody with no role in the org can neither read the tracker nor
 //!   learn that it exists, and nobody signed out is told anything but to
 //!   sign in;
 //! - a service token may not author anything, because an issue has an
-//!   author and a token is not a person;
-//! - an unverified account may not file, because this is the most
-//!   spammable create path on the server and the only one that would
-//!   otherwise skip the check every sibling makes.
+//!   author and a token is not a person.
 //!
 //! And one that is about triage rather than authorship: **labels take
 //! `repo:write`.** A reporter describes their problem; they do not get
@@ -34,90 +31,13 @@
 
 use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::Scratch;
-use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
 
-const PASSWORD: &str = "a long enough password";
-
-fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Server {
-    let mut b = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
+fn spawn(store_url: &str, scratch: &Scratch, hint: &str) -> Server {
+    Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
         .db_hint(hint)
-        .data_dir(scratch.path().join("data"));
-    for (k, v) in mail.env() {
-        b = b.env(k, v);
-    }
-    b.start()
-}
-
-fn urldecode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v as char);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn mailed_token(mail: &Mailbox, address: &str, key: &str) -> String {
-    let msg = mail.wait_for(address, std::time::Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let marker = format!("#{key}=");
-    let raw = link
-        .split_once(&marker)
-        .unwrap_or_else(|| panic!("{link} carries no #{key}="))
-        .1;
-    urldecode(raw)
-}
-
-/// Sign up and confirm the address.
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let mut b = signup_unverified(server, handle, email);
-    let token = mailed_token(mail, email, "verify");
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
-}
-
-/// Sign up and stop, leaving the address unconfirmed.
-///
-/// Its own helper rather than a flag, because the unverified state is a
-/// thing this suite tests rather than a step it skips.
-fn signup_unverified<'a>(server: &'a Server, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let mut b = Browser::new(server);
-    // Signing in is what gives the browser its session; verification is
-    // a separate act and is deliberately not performed here.
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/login",
-        Some(serde_json::json!({ "email": email, "password": PASSWORD })),
-    );
-    assert_eq!(st, 200, "login {handle}: {body}");
-    b
+        .data_dir(scratch.path().join("data"))
+        .start()
 }
 
 /// A repository in `org`, ready to be reported against.
@@ -131,8 +51,8 @@ fn repo(owner: &mut Browser, org: &str, name: &str) {
 }
 
 /// ada, who owns the organization `acme` and its repository `widget`.
-fn acme<'a>(server: &'a Server, mail: &Mailbox) -> Browser<'a> {
-    let mut ada = signup(server, mail, "ada", "ada@example.com");
+fn acme<'a>(server: &'a Server) -> Browser<'a> {
+    let mut ada = Browser::stranger(server, "ada", "ada@example.com");
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs",
@@ -143,16 +63,10 @@ fn acme<'a>(server: &'a Server, mail: &Mailbox) -> Browser<'a> {
     ada
 }
 
-/// A signed-up person invited into acme as a viewer: they may read
+/// Somebody from elsewhere invited into acme as a viewer: they may read
 /// `widget` and may not push to it.
-fn viewer<'a>(
-    server: &'a Server,
-    mail: &Mailbox,
-    ada: &mut Browser,
-    handle: &str,
-    email: &str,
-) -> Browser<'a> {
-    let b = signup(server, mail, handle, email);
+fn viewer<'a>(server: &'a Server, ada: &mut Browser, handle: &str, email: &str) -> Browser<'a> {
+    let b = Browser::stranger(server, handle, email);
     ada.invite_and_accept("acme", email, "viewer");
     b
 }
@@ -166,13 +80,12 @@ fn a_reader_can_file_and_comment_on_a_repository_they_cannot_write() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-outsider");
     let scratch = Scratch::new("issues-outsider");
-    let mail = Mailbox::temp("issues-outsider");
-    let server = spawn(&bucket.base_url, &scratch, "issues-outsider", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-outsider");
 
-    let mut ada = acme(&server, &mail);
+    let mut ada = acme(&server);
     // A viewer of acme, holding no grant on the repository and no write
     // role anywhere. This is the whole test.
-    let mut bob = viewer(&server, &mail, &mut ada, "bob", "bob@example.com");
+    let mut bob = viewer(&server, &mut ada, "bob", "bob@example.com");
     let (st, view) = bob.req("GET", "/v1/orgs/acme/repos/widget", None);
     assert_eq!(st, 200, "{view}");
     assert_eq!(view["viewer_write"], false, "{view}");
@@ -248,7 +161,7 @@ fn a_reader_can_file_and_comment_on_a_repository_they_cannot_write() {
 
     // Somebody with no role in acme can neither file nor read, and is
     // told what a name nobody took would tell them.
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
     for repo in ["widget", "no-such"] {
         let (st, _) = carl.req(
             "POST",
@@ -274,10 +187,9 @@ fn numbers_are_allocated_once_each_under_concurrent_filing() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-numbers");
     let scratch = Scratch::new("issues-numbers");
-    let mail = Mailbox::temp("issues-numbers");
-    let server = spawn(&bucket.base_url, &scratch, "issues-numbers", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-numbers");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     repo(&mut ada, "ada", "widget");
 
     // Ten in a row rather than two: a read-then-write allocator can win
@@ -316,18 +228,17 @@ fn a_stranger_cannot_learn_a_tracker_exists_and_a_reader_reads_it() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-stranger");
     let scratch = Scratch::new("issues-stranger");
-    let mail = Mailbox::temp("issues-stranger");
-    let server = spawn(&bucket.base_url, &scratch, "issues-stranger", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-stranger");
 
-    let mut ada = acme(&server, &mail);
+    let mut ada = acme(&server);
     let (st, _) = ada.req(
         "POST",
         "/v1/orgs/acme/repos/widget/issues",
         Some(serde_json::json!({ "title": "a real bug" })),
     );
     assert_eq!(st, 201);
-    let mut bob = viewer(&server, &mail, &mut ada, "bob", "bob@example.com");
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut bob = viewer(&server, &mut ada, "bob", "bob@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
 
     // Every read and the write, against the real tracker and one that
     // was never there: no credential is told to sign in, a person with
@@ -371,10 +282,9 @@ fn a_service_token_cannot_author_an_issue() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-token");
     let scratch = Scratch::new("issues-token");
-    let mail = Mailbox::temp("issues-token");
-    let server = spawn(&bucket.base_url, &scratch, "issues-token", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-token");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     repo(&mut ada, "ada", "widget");
     // A repository-bound token: the most authority a deploy credential
     // ever has, and still not a person.
@@ -404,57 +314,6 @@ fn a_service_token_cannot_author_an_issue() {
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
 
-#[test]
-fn an_unconfirmed_address_cannot_file_or_comment() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("issues-unverified");
-    let scratch = Scratch::new("issues-unverified");
-    let mail = Mailbox::temp("issues-unverified");
-    let server = spawn(&bucket.base_url, &scratch, "issues-unverified", &mail);
-
-    let mut ada = acme(&server, &mail);
-    let (st, _) = ada.req(
-        "POST",
-        "/v1/orgs/acme/repos/widget/issues",
-        Some(serde_json::json!({ "title": "a real one" })),
-    );
-    assert_eq!(st, 201);
-
-    // Signed in, able to read, and not confirmed. Filing is the most
-    // spammable create path on the server — reachable by every reader of
-    // a repository — and every sibling create path checks this. Invited
-    // rather than left outside, so the refusal below cannot be the read
-    // gate: accepting an invitation into an existing account proves
-    // nothing about its address.
-    let mut mallory = signup_unverified(&server, "mallory", "mallory@example.com");
-    ada.invite_and_accept("acme", "mallory@example.com", "viewer");
-    let (st, me) = mallory.req("GET", "/v1/auth/me", None);
-    assert_eq!(st, 200, "{me}");
-    assert!(
-        me["verified_at"].is_null(),
-        "the fixture is verified, so this proves nothing: {me}"
-    );
-    let (st, refused) = mallory.req(
-        "POST",
-        "/v1/orgs/acme/repos/widget/issues",
-        Some(serde_json::json!({ "title": "buy cheap watches" })),
-    );
-    assert_eq!(st, 403, "an unconfirmed account filed an issue: {refused}");
-    let (st, refused) = mallory.req(
-        "POST",
-        "/v1/orgs/acme/repos/widget/issues/1/comments",
-        Some(serde_json::json!({ "body": "buy cheap watches" })),
-    );
-    assert_eq!(st, 403, "an unconfirmed account commented: {refused}");
-
-    // Reading is not gated on it, and must not be: the check is about
-    // creating things, not about being trusted to look.
-    let (st, listed) = mallory.req("GET", "/v1/orgs/acme/repos/widget/issues", None);
-    assert_eq!(st, 200, "{listed}");
-
-    assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
-}
-
 /// Was `an_author_may_close_their_own_issue_and_a_stranger_may_not`: the
 /// passer-by who may read an issue is a fellow viewer now.
 #[test]
@@ -462,12 +321,11 @@ fn an_author_may_close_their_own_issue_and_another_reader_may_not() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-close");
     let scratch = Scratch::new("issues-close");
-    let mail = Mailbox::temp("issues-close");
-    let server = spawn(&bucket.base_url, &scratch, "issues-close", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-close");
 
-    let mut ada = acme(&server, &mail);
-    let mut bob = viewer(&server, &mail, &mut ada, "bob", "bob@example.com");
-    let mut carol = viewer(&server, &mail, &mut ada, "carol", "carol@example.com");
+    let mut ada = acme(&server);
+    let mut bob = viewer(&server, &mut ada, "bob", "bob@example.com");
+    let mut carol = viewer(&server, &mut ada, "carol", "carol@example.com");
 
     let (st, _) = bob.req(
         "POST",
@@ -553,11 +411,10 @@ fn labelling_is_a_maintainers_act() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-labels");
     let scratch = Scratch::new("issues-labels");
-    let mail = Mailbox::temp("issues-labels");
-    let server = spawn(&bucket.base_url, &scratch, "issues-labels", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-labels");
 
-    let mut ada = acme(&server, &mail);
-    let mut bob = viewer(&server, &mail, &mut ada, "bob", "bob@example.com");
+    let mut ada = acme(&server);
+    let mut bob = viewer(&server, &mut ada, "bob", "bob@example.com");
 
     let (st, made) = ada.req(
         "POST",
@@ -665,10 +522,9 @@ fn the_refusals_on_every_write_door_say_which_one_was_hit() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-refusals");
     let scratch = Scratch::new("issues-refusals");
-    let mail = Mailbox::temp("issues-refusals");
-    let server = spawn(&bucket.base_url, &scratch, "issues-refusals", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-refusals");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     repo(&mut ada, "ada", "widget");
     let (st, _) = ada.req(
         "POST",
@@ -760,11 +616,10 @@ fn a_private_repositorys_tracker_is_masked_from_outsiders() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-private");
     let scratch = Scratch::new("issues-private");
-    let mail = Mailbox::temp("issues-private");
-    let server = spawn(&bucket.base_url, &scratch, "issues-private", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-private");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
+    let mut bob = Browser::stranger(&server, "bob", "bob@example.com");
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs/ada/repos",
@@ -798,10 +653,9 @@ fn sorting_is_two_real_orders_and_a_named_refusal() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-sort");
     let scratch = Scratch::new("issues-sort");
-    let mail = Mailbox::temp("issues-sort");
-    let server = spawn(&bucket.base_url, &scratch, "issues-sort", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-sort");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     repo(&mut ada, "ada", "widget");
     for i in 1..=3 {
         let (st, body) = ada.req(
@@ -869,10 +723,9 @@ fn oversized_input_is_refused_rather_than_truncated() {
     let minio = Minio::shared();
     let bucket = minio.bucket("issues-bounds");
     let scratch = Scratch::new("issues-bounds");
-    let mail = Mailbox::temp("issues-bounds");
-    let server = spawn(&bucket.base_url, &scratch, "issues-bounds", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "issues-bounds");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     repo(&mut ada, "ada", "widget");
 
     // I13. Truncating would store something the author did not write

@@ -93,7 +93,6 @@ const ME: Me = {
   name: "Ada Owner",
   handle: "ada",
   created_at: 0,
-  verified_at: 0,
   orgs: [],
 };
 

@@ -163,7 +163,7 @@ pub fn valid_name(name: &str) -> bool {
 ///   and friends are names a stranger taking them could use to look
 ///   official. Nothing breaks if one is missed; somebody gets phished.
 ///
-/// Held here rather than at the signup handler because org creation, the
+/// Held here rather than at any one door because org creation, the
 /// admin CLI and personal handles must all obey it, and three copies of
 /// a denylist is two too many.
 const RESERVED: &[&str] = &[
@@ -183,7 +183,7 @@ const RESERVED: &[&str] = &[
     "v2",
     // The registry's own names, held whether or not each one is a route
     // today: `npm`, `cargo` and the rest are exactly the names somebody
-    // would try to sign up as, and a namespace that shadowed one would
+    // would try to take, and a namespace that shadowed one would
     // be unreachable in every client that hard-codes the ecosystem in a
     // URL.
     "cargo",
@@ -370,20 +370,7 @@ pub fn create_personal_namespace(
     let blob = serde_json::json!({ "handle": handle, "user_id": user_id });
     db.lock()
         .transaction(move |tx| {
-            tx.execute(
-                "INSERT INTO orgs (id, name, created_at, kind, owner_user_id) \
-                 VALUES ($1, $2, $3, 'personal', $4)",
-                &[&o.id, &o.name, &o.created_at, &uid],
-            )?;
-            tx.execute(
-                "INSERT INTO org_members (org_id, user_id, role, created_at) \
-                 VALUES ($1, $2, 'owner', $3)",
-                &[&o.id, &uid, &o.created_at],
-            )?;
-            tx.execute(
-                "UPDATE users SET handle = $2 WHERE id = $1",
-                &[&uid, &o.name],
-            )?;
+            claim_personal_namespace_tx(tx, &o, &uid)?;
             if let Some(ctx) = audit {
                 crate::audit::record_tx(tx, ctx, None, "namespace.create", Some(&blob))?;
             }
@@ -397,6 +384,88 @@ pub fn create_personal_namespace(
             }
         })?;
     Ok(org)
+}
+
+/// The three statements a personal namespace is, inside somebody else's
+/// transaction.
+///
+/// Shared by [`create_personal_namespace`] and by accepting an
+/// invitation, which creates the account and its namespace together: a
+/// second transaction after the first commits is exactly the window in
+/// which an account exists with no handle, and both of the things a
+/// handle-less account lacks are silent (see
+/// [`crate::users::without_handle`]). A name somebody already holds is a
+/// unique violation on `orgs`, which rolls the caller's whole
+/// transaction back — see [`is_namespace_taken`].
+pub(crate) fn claim_personal_namespace_tx(
+    tx: &mut postgres::Transaction,
+    org: &Org,
+    user_id: &str,
+) -> Result<(), postgres::Error> {
+    tx.execute(
+        "INSERT INTO orgs (id, name, created_at, kind, owner_user_id) \
+         VALUES ($1, $2, $3, 'personal', $4)",
+        &[&org.id, &org.name, &org.created_at, &user_id],
+    )?;
+    tx.execute(
+        "INSERT INTO org_members (org_id, user_id, role, created_at) \
+         VALUES ($1, $2, 'owner', $3)",
+        &[&org.id, &user_id, &org.created_at],
+    )?;
+    tx.execute(
+        "UPDATE users SET handle = $2 WHERE id = $1",
+        &[&user_id, &org.name],
+    )?;
+    Ok(())
+}
+
+/// Did this statement fail because the namespace name is somebody's
+/// already?
+///
+/// Asked of the constraint, not the message: `orgs.name` is unique both
+/// as written and case-folded (`orgs_name_folded`), and a transaction
+/// that also inserts a `users` row can fail on *that* table's unique
+/// address instead, which is a different refusal with a different fix.
+pub(crate) fn is_namespace_taken(e: &postgres::Error) -> bool {
+    is_unique_violation(e)
+        && e.as_db_error()
+            .and_then(|d| d.constraint())
+            .is_some_and(|c| c.starts_with("orgs_name"))
+}
+
+/// A namespace name made from something a person already answers to —
+/// the part of their address before the `@`, or a GitHub login — for
+/// when nobody typed one.
+///
+/// Anything outside the alphabet becomes a dash, so `ada.lovelace`
+/// reads as `ada-lovelace` rather than `adalovelace`; never a dot,
+/// because a dot-led name is one [`valid_name`] refuses.
+///
+/// Pure, so it can be tested exhaustively without a database. The
+/// output always passes [`valid_name`]: non-empty, well inside the
+/// length bound (leaving room for a suffix), and built from the allowed
+/// alphabet. It can still be *reserved* or *taken*; that is the caller's
+/// to find out, because only the caller knows what to do about it.
+pub fn handle_from(seed: &str) -> String {
+    let mut out = String::new();
+    for c in seed.to_lowercase().chars() {
+        let c = if c.is_ascii_alphanumeric() || c == '_' {
+            c
+        } else {
+            '-'
+        };
+        // One dash for a run of anything else: `a..b` is `a-b`.
+        if !(c == '-' && out.ends_with('-')) {
+            out.push(c);
+        }
+    }
+    let trimmed: String = out.trim_matches(['-', '_']).chars().take(60).collect();
+    let trimmed = trimmed.trim_end_matches(['-', '_']);
+    if trimmed.is_empty() {
+        "user".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Is this namespace a person's own?
@@ -1187,6 +1256,64 @@ pub fn topics_in_use(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_or_an_address_becomes_a_legal_namespace_name() {
+        assert_eq!(handle_from("ada"), "ada");
+        // GitHub allows mixed case; namespaces here are lowercase.
+        assert_eq!(handle_from("AdaLovelace"), "adalovelace");
+        assert_eq!(handle_from("ada-lovelace"), "ada-lovelace");
+        // A leading dash or underscore would be a name that reads as a
+        // flag in every command line it appears in.
+        assert_eq!(handle_from("-ada-"), "ada");
+        assert_eq!(handle_from("_ada_"), "ada");
+        // Anything outside the alphabet is a dash, one per run, and never
+        // a dot: `valid_name` refuses a dot-led name.
+        assert_eq!(handle_from("ada.lovelace"), "ada-lovelace");
+        assert_eq!(handle_from("ada+spool"), "ada-spool");
+        assert_eq!(handle_from("ada/../root"), "ada-root");
+        assert_eq!(handle_from(".ada"), "ada");
+        assert_eq!(handle_from("ada_lovelace"), "ada_lovelace");
+        assert_eq!(handle_from("Zoë"), "zo");
+        // Length is bounded well inside the 100-byte limit, leaving room
+        // for the suffix the caller may add — and a cut never leaves a
+        // trailing dash.
+        assert_eq!(handle_from(&"a".repeat(200)).len(), 60);
+        assert_eq!(
+            handle_from(&format!("{}.b", "a".repeat(59))),
+            "a".repeat(59)
+        );
+        // Nothing usable left is still a legal name.
+        assert_eq!(handle_from("---"), "user");
+        assert_eq!(handle_from(""), "user");
+        assert_eq!(handle_from("!!!"), "user");
+    }
+
+    /// Every output above passes the registry's own rules, which is the
+    /// property a caller relies on when it treats a refusal from the
+    /// database as "taken" rather than "malformed".
+    #[test]
+    fn every_derived_name_passes_the_registry_rules() {
+        for seed in [
+            "ada",
+            "AdaLovelace",
+            "-ada-",
+            "ada.lovelace",
+            "ada+spool",
+            "ada/../root",
+            ".ada",
+            "Zoë",
+            "---",
+            "",
+            &"a".repeat(200),
+        ] {
+            let base = handle_from(seed);
+            assert!(
+                valid_name(&base),
+                "{seed:?} derived {base:?}, which the registry refuses"
+            );
+        }
+    }
 
     /// A personal namespace is a namespace, and is not an org.
     #[test]

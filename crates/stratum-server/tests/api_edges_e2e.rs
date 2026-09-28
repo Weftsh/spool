@@ -978,15 +978,34 @@ fn asset_mime_types_and_dirless_servers() {
         let resp = ureq::get(&format!("{}{path}", server.base)).call().unwrap();
         assert_eq!(resp.header("Content-Type").unwrap_or(""), want_ct, "{path}");
     }
-    // Dot-dot traversal never reaches a file outside the build: the
-    // client collapses it to a path that is not a namespace, and the
-    // server answers 404 rather than the SPA shell or the file.
+    // Dot-dot traversal never reaches a file outside the build. The
+    // client collapses it to `/etc/passwd`, and `etc` is a name that
+    // could be a namespace, so the answer is the content-free SPA shell
+    // every such name gets — never the file.
     for path in ["/../../etc/passwd", "/dashboard/../../etc/passwd"] {
-        let err = ureq::get(&format!("{}{path}", server.base))
+        let resp = ureq::get(&format!("{}{path}", server.base))
             .call()
-            .unwrap_err();
-        assert!(matches!(err, ureq::Error::Status(404, _)), "{path}: {err}");
+            .unwrap_or_else(|e| panic!("{path}: {e}"));
+        let body = resp.into_string().unwrap();
+        assert_eq!(
+            body, "<div id=\"root\">SPA SHELL</div>",
+            "{path} served {body:?}"
+        );
     }
+    // Percent-encoded, the dots are never decoded into a parent
+    // directory: the path names no file in the build, and the dashboard's
+    // own deep-link fallback answers with its shell.
+    let resp = ureq::get(&format!(
+        "{}/dashboard/%2e%2e/%2e%2e/etc/passwd",
+        server.base
+    ))
+    .call()
+    .unwrap();
+    let body = resp.into_string().unwrap();
+    assert_eq!(
+        body, "<div id=\"root\">SPA SHELL</div>",
+        "an encoded traversal served {body:?}"
+    );
 
     // A server with no asset dirs 404s every surface the dashboard
     // would have answered.

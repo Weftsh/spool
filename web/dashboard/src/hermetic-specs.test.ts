@@ -120,9 +120,21 @@ describe("playwright specs are hermetic", () => {
 /// read behind and this stayed green, which I checked rather than
 /// assumed. Catching that needs the client run, not a string search,
 /// and the Playwright suite is where it belongs.
+///
+/// **Both ways of building a link are read, and so is the other
+/// direction.** Keys used to be found only as `token_url(…, "key")`
+/// calls, and the invitation link is built by `invite_url` from a literal
+/// `#invite=` — so the one link every new account arrives through was
+/// never checked at all, and the count guard below held only because
+/// `#verify=` padded it. When the server stopped mailing `#verify=`
+/// (accounts are invitation-only, so there is no address to confirm) the
+/// guard went red for the wrong reason. Keys are now read from every
+/// `/dashboard/#<key>=` the templates build, outside their tests; and a
+/// reader for a key nothing mails any more is dead code on a credential
+/// path — it is what `#verify=` became — so that fails too.
 describe("every mailed link has a reader", () => {
   const app = readFileSync(join(__dirname, "App.tsx"), "utf8");
-  const templates = readFileSync(
+  const source = readFileSync(
     join(
       __dirname,
       "..",
@@ -136,28 +148,54 @@ describe("every mailed link has a reader", () => {
     ),
     "utf8",
   );
+  // The product half only. The Rust tests spell whole URLs, and a
+  // negative assertion there ("never mails #x=") would otherwise invent
+  // a key the server does not send.
+  const cut = source.indexOf("#[cfg(test)]");
+  const templates = cut === -1 ? source : source.slice(0, cut);
 
   const mailed = [
-    ...new Set(
-      [...templates.matchAll(/token_url\([^,]+,\s*"([a-z-]+)"/g)].map(
+    ...new Set([
+      ...[...templates.matchAll(/token_url\([^,]+,\s*"([a-z-]+)"/g)].map(
         (m) => m[1],
       ),
+      ...[...templates.matchAll(/\/dashboard\/#([a-z-]+)=/g)].map(
+        (m) => m[1],
+      ),
+    ]),
+  ];
+  const read = [
+    ...new Set(
+      [...app.matchAll(/tokenFromHash\("([a-z-]+)"\)/g)].map((m) => m[1]),
     ),
   ];
 
   it("finds the mail templates and the keys they build", () => {
     // Guard on the guard: if the path moves or the helper is renamed,
-    // every assertion below passes over an empty list.
-    expect(mailed.length).toBeGreaterThan(2);
+    // every assertion below passes over an empty list. Named rather
+    // than counted, so removing one mail cannot turn this red and
+    // adding one cannot hide a lost one.
+    expect(mailed).toContain("invite");
+    expect(mailed).toContain("reset");
+    expect(read.length).toBeGreaterThan(0);
   });
 
   for (const key of mailed) {
     it(`the client reads #${key}=`, () => {
       expect(
-        app.includes(`tokenFromHash("${key}")`),
+        read.includes(key),
         `the server mails a link containing #${key}= and nothing in ` +
           `App.tsx reads it, so clicking it does nothing`,
       ).toBe(true);
     });
   }
+
+  it("the client reads no link the server does not mail", () => {
+    expect(
+      read.filter((k) => !mailed.includes(k)),
+      "App.tsx redeems a mailed link that no template in " +
+        "mail/templates.rs builds any more — a reader for a credential " +
+        "nobody is sent, on a screen nobody should reach",
+    ).toEqual([]);
+  });
 });

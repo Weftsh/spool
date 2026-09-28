@@ -101,7 +101,7 @@ test("the org overview lists repositories before the usage history", async ({
   await expect(page.getByRole("heading", { name: "Usage", exact: true })).toBeVisible();
 });
 
-test("the sign-in screen says what it is for, and sign-up starts at the top", async ({
+test("the sign-in screen says what it is for, and how to get an account", async ({
   page,
 }) => {
   await mockApi(page);
@@ -109,23 +109,59 @@ test("the sign-in screen says what it is for, and sign-up starts at the top", as
     r.fulfill({ status: 401, json: { error: "not signed in" } }),
   );
 
-  // It read "Weft Dashboard", in a <span>, on every mode: no heading,
-  // and the same words on the screen that creates an account.
+  // It read "Weft Dashboard", in a <span>, on every mode: no heading.
   await page.goto("/login");
   await expect(
-    page.getByRole("heading", { level: 1, name: "Sign in to Weft" }),
+    page.getByRole("heading", { level: 1, name: "Sign in", exact: true }),
   ).toBeVisible();
-  // The mark leads back to the site the visitor came from.
+  // The mark leads back to the way in.
   await expect(page.getByRole("link", { name: "Weft", exact: true })).toHaveAttribute("href", "/");
+  // The first field is the one with the cursor in it.
+  await expect(page.getByLabel("Email")).toBeFocused();
 
-  // Two autoFocus props on one form, and the later one wins: sign-up
-  // opened with the cursor in Email, the third field, below the two it
-  // had not asked for yet.
-  await page.goto("/login?mode=signup");
+  // Where "Create an account" used to be, the answer to the question a
+  // visitor with no account actually has: who makes one. Said in words
+  // true of any deployment — "this server", not a product name.
+  const how = page.getByText(/No account yet\?/);
+  await expect(how).toContainText("made by invitation");
+  await expect(how).toContainText("admin of your organization");
+  await expect(how).toContainText("whoever runs this server");
   await expect(
-    page.getByRole("heading", { level: 1, name: "Create your Weft account" }),
-  ).toBeVisible();
+    page.getByRole("button", { name: /create (an )?account/i }),
+  ).toHaveCount(0);
+});
+
+test("an invitation for somebody new starts at the top, and says what the handle will be", async ({
+  page,
+}) => {
+  await mockApi(page);
+  await page.route("**/v1/auth/me", (r) =>
+    r.fulfill({ status: 401, json: { error: "not signed in" } }),
+  );
+  await page.route("**/v1/auth/invite/preview", (r) =>
+    r.fulfill({
+      json: {
+        org: "acme",
+        role: "member",
+        email: "dev.eloper@acme.test",
+        expires_at: Date.now() + 86_400_000,
+      },
+    }),
+  );
+  await page.goto("/dashboard/#invite=stinv_01_design");
+  await expect(page.getByRole("heading", { name: "Join acme" })).toBeVisible();
+  // The first field has the cursor, not the optional one below it.
   await expect(page.getByLabel("Your name")).toBeFocused();
+  // Optional is said on the field, and what an empty field gets is
+  // said before anybody submits — the name that goes in every clone URL
+  // is not a surprise to find out afterwards.
+  const handle = page.getByLabel("Handle");
+  await expect(page.getByText("Handle (optional)")).toBeVisible();
+  await expect(handle).toHaveAttribute("placeholder", "dev-eloper");
+  await expect(handle).not.toHaveAttribute("required", /.*/);
+  await expect(page.locator("#handle-hint")).toContainText("/dev-eloper/repo");
+  await handle.fill("dev");
+  await expect(page.locator("#handle-hint")).toContainText("/dev/repo");
 });
 
 test("'Your settings' opens the person's settings, not the organization's", async ({

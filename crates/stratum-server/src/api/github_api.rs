@@ -81,7 +81,7 @@ pub async fn start_install(
     headers: HeaderMap,
 ) -> Response {
     let target = target(&state);
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -92,9 +92,6 @@ pub async fn start_install(
         Ok(p) => p,
         Err(r) => return r,
     };
-    if let Err(r) = authx::require_verified(&state.db, &principal) {
-        return r;
-    }
     let Some(install_url) = target.install_url.clone() else {
         return json_error(
             StatusCode::NOT_IMPLEMENTED,
@@ -359,7 +356,7 @@ pub async fn claim_install(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -367,9 +364,6 @@ pub async fn claim_install(
         Ok(p) => p,
         Err(r) => return r,
     };
-    if let Err(r) = authx::require_verified(&state.db, &principal) {
-        return r;
-    }
     let Some(claim) = claim_from_headers(&headers) else {
         return json_error(
             StatusCode::NOT_FOUND,
@@ -441,7 +435,7 @@ pub async fn list_installations(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -509,7 +503,7 @@ pub async fn list_installation_repos(
     Query(page): Query<RepoPage>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -557,7 +551,7 @@ pub async fn forget_installation(
     headers: HeaderMap,
 ) -> Response {
     let provider = target(&state).provider;
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };

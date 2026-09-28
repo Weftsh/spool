@@ -64,7 +64,7 @@ pub async fn list(
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -86,7 +86,7 @@ pub async fn create(
     headers: HeaderMap,
     Json(body): Json<TeamBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -116,7 +116,7 @@ pub async fn update(
     headers: HeaderMap,
     Json(body): Json<TeamBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -144,7 +144,7 @@ pub async fn delete(
     Path((org_name, team_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -165,7 +165,7 @@ pub async fn list_members(
     Path((org_name, team_id)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -198,7 +198,7 @@ pub async fn add_member(
     Path((org_name, team_id, user_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -220,7 +220,7 @@ pub async fn remove_member(
     Path((org_name, team_id, user_id)): Path<(String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };

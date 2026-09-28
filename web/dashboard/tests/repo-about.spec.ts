@@ -408,7 +408,6 @@ async function asAdmin(page: import("@playwright/test").Page) {
         email: "owner@acme.test",
         name: "Ada Owner",
         created_at: 0,
-        verified_at: 1,
         orgs: [{ id: "01org", name: "acme", role: "owner" }],
       },
     }),

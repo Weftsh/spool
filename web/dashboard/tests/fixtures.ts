@@ -135,7 +135,6 @@ export const ME = {
   email: "owner@acme.test",
   name: "Ada Owner",
   created_at: Date.now() - 86_400_000,
-  verified_at: Date.now() - 86_400_000,
   orgs: [{ id: "01org", name: "acme", role: "owner" }],
 };
 

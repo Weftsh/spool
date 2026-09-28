@@ -54,6 +54,25 @@ fn org_with_owner(server: &Server, org: &str, email: &str) {
         .unwrap_or_else(|e| panic!("user-create: {e}"));
 }
 
+/// Percent-decode a mailed link's fragment: templates encode the token,
+/// so an address inside one arrives as `%40`.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap();
+            out.push(u8::from_str_radix(hex, 16).expect("percent escape"));
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).expect("utf8")
+}
+
 /// The invitation a person receives is the invitation that works.
 #[test]
 fn an_invitation_arrives_by_mail_and_the_emailed_link_is_the_one_that_works() {
@@ -356,193 +375,6 @@ fn an_invitation_previews_for_its_holder_and_looks_identical_for_everyone_else()
     assert!(server.healthy(), "server still serving after all that");
 }
 
-/// The whole funnel a stranger runs, and the wall an unproved address
-/// hits halfway through it.
-#[test]
-fn a_stranger_signs_up_is_blocked_until_they_confirm_and_then_is_not() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("mail-signup");
-    let scratch = Scratch::new("mail-signup");
-    let mailbox = Mailbox::temp("signup-e2e");
-    let server = spawn(&bucket.base_url, &scratch, "mail-signup", Some(&mailbox));
-
-    let mut anon = Browser::new(&server);
-    let (st, body) = anon.req(
-        "POST",
-        "/v1/auth/signup",
-        Some(serde_json::json!({
-            "email": "Stranger@Example.test", "name": "A Stranger",
-            "password": PASSWORD, "handle": "stranger",
-        })),
-    );
-    assert_eq!(st, 202, "{body}");
-    // The answer says nothing about whether an account was made.
-    assert!(
-        !body.to_string().contains("stranger@example.test"),
-        "the response echoes the address: {body}"
-    );
-
-    // The confirmation message arrives at the normalized address.
-    let mail = mailbox.wait_for("stranger@example.test", SOON);
-    assert_eq!(mail.subject, "Confirm your email address");
-    let link = mail.link().expect("a link");
-    assert!(
-        link.starts_with("http://stratum.test:9999/dashboard/#verify="),
-        "{link}"
-    );
-    let token = link.split("#verify=").nth(1).unwrap().to_string();
-
-    // They can sign in and look around straight away…
-    let mut person = Browser::signed_in(&server, "stranger@example.test", PASSWORD);
-    let (st, me) = person.req("GET", "/v1/auth/me", None);
-    assert_eq!(st, 200, "{me}");
-    assert_eq!(
-        me["orgs"][0]["name"], "stranger",
-        "personal namespace: {me}"
-    );
-    assert_eq!(me["orgs"][0]["role"], "owner");
-    assert_eq!(person.req("GET", "/v1/orgs/stranger/repos", None).0, 200);
-
-    // …but creating anything is refused until the address is proved,
-    // and the refusal says what to do about it.
-    let (st, refusal) = person.req(
-        "POST",
-        "/v1/orgs/stranger/repos",
-        Some(serde_json::json!({ "name": "first" })),
-    );
-    assert_eq!(st, 403, "{refusal}");
-    assert!(
-        refusal["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("confirm your email address"),
-        "{refusal}"
-    );
-    // The batch path is the same wall — a gate on one door only is no gate.
-    let (st, batch) = person.req(
-        "POST",
-        "/v1/orgs/stranger/repos/batch/create",
-        Some(serde_json::json!({ "repos": [{ "name": "bulk" }] })),
-    );
-    assert_eq!(st, 403, "{batch}");
-    // …and so is mirroring, which is the expensive one: it makes the
-    // server fetch a stranger's URL on their say-so.
-    let (st, mirror) = person.req(
-        "POST",
-        "/v1/orgs/stranger/mirrors",
-        Some(serde_json::json!({
-            "name": "m", "provider": "generic", "origin": "https://x.test/a.git"
-        })),
-    );
-    assert_eq!(st, 403, "{mirror}");
-
-    // Confirming signs them in and opens the door.
-    let mut fresh = Browser::new(&server);
-    let (st, who) = fresh.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "{who}");
-    assert_eq!(who["email"], "stranger@example.test");
-    let (st, repo) = fresh.req(
-        "POST",
-        "/v1/orgs/stranger/repos",
-        Some(serde_json::json!({ "name": "first" })),
-    );
-    assert_eq!(st, 201, "{repo}");
-    assert_eq!(repo["name"], "first", "{repo}");
-
-    // The link is spent.
-    assert_eq!(
-        Browser::new(&server)
-            .req(
-                "POST",
-                "/v1/auth/verify",
-                Some(serde_json::json!({ "token": token })),
-            )
-            .0,
-        404
-    );
-    assert!(server.healthy());
-}
-
-/// Signup must not become a way to ask who has an account here.
-#[test]
-fn signup_answers_identically_whether_or_not_the_address_is_known() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("mail-oracle");
-    let scratch = Scratch::new("mail-oracle");
-    let mailbox = Mailbox::temp("oracle-e2e");
-    let server = spawn(&bucket.base_url, &scratch, "mail-oracle", Some(&mailbox));
-    org_with_owner(&server, "acme", "owner@acme.test");
-
-    let mut anon = Browser::new(&server);
-    let signup = |b: &mut Browser, email: &str, handle: &str| {
-        b.req(
-            "POST",
-            "/v1/auth/signup",
-            Some(serde_json::json!({
-                "email": email, "name": "Someone",
-                "password": PASSWORD, "handle": handle,
-            })),
-        )
-    };
-
-    // A brand-new address and one that already has an account: same
-    // status, same body, byte for byte.
-    let (new_st, new_body) = signup(&mut anon, "brand-new@example.test", "brandnew");
-    let (old_st, old_body) = signup(&mut anon, "owner@acme.test", "takenaddress");
-    assert_eq!(new_st, 202);
-    assert_eq!(old_st, 202);
-    assert_eq!(
-        new_body.to_string(),
-        old_body.to_string(),
-        "responses differ"
-    );
-
-    // What differs is only what lands in the mailbox — and the message
-    // to the address that already exists goes to its owner, telling them
-    // nothing was created.
-    let existing = mailbox.wait_for("owner@acme.test", SOON);
-    assert_eq!(existing.subject, "You already have a Weft account");
-    assert!(
-        existing.text.contains("Nothing was created"),
-        "{}",
-        existing.text
-    );
-    // No namespace was made for the handle that lost.
-    assert_eq!(
-        Browser::new(&server)
-            .req("GET", "/v1/orgs/takenaddress/repos", None)
-            .0,
-        404
-    );
-
-    // The same uniformity on the two endpoints that take a bare address.
-    for path in ["/v1/auth/resend-verification", "/v1/auth/forgot-password"] {
-        let known = anon.req(
-            "POST",
-            path,
-            Some(serde_json::json!({ "email": "owner@acme.test" })),
-        );
-        let unknown = anon.req(
-            "POST",
-            path,
-            Some(serde_json::json!({ "email": "nobody@example.test" })),
-        );
-        let malformed = anon.req(
-            "POST",
-            path,
-            Some(serde_json::json!({ "email": "not-an-address" })),
-        );
-        assert_eq!(known.0, 202, "{path}");
-        assert_eq!(known.1.to_string(), unknown.1.to_string(), "{path}");
-        assert_eq!(known.1.to_string(), malformed.1.to_string(), "{path}");
-    }
-    assert!(server.healthy());
-}
-
 /// Resetting a password, and every way of doing it that must not work.
 #[test]
 fn a_reset_link_restores_access_once_and_ends_every_other_session() {
@@ -619,32 +451,27 @@ fn a_reset_link_restores_access_once_and_ends_every_other_session() {
         404
     );
 
-    // Every forged shape, and a verification token presented here.
-    assert_eq!(
-        anon.req(
-            "POST",
-            "/v1/auth/signup",
-            Some(serde_json::json!({
-                "email": "other@acme.test", "name": "Other",
-                "password": PASSWORD, "handle": "other",
-            })),
-        )
-        .0,
-        202
+    // Every forged shape — and a live link minted for something else,
+    // which is the one that matters: confirming an extra address is the
+    // other link this server mails, and it must not reset a password.
+    let (st, out) = fresh.req(
+        "POST",
+        "/v1/users/owner/emails",
+        Some(serde_json::json!({ "email": "owner@home.test" })),
     );
-    let verify_token = mailbox
-        .wait_for("other@acme.test", SOON)
+    assert_eq!(st, 202, "{out}");
+    let address_token = mailbox
+        .wait_for("owner@home.test", SOON)
         .link()
-        .and_then(|l| l.split("#verify=").nth(1).map(str::to_string))
-        .unwrap();
+        .and_then(|l| l.split("#verify-email=").nth(1).map(percent_decode))
+        .expect("an address-confirmation link");
     for bad in [
         String::new(),
         "nonsense".into(),
         "weftrs_".into(),
         format!("weftrs_01zzzzzzzzzzzzzzzzzzzzzzzz_{}", "x".repeat(52)),
-        // A live verification link is not a password reset.
-        verify_token.clone(),
-        verify_token.replace("weftv_", "weftrs_"),
+        address_token.clone(),
+        format!("weftrs_{address_token}"),
     ] {
         let (st, body) = anon.req(
             "POST",
@@ -653,301 +480,91 @@ fn a_reset_link_restores_access_once_and_ends_every_other_session() {
         );
         assert_eq!(st, 404, "{bad:?} was accepted: {body}");
     }
-    // …and the verification link still works afterwards, so a failed
-    // attack does not cost its owner anything.
-    assert_eq!(
-        Browser::new(&server)
-            .req(
-                "POST",
-                "/v1/auth/verify",
-                Some(serde_json::json!({ "token": verify_token })),
-            )
-            .0,
-        200
+    assert_eq!(Browser::new(&server).login("owner@acme.test", NEW), 200);
+    // …and the address link still works afterwards, so a failed attack
+    // does not cost its owner anything.
+    let (st, out) = fresh.req(
+        "POST",
+        "/v1/users/owner/emails/verify",
+        Some(serde_json::json!({ "token": address_token })),
     );
+    assert_eq!(st, 200, "{out}");
     assert!(server.healthy());
 }
 
-/// Handles are public names, so their refusals are plain — and they are
-/// checked before anything about the address is, so a taken handle
-/// cannot be used to probe addresses either.
+/// Asking for a reset link must not become a way to ask who has an
+/// account here, nor a way to flood somebody's inbox.
+///
+/// These were pinned on sign-up, which is gone; the endpoint that takes
+/// a bare address and mails it is this one now, and every property
+/// below is still its own.
 #[test]
-fn a_handle_must_be_free_valid_and_not_one_the_platform_keeps() {
+fn asking_for_a_reset_answers_alike_for_every_address_and_floods_nobody() {
     let minio = Minio::shared();
-    let bucket = minio.bucket("mail-handle");
-    let scratch = Scratch::new("mail-handle");
-    let mailbox = Mailbox::temp("handle-e2e");
-    let server = spawn(&bucket.base_url, &scratch, "mail-handle", Some(&mailbox));
+    let bucket = minio.bucket("mail-forgot");
+    let scratch = Scratch::new("mail-forgot");
+    let mailbox = Mailbox::temp("forgot-e2e");
+    let server = spawn(&bucket.base_url, &scratch, "mail-forgot", Some(&mailbox));
     org_with_owner(&server, "acme", "owner@acme.test");
+    org_with_owner(&server, "beta", "off@beta.test");
+    server
+        .admin(&["admin", "user-disable", "--email", "off@beta.test"])
+        .unwrap_or_else(|e| panic!("user-disable: {e}"));
 
     let mut anon = Browser::new(&server);
-    let try_handle = |b: &mut Browser, handle: &str, email: &str| {
-        b.req(
+    let mut ask = |email: &str| {
+        anon.req(
             "POST",
-            "/v1/auth/signup",
-            Some(serde_json::json!({
-                "email": email, "name": "Someone",
-                "password": PASSWORD, "handle": handle,
-            })),
+            "/v1/auth/forgot-password",
+            Some(serde_json::json!({ "email": email })),
         )
     };
 
-    // A router path segment can never be a namespace: an org called
-    // `dashboard` could never be cloned, because the SPA answers first.
-    for reserved in [
-        "dashboard",
-        "v1",
-        "healthz",
-        "admin",
-        "support",
-        "DASHBOARD",
-    ] {
-        let (st, body) = try_handle(&mut anon, reserved, "x@example.test");
-        assert_eq!(st, 400, "{reserved} was allowed: {body}");
-        assert!(
-            body["error"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("reserved"),
-            "{reserved}: {body}"
-        );
-    }
-    // An existing org's name is taken, in any case.
-    for taken in ["acme", "ACME", "Acme"] {
-        let (st, body) = try_handle(&mut anon, taken, "y@example.test");
-        assert_eq!(st, 409, "{taken}: {body}");
-    }
-    // Shapes that are not names at all.
-    for bad in ["", "  ", "a b", "a/b", "..", &"n".repeat(300)] {
+    // An account, no account, a disabled account and not an address at
+    // all: the same status and the same body, byte for byte.
+    let known = ask("owner@acme.test");
+    assert_eq!(known.0, 202, "{}", known.1);
+    for other in ["nobody@example.test", "off@beta.test", "not-an-address"] {
+        let (st, body) = ask(other);
         assert_eq!(
-            try_handle(&mut anon, bad, "z@example.test").0,
-            400,
-            "{bad:?}"
+            (st, body.to_string()),
+            (known.0, known.1.to_string()),
+            "{other} is told apart from an address with an account"
         );
     }
-    // Nothing above sent any mail: none of them got as far as an address.
-    assert!(mailbox.all().is_empty(), "{:?}", mailbox.all());
+    // What differs is only the mailbox. The disabled account is not
+    // offered a way back in: recovering an account an operator switched
+    // off would undo the switching off.
+    mailbox.wait_for("owner@acme.test", SOON);
+    assert!(
+        mailbox.to("off@beta.test").is_empty(),
+        "a disabled account was mailed a reset link: {:?}",
+        mailbox.to("off@beta.test")
+    );
+    assert!(mailbox.to("nobody@example.test").is_empty());
 
-    // A free one works, and is then taken for everybody else.
-    assert_eq!(try_handle(&mut anon, "newcomer", "new@example.test").0, 202);
-    mailbox.wait_for("new@example.test", SOON);
-    let (st, body) = try_handle(&mut anon, "NewComer", "second@example.test");
-    assert_eq!(st, 409, "case-folded collision: {body}");
-    assert!(server.healthy());
-}
-
-/// The refusals on the way in, and the two states an account can be in
-/// that make a mailed link useless when it arrives.
-#[test]
-fn signup_refuses_bad_input_rate_limits_by_address_and_respects_a_disabled_account() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("mail-limits");
-    let scratch = Scratch::new("mail-limits");
-    let mailbox = Mailbox::temp("limits-e2e");
-    let server = spawn(&bucket.base_url, &scratch, "mail-limits", Some(&mailbox));
-
-    let mut anon = Browser::new(&server);
-    let signup = |b: &mut Browser, v: serde_json::Value| b.req("POST", "/v1/auth/signup", Some(v));
-
-    // Each field is checked, and each says which one it was.
-    for (body, needle) in [
-        (
-            serde_json::json!({"email":"a@example.test","name":"A","password":"short","handle":"h1"}),
-            "password",
-        ),
-        (
-            serde_json::json!({"email":"not-an-address","name":"A","password":PASSWORD,"handle":"h2"}),
-            "email",
-        ),
-        (
-            serde_json::json!({"email":"b@example.test","name":"   ","password":PASSWORD,"handle":"h3"}),
-            "name",
-        ),
-        (
-            serde_json::json!({"email":"c@example.test","name":"n".repeat(201),"password":PASSWORD,"handle":"h4"}),
-            "name",
-        ),
-    ] {
-        let (st, out) = signup(&mut anon, body);
-        assert_eq!(st, 400, "{out}");
-        assert!(
-            out["error"].as_str().unwrap_or_default().contains(needle),
-            "expected {needle:?}: {out}"
-        );
-    }
-    // None of those got as far as sending anything.
-    assert!(mailbox.all().is_empty(), "{:?}", mailbox.all());
-
-    // One address cannot be used to flood a mailbox. The limit answers
-    // exactly like a success, because saying "slow down" to one address
-    // and not another is itself an oracle.
-    let flood = "flood@example.test";
+    // One address cannot be used to flood a mailbox: three a window, and
+    // the fourth answers exactly like a success, because "slow down" to
+    // one address and not another is itself an oracle.
     for i in 0..3 {
-        let (st, out) = signup(
-            &mut anon,
-            serde_json::json!({
-                "email": flood, "name": "Flood", "password": PASSWORD,
-                "handle": format!("flood{i}"),
-            }),
+        let (st, body) = ask("OWNER@acme.test");
+        assert_eq!(
+            (st, body.to_string()),
+            (known.0, known.1.to_string()),
+            "attempt {i}"
         );
-        assert_eq!(st, 202, "attempt {i}: {out}");
     }
-    let (st, limited) = signup(
-        &mut anon,
-        serde_json::json!({
-            "email": flood, "name": "Flood", "password": PASSWORD, "handle": "flood3",
-        }),
-    );
-    assert_eq!(st, 202, "{limited}");
-    // Only the first attempt created anything; the rest were refused
-    // silently, so the mailbox holds one confirmation and two "you
-    // already have an account" notes, not four of anything.
-    let to_flood = mailbox.to(flood);
-    assert_eq!(to_flood.len(), 3, "{to_flood:?}");
-    assert_eq!(to_flood[0].subject, "Confirm your email address");
-    assert_eq!(to_flood[1].subject, "You already have a Weft account");
-    // The fourth was rate-limited before any message was composed.
+    let sent = mailbox.to("owner@acme.test");
     assert_eq!(
-        mailbox.to(flood).len(),
+        sent.len(),
         3,
-        "the rate-limited attempt still sent mail"
+        "the per-address limit let a fourth message through: {sent:?}"
     );
-    // …and the handles from the refused attempts were never claimed.
-    for handle in ["flood1", "flood2", "flood3"] {
-        assert_eq!(
-            Browser::new(&server)
-                .req("GET", &format!("/v1/orgs/{handle}/repos"), None)
-                .0,
-            404,
-            "{handle} was created"
-        );
-    }
-
-    // A confirmation link for an account an operator has since switched
-    // off marks the address proved and stops there: the row becomes
-    // accurate, and they still cannot get in.
-    let token = mailbox.to(flood)[0]
-        .link()
-        .and_then(|l| l.split("#verify=").nth(1).map(str::to_string))
-        .unwrap();
-    server
-        .admin(&["admin", "user-disable", "--email", flood])
-        .unwrap_or_else(|e| panic!("user-disable: {e}"));
-    let (st, out) = Browser::new(&server).req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 401, "{out}");
-    assert!(server.healthy());
-}
-
-/// Asking for another confirmation link, and what a disabled account is
-/// and is not offered.
-#[test]
-fn a_second_confirmation_link_replaces_the_first_and_a_disabled_account_gets_neither() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("mail-resend");
-    let scratch = Scratch::new("mail-resend");
-    let mailbox = Mailbox::temp("resend-e2e");
-    let server = spawn(&bucket.base_url, &scratch, "mail-resend", Some(&mailbox));
-
-    let mut anon = Browser::new(&server);
-    assert_eq!(
-        anon.req(
-            "POST",
-            "/v1/auth/signup",
-            Some(serde_json::json!({
-                "email": "again@example.test", "name": "Again",
-                "password": PASSWORD, "handle": "again",
-            })),
-        )
-        .0,
-        202
-    );
-    let first = mailbox
-        .wait_for("again@example.test", SOON)
-        .link()
-        .and_then(|l| l.split("#verify=").nth(1).map(str::to_string))
-        .unwrap();
-
-    // "Send it again" does send again — and kills the first link. Anyone
-    // who asks for a new one has told you they no longer trust the old.
-    assert_eq!(
-        anon.req(
-            "POST",
-            "/v1/auth/resend-verification",
-            Some(serde_json::json!({ "email": "AGAIN@example.test" })),
-        )
-        .0,
-        202
-    );
-    let sent = mailbox.to("again@example.test");
-    assert_eq!(sent.len(), 2, "{sent:?}");
-    let second = sent[1]
-        .link()
-        .and_then(|l| l.split("#verify=").nth(1).map(str::to_string))
-        .unwrap();
-    assert_ne!(first, second);
-    assert_eq!(
-        Browser::new(&server)
-            .req(
-                "POST",
-                "/v1/auth/verify",
-                Some(serde_json::json!({ "token": first })),
-            )
-            .0,
-        404,
-        "the superseded link still worked"
-    );
-    assert_eq!(
-        Browser::new(&server)
-            .req(
-                "POST",
-                "/v1/auth/verify",
-                Some(serde_json::json!({ "token": second })),
-            )
-            .0,
-        200
+    assert!(
+        sent.iter().all(|m| m.subject == "Reset your Weft password"),
+        "{sent:?}"
     );
 
-    // Already confirmed: nothing more to send, and the caller cannot
-    // tell that from an address with no account at all.
-    assert_eq!(
-        anon.req(
-            "POST",
-            "/v1/auth/resend-verification",
-            Some(serde_json::json!({ "email": "again@example.test" })),
-        )
-        .0,
-        202
-    );
-    assert_eq!(mailbox.to("again@example.test").len(), 2, "sent a third");
-
-    // A disabled account is offered neither a confirmation link nor a
-    // reset link: recovering an account an operator switched off would
-    // undo the switching off.
-    server
-        .admin(&["admin", "user-disable", "--email", "again@example.test"])
-        .unwrap_or_else(|e| panic!("user-disable: {e}"));
-    for path in ["/v1/auth/resend-verification", "/v1/auth/forgot-password"] {
-        assert_eq!(
-            anon.req(
-                "POST",
-                path,
-                Some(serde_json::json!({ "email": "again@example.test" })),
-            )
-            .0,
-            202,
-            "{path}"
-        );
-    }
-    assert_eq!(
-        mailbox.to("again@example.test").len(),
-        2,
-        "a disabled account was mailed a link: {:?}",
-        mailbox.to("again@example.test")
-    );
     assert!(server.healthy());
 }
 
@@ -995,51 +612,6 @@ fn a_reset_link_stops_working_if_the_account_is_switched_off_first() {
     assert!(server.healthy());
 }
 
-/// A mail transport that is down must not take signup with it. The
-/// account is made, the link exists, and the failure is the operator's
-/// problem to see in the log — not the caller's to be told about, since
-/// telling them would say whether an address is registered.
-#[test]
-fn a_broken_transport_does_not_break_signup() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("mail-signup-broken");
-    let scratch = Scratch::new("mail-signup-broken");
-    let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
-        .db_hint("mail-signup-broken")
-        .data_dir(scratch.path().join("data"))
-        .env("STRATUM_PUBLIC_URL", "http://stratum.test:9999")
-        .env("STRATUM_MAIL_TRANSPORT", "smtp")
-        .env("STRATUM_MAIL_FROM", "no-reply@stratum.test")
-        .env("STRATUM_MAIL_SMTP_HOST", "127.0.0.1:0")
-        .start();
-
-    let mut anon = Browser::new(&server);
-    let (st, out) = anon.req(
-        "POST",
-        "/v1/auth/signup",
-        Some(serde_json::json!({
-            "email": "quiet@example.test", "name": "Quiet",
-            "password": PASSWORD, "handle": "quiet",
-        })),
-    );
-    assert_eq!(st, 202, "{out}");
-    // The account and its namespace exist; only the message did not go.
-    let mut person = Browser::signed_in(&server, "quiet@example.test", PASSWORD);
-    assert_eq!(person.req("GET", "/v1/orgs/quiet/repos", None).0, 200);
-    // Still unconfirmed, so still walled off from creating.
-    assert_eq!(
-        person
-            .req(
-                "POST",
-                "/v1/orgs/quiet/repos",
-                Some(serde_json::json!({ "name": "nope" })),
-            )
-            .0,
-        403
-    );
-    assert!(server.healthy());
-}
-
 /// The other half of the rate limit: a script walking an address list.
 ///
 /// The per-address limit does nothing about that — every address is
@@ -1052,45 +624,44 @@ fn a_global_limit_stops_the_server_being_used_as_a_relay() {
     let scratch = Scratch::new("mail-global");
     let mailbox = Mailbox::temp("global-e2e");
     let server = spawn(&bucket.base_url, &scratch, "mail-global", Some(&mailbox));
+    org_with_owner(&server, "acme", "genuine@acme.test");
 
     // Walk a list of addresses that have no account. Each one is a fresh
     // address, so the per-address limit never fires; each costs a lookup
     // and nothing else, which is exactly what a relay abuser would do.
     let mut anon = Browser::new(&server);
+    let mut first = None;
     for i in 0..60 {
         let (st, out) = anon.req(
             "POST",
-            "/v1/auth/resend-verification",
+            "/v1/auth/forgot-password",
             Some(serde_json::json!({ "email": format!("walk-{i}@example.test") })),
         );
         assert_eq!(st, 202, "attempt {i}: {out}");
+        first.get_or_insert(out);
     }
     assert!(mailbox.all().is_empty(), "unknown addresses were mailed");
 
-    // Past the global limit, a genuine signup is refused — silently, and
-    // with the same body as a success, because "you personally are fine
-    // but the server is busy" is still a difference somebody can read.
+    // Past the global limit, a genuine account's request is refused —
+    // silently, and with the same body as a success, because "you
+    // personally are fine but the server is busy" is still a difference
+    // somebody can read.
     let (st, out) = anon.req(
         "POST",
-        "/v1/auth/signup",
-        Some(serde_json::json!({
-            "email": "genuine@example.test", "name": "Genuine",
-            "password": PASSWORD, "handle": "genuine",
-        })),
+        "/v1/auth/forgot-password",
+        Some(serde_json::json!({ "email": "genuine@acme.test" })),
     );
     assert_eq!(st, 202, "{out}");
-    assert!(mailbox.all().is_empty(), "{:?}", mailbox.all());
-    // Nothing was created either: the limit is before the account, not
-    // after it, so a refused signup leaves no half-made namespace.
-    assert_eq!(
-        Browser::new(&server)
-            .req("GET", "/v1/orgs/genuine/repos", None)
-            .0,
-        404
+    assert_eq!(Some(&out), first.as_ref(), "the limit answered differently");
+    assert!(
+        mailbox.all().is_empty(),
+        "the global limit let a message through: {:?}",
+        mailbox.all()
     );
+    // The limit is on mail, not on the account: its password still works.
     assert_eq!(
-        Browser::new(&server).login("genuine@example.test", PASSWORD),
-        401
+        Browser::new(&server).login("genuine@acme.test", PASSWORD),
+        200
     );
     assert!(server.healthy(), "still serving after 61 attempts");
 }

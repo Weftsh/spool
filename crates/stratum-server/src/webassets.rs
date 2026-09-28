@@ -6,7 +6,7 @@
 
 use crate::app::SharedState;
 use axum::extract::State;
-use axum::http::{header, StatusCode, Uri};
+use axum::http::{header, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 use std::path::{Path, PathBuf};
 
@@ -117,12 +117,20 @@ async fn serve_from(root: &Path, url_path: &str, spa_fallback: bool) -> Response
 /// The git wire needs no special handling and gets none: `/:org/:repo/
 /// info/refs`, `git-upload-pack` and `git-receive-pack` are real routes
 /// registered in `app::router`, so matchit answers them before anything
-/// reaches the fallback. Nor is there any sniffing of `Accept` or the
-/// method to tell a browser from a git client — the fallback is
-/// registered `get(fallback)`, and by the time a request is here it has
+/// reaches the fallback. Nor is there any sniffing of `Accept` to tell a
+/// browser from a git client: by the time a request is here it has
 /// already failed to be a git request by its *path*, which is a fact
 /// about the URL rather than a guess about the client.
-pub async fn fallback(State(state): State<SharedState>, uri: Uri) -> Response {
+///
+/// Anything but a read is 404: nothing lives at a path no route claimed.
+/// It used to be registered `get(fallback)`, which made axum answer
+/// every other method with 405 — so `POST /v1/auth/signup`, a door that
+/// was taken out, answered "wrong method" as if the door were still
+/// there.
+pub async fn fallback(State(state): State<SharedState>, method: Method, uri: Uri) -> Response {
+    if method != Method::GET && method != Method::HEAD {
+        return StatusCode::NOT_FOUND.into_response();
+    }
     if uri.path() == "/" && state.dashboard_dir.is_some() {
         return axum::response::Redirect::to("/dashboard/").into_response();
     }
@@ -142,28 +150,21 @@ const SPA_SEGMENTS: &[&str] = &["issues", "login", "notifications", "orgs", "sea
 
 /// The dashboard shell for a forge URL, or 404.
 ///
-/// Three gates, in ascending cost, and the last one is a judgement call
-/// worth stating. A name that is ill-formed or reserved is settled
-/// without touching Postgres, which is what keeps scanner noise
-/// (`/.env`, `/wp-login.php`) off the control plane. Only a name that
-/// could actually be somebody's is looked up.
+/// A name that is ill-formed or reserved is settled without touching
+/// Postgres, which keeps scanner noise (`/.env`, `/wp-login.php`) off
+/// the control plane. Every other name gets the shell, whether or not a
+/// namespace holds it — and must.
 ///
-/// The lookup is deliberate rather than avoided. Gating on shape alone
-/// would answer `200` with an SPA shell for *every* well-formed unknown
-/// name, so every typo and every crawler probe becomes a soft 404 that
-/// search engines index and a person cannot tell from a real profile.
-/// One indexed lookup by name, on a request that already missed every
-/// route and the entire site build, is less work than the route it would
-/// otherwise have hit — and it leaks nothing, because namespace
-/// existence is enumerable through signup already: taking a name that is
-/// in use is refused by name.
-///
-/// The *repo* is not looked up, and must not be. Repo existence is
-/// masked (401 anonymous / 404 authenticated-without-access) by
-/// `app::repo_or_masked`, and a 404 here for a private repo the viewer
-/// can actually read would break the masking in the other direction.
-/// The shell is content-free; the SPA's own API call gets the masking
-/// exactly as it stands.
+/// It used to look the name up and answer 404 for one nobody holds,
+/// on the grounds that sign-up already told anyone which names were
+/// taken. Sign-up is gone, and the lookup was then the one door on the
+/// server that told a signed-out stranger which organizations exist —
+/// and, since a personal namespace is its owner's handle, who works
+/// here. The shell is content-free: whatever it shows comes from the
+/// SPA's own API calls, and those are masked (401 to nobody, 404 to
+/// somebody with no role) exactly as a missing namespace is, by
+/// `app::org_or_masked` and `app::repo_or_masked`. Nothing on this
+/// server is public, so a soft 404 costs no search index anything.
 async fn forge_spa(state: &crate::app::AppState, path: &str) -> Response {
     let Some(root) = &state.dashboard_dir else {
         // API-only deployment: nothing to serve, 404 as before.
@@ -181,27 +182,15 @@ async fn forge_spa(state: &crate::app::AppState, path: &str) -> Response {
     // loaded, so the header's search box led nowhere. Reserving a name
     // for a page and then refusing to serve that page is the kind of
     // thing only opening it in a browser finds.
-    if SPA_SEGMENTS.contains(&owner) {
-        return match serve_file(root.join("index.html")).await {
-            Some(r) => r,
-            None => StatusCode::NOT_FOUND.into_response(),
-        };
-    }
-    if !stratum_control::registry::valid_name(owner)
-        || stratum_control::registry::is_reserved(owner)
-    {
+    let servable = SPA_SEGMENTS.contains(&owner)
+        || (stratum_control::registry::valid_name(owner)
+            && !stratum_control::registry::is_reserved(owner));
+    if !servable {
         return StatusCode::NOT_FOUND.into_response();
     }
-    // A control-plane failure lands in the same arm as "no such
-    // namespace" on purpose: this function's only job is to choose
-    // between a 404 and the SPA, and if we cannot establish that the
-    // name is a namespace, the 404 is the honest answer.
-    match stratum_control::registry::org_by_name(&state.db, owner) {
-        Ok(Some(_)) => match serve_file(root.join("index.html")).await {
-            Some(r) => r,
-            None => StatusCode::NOT_FOUND.into_response(),
-        },
-        _ => StatusCode::NOT_FOUND.into_response(),
+    match serve_file(root.join("index.html")).await {
+        Some(r) => r,
+        None => StatusCode::NOT_FOUND.into_response(),
     }
 }
 

@@ -25,13 +25,10 @@
 use std::time::{Duration, Instant};
 use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::{self, Scratch};
-use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
 
-const PASSWORD: &str = "a long enough password";
-
-fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Server {
-    let mut b = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
+fn spawn(store_url: &str, scratch: &Scratch, hint: &str) -> Server {
+    Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"))
         // The contribution walker, so a landed change can be followed
@@ -41,61 +38,8 @@ fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Serv
         // A runner's claim is a long poll; shortened so "nothing for
         // you" is a fast 204 rather than twenty seconds of test.
         .env("STRATUM_RUNNER_POLL_SECS", "1")
-        .env("STRATUM_RUNNER_CLAIM_WAIT_MS", "700");
-    for (k, v) in mail.env() {
-        b = b.env(k, v);
-    }
-    b.start()
-}
-
-fn urldecode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v as char);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn mailed_token(mail: &Mailbox, address: &str, key: &str) -> String {
-    let msg = mail.wait_for(address, std::time::Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let marker = format!("#{key}=");
-    let raw = link
-        .split_once(&marker)
-        .unwrap_or_else(|| panic!("{link} carries no #{key}="))
-        .1;
-    urldecode(raw)
-}
-
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle, "email": email, "name": handle, "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let token = mailed_token(mail, email, "verify");
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
+        .env("STRATUM_RUNNER_CLAIM_WAIT_MS", "700")
+        .start()
 }
 
 /// An organization owned by the person signed in to `owner`.
@@ -129,11 +73,11 @@ fn seeded_repo(owner: &mut Browser, org: &str, name: &str) {
 
 /// ada, who owns `acme` and its seeded `widget`, and bob, a *viewer* of
 /// acme: he may read `widget` and may not push to it.
-fn acme_with_a_viewer<'a>(server: &'a Server, mail: &Mailbox) -> (Browser<'a>, Browser<'a>) {
-    let mut ada = signup(server, mail, "ada", "ada@example.com");
+fn acme_with_a_viewer<'a>(server: &'a Server) -> (Browser<'a>, Browser<'a>) {
+    let mut ada = Browser::stranger(server, "ada", "ada@example.com");
     create_org(&mut ada, "acme");
     seeded_repo(&mut ada, "acme", "widget");
-    let bob = signup(server, mail, "bob", "bob@example.com");
+    let bob = Browser::stranger(server, "bob", "bob@example.com");
     ada.invite_and_accept("acme", "bob@example.com", "viewer");
     (ada, bob)
 }
@@ -205,10 +149,9 @@ fn a_reader_forks_pushes_and_opens_a_change_against_a_repo_they_cannot_write() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-open");
     let scratch = Scratch::new("forkpr-open");
-    let mail = Mailbox::temp("forkpr-open");
-    let server = spawn(&bucket.base_url, &scratch, "forkpr_open", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_open");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
 
     // Bob holds a viewer's role in acme and no grant on the repository.
     // He may read it, and that is all — the server says so itself.
@@ -220,7 +163,7 @@ fn a_reader_forks_pushes_and_opens_a_change_against_a_repo_they_cannot_write() {
     // Somebody with no role in acme is told nothing: the repository, its
     // forks and its changes answer as a missing name does, and a caller
     // who is not signed in is told to sign in.
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
     for path in [
         "/v1/orgs/acme/repos/widget",
         "/v1/orgs/acme/repos/widget/forks",
@@ -296,10 +239,9 @@ fn a_forker_reads_upstream_with_a_token_from_its_org_and_is_told_to_fork_on_push
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-wire");
     let scratch = Scratch::new("forkpr-wire");
-    let mail = Mailbox::temp("forkpr-wire");
-    let server = spawn(&bucket.base_url, &scratch, "forkpr_wire", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_wire");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     // An organization bob has no role in, with a repository in it.
     create_org(&mut ada, "globex");
     seeded_repo(&mut ada, "globex", "vault");
@@ -413,10 +355,9 @@ fn proposing_from_the_target_itself_still_needs_write_access() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-nosource");
     let scratch = Scratch::new("forkpr-nosource");
-    let mail = Mailbox::temp("forkpr-nosource");
-    let server = spawn(&bucket.base_url, &scratch, "forkpr_nosource", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_nosource");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
 
     let (st, refused) = bob.req(
         "POST",
@@ -437,7 +378,7 @@ fn proposing_from_the_target_itself_still_needs_write_access() {
 
     // A person with no role at all gets no sentence: the repository is
     // not there for them, as a missing one is not.
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
     let (st, _) = carl.req(
         "POST",
         "/v1/orgs/acme/repos/widget/changes",
@@ -472,10 +413,9 @@ fn a_source_must_be_a_readable_fork_of_this_repository() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-source");
     let scratch = Scratch::new("forkpr-source");
-    let mail = Mailbox::temp("forkpr-source");
-    let server = spawn(&bucket.base_url, &scratch, "forkpr_source", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_source");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     seeded_repo(&mut ada, "acme", "other");
 
     // A bare name, which is ambiguous between a repo and a namespace.
@@ -509,7 +449,7 @@ fn a_source_must_be_a_readable_fork_of_this_repository() {
     // with a reason — 404 and never 403, because a 403 would confirm it
     // exists. carl's own repository is one bob has no role anywhere near,
     // and it answers exactly as a name nobody took.
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
     seeded_repo(&mut carl, "carl", "secret");
     for source in ["carl/secret", "carl/no-such"] {
         let (st, masked) = bob.req(
@@ -556,10 +496,9 @@ fn a_change_from_a_fork_lands_and_the_clone_is_still_sound() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-land");
     let scratch = Scratch::new("forkpr-land");
-    let mail = Mailbox::temp("forkpr-land");
-    let server = spawn(&bucket.base_url, &scratch, "forkpr_land", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_land");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
     let contributed = contribute(&mut bob, &[("src/config.rs", "// defaults\n")]);
 
     let (st, opened) = bob.req(
@@ -676,12 +615,12 @@ fn a_change_landed_from_a_fork_credits_the_contributor_and_not_the_maintainer() 
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-credit");
     let scratch = Scratch::new("forkpr-credit");
-    let mail = Mailbox::temp("forkpr-credit");
-    let server = spawn(&bucket.base_url, &scratch, "forkpr_credit", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_credit");
 
-    // Signup proves the address, which is what makes a commit count for
-    // a person rather than for an address nobody owns.
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    // Every account's address is proved when the account is made, which
+    // is what makes a commit count for a person rather than for an
+    // address nobody owns.
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
 
     // ada's own seed commit is hers, and bob has nothing yet. Taken
     // before anything else happens, so the assertions below are about
@@ -754,7 +693,7 @@ fn a_change_landed_from_a_fork_credits_the_contributor_and_not_the_maintainer() 
     // And the rail is exactly as private as the repository: a person
     // with no role in acme is told it is not there, and nobody signed in
     // is told to sign in.
-    let mut carl = signup(&server, &mail, "carl", "carl@example.com");
+    let mut carl = Browser::stranger(&server, "carl", "carl@example.com");
     let (st, _) = carl.req("GET", "/v1/orgs/acme/repos/widget/contributors", None);
     assert_eq!(st, 404, "a non-member read who contributes to acme");
     let (st, _) = server.req("GET", "/v1/orgs/acme/repos/widget/contributors", "", None);
@@ -838,10 +777,9 @@ fn a_change_from_a_fork_is_held_for_a_maintainer_before_it_reaches_a_machine() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forkpr-gate");
     let scratch = Scratch::new("forkpr-gate");
-    let mail = Mailbox::temp("forkpr-gate");
-    let server = spawn(&bucket.base_url, &scratch, "forkpr_gate", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "forkpr_gate");
 
-    let (mut ada, mut bob) = acme_with_a_viewer(&server, &mail);
+    let (mut ada, mut bob) = acme_with_a_viewer(&server);
 
     // acme's machine, in the default group, which admits every
     // repository — so the only thing that can hold bob's change is the

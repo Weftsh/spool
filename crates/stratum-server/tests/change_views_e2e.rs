@@ -7,7 +7,6 @@
 use std::time::Duration;
 use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::Scratch;
-use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
 
 const PASSWORD: &str = "a long enough password";
@@ -131,40 +130,6 @@ fn register(server: &Server, token: &str) {
         Some(serde_json::json!({"from": "feature"})),
     );
     assert_eq!(st, 201, "register change: {out}");
-}
-
-/// Sign somebody up the way a stranger arrives: an address, a mailed
-/// link, and a personal namespace of their own. Deliberately not
-/// `admin user-create`, which makes org members — the whole point of the
-/// fork path is somebody who is *not* one.
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let msg = mail.wait_for(email, Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let token = link
-        .split_once("#verify=")
-        .unwrap_or_else(|| panic!("{link} carries no #verify="))
-        .1
-        .to_string();
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
 }
 
 /// Wait for the fork worker, then report the state it reached.
@@ -571,17 +536,14 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     let minio = Minio::shared();
     let bucket = minio.bucket("views-fork");
     let scratch = Scratch::new("views-fork");
-    let mail = Mailbox::temp("views-fork");
-    let mut b = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
+    let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .data_dir(scratch.path().join("data"))
-        .db_hint("change-views-fork");
-    for (k, v) in mail.env() {
-        b = b.env(k, v);
-    }
-    let server = b.env("STRATUM_FORK_POLL_SECS", "1").start();
+        .db_hint("change-views-fork")
+        .env("STRATUM_FORK_POLL_SECS", "1")
+        .start();
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
+    let mut bob = Browser::stranger(&server, "bob", "bob@example.com");
 
     // Ada's project, in an organisation — a personal namespace has no
     // members, and somebody else has to be able to read it to fork it —
@@ -812,7 +774,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     // outside the organisation, gets the answer a missing repository
     // gets: the change is not theirs, and the door does not say why.
     let abandon = "/v1/orgs/acme/repos/app/changes/I0000f00d/abandon";
-    let mut cam = signup(&server, &mail, "cam", "cam@example.com");
+    let mut cam = Browser::stranger(&server, "cam", "cam@example.com");
     let (st, body) = cam.req("POST", abandon, None);
     assert_eq!(
         st, 404,

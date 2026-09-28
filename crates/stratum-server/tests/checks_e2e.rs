@@ -37,80 +37,13 @@ use stratum_control::registry;
 use stratum_control::ControlDb;
 use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::Scratch;
-use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
 
-const PASSWORD: &str = "a long enough password";
-
-fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Server {
-    let mut b = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
+fn spawn(store_url: &str, scratch: &Scratch, hint: &str) -> Server {
+    Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
         .db_hint(hint)
-        .data_dir(scratch.path().join("data"));
-    for (k, v) in mail.env() {
-        b = b.env(k, v);
-    }
-    b.start()
-}
-
-fn urldecode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        match b[i] {
-            b'%' if i + 2 < b.len() => {
-                if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                    out.push(v as char);
-                    i += 3;
-                    continue;
-                }
-                out.push('%');
-                i += 1;
-            }
-            c => {
-                out.push(c as char);
-                i += 1;
-            }
-        }
-    }
-    out
-}
-
-fn mailed_token(mail: &Mailbox, address: &str, key: &str) -> String {
-    let msg = mail.wait_for(address, Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let marker = format!("#{key}=");
-    let raw = link
-        .split_once(&marker)
-        .unwrap_or_else(|| panic!("{link} carries no #{key}="))
-        .1;
-    urldecode(raw)
-}
-
-/// Sign somebody up through the product's own flow and hand back a
-/// browser holding their session.
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let token = mailed_token(mail, email, "verify");
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
+        .data_dir(scratch.path().join("data"))
+        .start()
 }
 
 fn make_repo(b: &mut Browser, org: &str, name: &str) {
@@ -244,12 +177,11 @@ fn a_member_reads_the_runs_newest_first_and_a_stranger_learns_nothing() {
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-read");
     let scratch = Scratch::new("checks-read");
-    let mail = Mailbox::temp("checks-read");
-    let server = spawn(&bucket.base_url, &scratch, "checks_read", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "checks_read");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
-    let mut cam = signup(&server, &mail, "cam", "cam@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
+    let mut bob = Browser::stranger(&server, "bob", "bob@example.com");
+    let mut cam = Browser::stranger(&server, "cam", "cam@example.com");
     // A personal namespace has no members, so a repository somebody
     // else can read lives in an organisation.
     let (st, body) = ada.req(
@@ -398,10 +330,9 @@ fn a_private_repositorys_runs_answer_a_stranger_as_a_missing_one_does() {
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-mask");
     let scratch = Scratch::new("checks-mask");
-    let mail = Mailbox::temp("checks-mask");
-    let server = spawn(&bucket.base_url, &scratch, "checks_mask", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "checks_mask");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     make_repo(&mut ada, "ada", "ledger");
 
     let db = ctl(&server);
@@ -426,7 +357,7 @@ fn a_private_repositorys_runs_answer_a_stranger_as_a_missing_one_does() {
     // Two strangers: anonymous, and Bob — signed in, with a token of his
     // own, and no role in Ada's namespace. Anonymous is refused before
     // anything is looked up, so it is Bob who actually tests the mask.
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut bob = Browser::stranger(&server, "bob", "bob@example.com");
     let bob_token = reader_token(&mut bob, "bob");
     for (path, missing) in [
         (
@@ -499,10 +430,9 @@ fn every_filter_narrows_and_the_cursor_pages_without_skipping_or_repeating() {
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-filter");
     let scratch = Scratch::new("checks-filter");
-    let mail = Mailbox::temp("checks-filter");
-    let server = spawn(&bucket.base_url, &scratch, "checks_filter", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "checks_filter");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     make_repo(&mut ada, "ada", "widget");
     let reader = reader_token(&mut ada, "ada");
 
@@ -644,10 +574,9 @@ fn a_filter_value_nobody_meant_is_refused_by_name() {
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-bad");
     let scratch = Scratch::new("checks-bad");
-    let mail = Mailbox::temp("checks-bad");
-    let server = spawn(&bucket.base_url, &scratch, "checks_bad", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "checks_bad");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     make_repo(&mut ada, "ada", "widget");
     let reader = reader_token(&mut ada, "ada");
 
@@ -723,10 +652,9 @@ fn a_run_in_another_repository_is_not_readable_through_this_ones_path() {
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-cross");
     let scratch = Scratch::new("checks-cross");
-    let mail = Mailbox::temp("checks-cross");
-    let server = spawn(&bucket.base_url, &scratch, "checks_cross", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "checks_cross");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     make_repo(&mut ada, "ada", "widget");
     make_repo(&mut ada, "ada", "other");
     let reader = reader_token(&mut ada, "ada");
@@ -808,10 +736,9 @@ fn the_commit_view_shows_the_newest_verdict_per_workflow_not_every_run() {
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-commit");
     let scratch = Scratch::new("checks-commit");
-    let mail = Mailbox::temp("checks-commit");
-    let server = spawn(&bucket.base_url, &scratch, "checks_commit", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "checks_commit");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     make_repo(&mut ada, "ada", "widget");
     make_repo(&mut ada, "ada", "other");
     let reader = reader_token(&mut ada, "ada");
@@ -982,10 +909,9 @@ fn a_private_repositorys_commit_checks_answer_a_stranger_as_a_missing_one_does()
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-commit-mask");
     let scratch = Scratch::new("checks-commit-mask");
-    let mail = Mailbox::temp("checks-commit-mask");
-    let server = spawn(&bucket.base_url, &scratch, "checks_commit_mask", &mail);
+    let server = spawn(&bucket.base_url, &scratch, "checks_commit_mask");
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     make_repo(&mut ada, "ada", "ledger");
 
     let db = ctl(&server);
@@ -1007,7 +933,7 @@ fn a_private_repositorys_commit_checks_answer_a_stranger_as_a_missing_one_does()
 
     // Anonymous, and Bob — signed in, with a token of his own, and no
     // role in Ada's namespace.
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut bob = Browser::stranger(&server, "bob", "bob@example.com");
     let bob_token = reader_token(&mut bob, "bob");
     let path = format!("/v1/orgs/ada/repos/ledger/commits/{sha}/checks");
     let missing = format!("/v1/orgs/ada/repos/no-such-repo/commits/{sha}/checks");

@@ -62,36 +62,6 @@ fn mailed_token(mail: &Mailbox, address: &str, key: &str) -> String {
     urldecode(raw)
 }
 
-/// Sign somebody up the way the product does — through the form and the
-/// confirmation link — and hand back a browser holding their session.
-///
-/// The real flow rather than the admin CLI, because `admin user-create`
-/// attaches a person to an *org*, and a profile lives on a **personal
-/// namespace**. Using the shortcut would have tested a shape nobody has.
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": "a long enough password",
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let token = mailed_token(mail, email, "verify");
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
-}
-
 fn make_repo(b: &mut Browser, org: &str, name: &str) {
     let (st, body) = b.req(
         "POST",
@@ -119,9 +89,9 @@ fn a_profile_is_read_by_anybody_signed_in_and_reads_back_what_its_owner_wrote() 
     let scratch = Scratch::new("profiles-happy");
     let mail = Mailbox::temp("profiles-happy");
     let server = spawn(&bucket.base_url, &scratch, "profiles-happy", &mail);
-    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.test");
     // Somebody else on the server, who belongs to nothing of Ada's.
-    let mut bea = signup(&server, &mail, "bea", "bea@example.test");
+    let mut bea = Browser::stranger(&server, "bea", "bea@example.test");
 
     // Nobody reads a profile anonymously, and the refusal is the same
     // for a handle nobody has — it comes before the handle is looked up.
@@ -239,10 +209,11 @@ fn every_self_only_route_refuses_a_stranger_and_an_anonymous_caller() {
     let scratch = Scratch::new("profiles-self");
     let mail = Mailbox::temp("profiles-self");
     let server = spawn(&bucket.base_url, &scratch, "profiles-self", &mail);
-    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
-    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.test");
+    let mut mallory = Browser::stranger(&server, "mallory", "mallory@example.test");
 
-    // Ada has an address on file — the one she signed up with.
+    // Ada has an address on file — the one her account was made with,
+    // proved on the way in.
     let (st, body) = ada.req("GET", "/v1/users/ada/emails", None);
     assert_eq!(st, 200, "{body}");
     let mine = body["emails"].as_array().unwrap();
@@ -317,9 +288,10 @@ fn every_self_only_route_refuses_a_stranger_and_an_anonymous_caller() {
 
     // A handle nobody has is a 404 on every self-only route, before
     // authority is even considered — the same 404 signed in or not. A
-    // handle is not a secret: signup refuses a taken one by name. The
-    // profile itself is read only by somebody signed in, who gets the
-    // same 404; anonymous is told to sign in first, whatever the handle.
+    // handle is not a secret: accepting an invitation refuses a taken
+    // one by name. The profile itself is read only by somebody signed
+    // in, who gets the same 404; anonymous is told to sign in first,
+    // whatever the handle.
     assert_eq!(anon(&server, "/v1/users/nobody/emails").0, 404);
     assert_eq!(mallory.req("GET", "/v1/users/nobody/emails", None).0, 404);
     assert_eq!(mallory.req("GET", "/v1/users/nobody", None).0, 404);
@@ -373,8 +345,8 @@ fn an_address_is_claimed_proved_and_never_attributed_to_a_stranger() {
     let scratch = Scratch::new("profiles-mail");
     let mail = Mailbox::temp("profiles-mail");
     let server = spawn(&bucket.base_url, &scratch, "profiles-mail", &mail);
-    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
-    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.test");
+    let mut mallory = Browser::stranger(&server, "mallory", "mallory@example.test");
 
     // Claiming mails a link and does not put it in the response — a
     // claim confirmed over the API would prove nothing at all.
@@ -465,11 +437,14 @@ fn an_address_is_claimed_proved_and_never_attributed_to_a_stranger() {
     );
     assert_eq!(st, 409, "{out}");
     assert!(!out.to_string().contains("ada@example.test"), "{out}");
-    // No mail was sent to a mailbox Mallory does not own.
+    // No mail was sent to a mailbox Mallory does not own. Ada's account
+    // was made by an operator, so nothing has ever been mailed there and
+    // any message at all is the refused claim's.
     assert_eq!(
         mail.to("ada@example.test").len(),
-        1,
-        "a failed claim mailed the address's real owner"
+        0,
+        "a failed claim mailed the address's real owner: {:?}",
+        mail.to("ada@example.test")
     );
 
     // Adding your own again is a conflict too, and mints no second link.
@@ -537,8 +512,8 @@ fn a_private_repository_never_reaches_a_profile() {
     let scratch = Scratch::new("profiles-private");
     let mail = Mailbox::temp("profiles-private");
     let server = spawn(&bucket.base_url, &scratch, "profiles-private", &mail);
-    let mut ada = signup(&server, &mail, "ada", "ada@example.test");
-    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.test");
+    let mut mallory = Browser::stranger(&server, "mallory", "mallory@example.test");
 
     make_repo(&mut ada, "ada", "secret");
     let (st, body) = mallory.req("GET", "/v1/users/ada", None);
@@ -593,17 +568,25 @@ fn a_private_repository_never_reaches_a_profile() {
     assert!(server.healthy());
 }
 
-/// An org's profile: anybody signed in reads, only an administrator
-/// writes, and nobody reads it anonymously.
+/// An org's profile: its members read it, by session or by token; only
+/// an administrator writes it; and to anybody outside it — signed out,
+/// or signed in to another organization — it answers exactly as an
+/// organization that does not exist.
+///
+/// It used to be readable by anybody signed in at all, which made it the
+/// one door where a person from elsewhere could tell a real organization
+/// (200) from a name nobody holds (404), and it refused a token minted
+/// in the organization as "not signed in".
 #[test]
-fn an_org_profile_is_read_by_anybody_signed_in_and_written_by_an_admin() {
+fn an_org_profile_is_read_by_its_members_and_written_by_an_admin() {
     let minio = Minio::shared();
     let bucket = minio.bucket("profiles-org");
     let scratch = Scratch::new("profiles-org");
     let mail = Mailbox::temp("profiles-org");
     let server = spawn(&bucket.base_url, &scratch, "profiles-org", &mail);
     let admin = server.bootstrap_org("acme");
-    let mut mallory = signup(&server, &mail, "mallory", "mallory@example.test");
+    let mut vera = Browser::person(&server, "acme", "viewer", "vera", "vera@acme.test");
+    let mut mallory = Browser::stranger(&server, "mallory", "mallory@example.test");
 
     // Anonymous is told to sign in, for an org that exists and one that
     // does not.
@@ -611,14 +594,22 @@ fn an_org_profile_is_read_by_anybody_signed_in_and_written_by_an_admin() {
         let (st, body) = anon(&server, &format!("/v1/orgs/{org}/profile"));
         assert_eq!(st, 401, "{org}: {body}");
     }
+    // Somebody from another organization is told what a missing
+    // organization tells them, word for word.
+    let outside = mallory.req("GET", "/v1/orgs/acme/profile", None);
+    let missing = mallory.req("GET", "/v1/orgs/nobody/profile", None);
+    assert_eq!(outside, missing);
+    assert_eq!(outside.0, 404, "{}", outside.1);
 
-    // Empty and present before anybody edits it — to somebody signed in
-    // who belongs to nothing here.
-    let (st, body) = mallory.req("GET", "/v1/orgs/acme/profile", None);
+    // Empty and present before anybody edits it — to the least of its
+    // members, and to a token minted in it.
+    let (st, body) = vera.req("GET", "/v1/orgs/acme/profile", None);
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["org"], "acme");
     assert_eq!(body["display_name"], serde_json::Value::Null);
     assert!(body.get("public_repos").is_none(), "{body}");
+    let (st, body) = server.req("GET", "/v1/orgs/acme/profile", &admin, None);
+    assert_eq!(st, 200, "a token minted in the org was refused: {body}");
 
     let (st, body) = server.req(
         "PATCH",
@@ -634,7 +625,7 @@ fn an_org_profile_is_read_by_anybody_signed_in_and_written_by_an_admin() {
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["contact_email"], "hello@acme.example");
 
-    let (_, body) = mallory.req("GET", "/v1/orgs/acme/profile", None);
+    let (_, body) = vera.req("GET", "/v1/orgs/acme/profile", None);
     assert_eq!(body["display_name"], "Acme Corp");
     assert_eq!(body["website"], "https://acme.example");
 
@@ -646,12 +637,12 @@ fn an_org_profile_is_read_by_anybody_signed_in_and_written_by_an_admin() {
         Some(serde_json::json!({ "location": "Bath" })),
     );
     assert_eq!(st, 200);
-    let (_, body) = mallory.req("GET", "/v1/orgs/acme/profile", None);
+    let (_, body) = vera.req("GET", "/v1/orgs/acme/profile", None);
     assert_eq!(body["location"], "Bath");
     assert_eq!(body["display_name"], "Acme Corp");
 
     // Refusals, for the same reason the personal profile makes them:
-    // both render on a page anybody signed in loads.
+    // both render on a page other people load.
     for bad in [
         serde_json::json!({ "website": "javascript:alert(1)" }),
         serde_json::json!({ "contact_email": "not-an-address" }),
@@ -663,7 +654,7 @@ fn an_org_profile_is_read_by_anybody_signed_in_and_written_by_an_admin() {
         assert_eq!(st, 400, "{bad} answered {st}: {out}");
     }
     assert_eq!(
-        mallory.req("GET", "/v1/orgs/acme/profile", None).1["website"],
+        vera.req("GET", "/v1/orgs/acme/profile", None).1["website"],
         "https://acme.example",
         "a refused patch landed anyway"
     );
@@ -687,8 +678,9 @@ fn an_org_profile_is_read_by_anybody_signed_in_and_written_by_an_admin() {
         .0;
     assert_eq!(st, 401, "anonymous write");
     assert_eq!(
-        mallory.req("GET", "/v1/orgs/acme/profile", None).1["display_name"],
-        "Acme Corp"
+        vera.req("GET", "/v1/orgs/acme/profile", None).1["display_name"],
+        "Acme Corp",
+        "a refused write landed anyway"
     );
 
     // An org nobody has — on the write as well as the read, and the

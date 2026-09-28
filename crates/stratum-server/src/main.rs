@@ -81,7 +81,6 @@ async fn async_main() {
 /// Operator commands, deliberately tiny:
 ///   admin bootstrap --org NAME              create org + org:admin token
 ///   admin mint --org NAME --scopes a,b [--repo NAME] [--label L]
-///   admin verify-link --email ADDR          the confirmation link, for a mail that never arrived
 fn admin(args: &[String]) -> Result<(), String> {
     let cmd = args.first().map(String::as_str).unwrap_or("");
     let flag = |name: &str| -> Option<String> {
@@ -166,7 +165,7 @@ fn admin(args: &[String]) -> Result<(), String> {
                 Some(u) => u,
                 None => stratum_control::users::create(&db, &email, &name, Some(&password))?,
             };
-            // A handle and a personal namespace, exactly as signup mints
+            // A handle and a personal namespace, exactly as an invitation mints
             // them — because an account without one is not a whole
             // account, and the halves that are missing do not announce
             // themselves.
@@ -202,13 +201,9 @@ fn admin(args: &[String]) -> Result<(), String> {
             // namespace.
             if user.handle.is_none() {
                 let derived = flag("--handle").unwrap_or_else(|| {
-                    email
-                        .split('@')
-                        .next()
-                        .unwrap_or(&email)
-                        .chars()
-                        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                        .collect()
+                    stratum_control::registry::handle_from(
+                        email.split('@').next().unwrap_or(&email),
+                    )
                 });
                 match stratum_control::registry::create_personal_namespace(
                     &db, &user.id, &derived, None,
@@ -277,14 +272,9 @@ fn admin(args: &[String]) -> Result<(), String> {
             let mut repaired = Vec::new();
             let mut skipped = Vec::new();
             for u in pending {
-                let derived: String = u
-                    .email
-                    .split('@')
-                    .next()
-                    .unwrap_or(&u.email)
-                    .chars()
-                    .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-                    .collect();
+                let derived = stratum_control::registry::handle_from(
+                    u.email.split('@').next().unwrap_or(&u.email),
+                );
                 if dry {
                     repaired.push(serde_json::json!({ "email": u.email, "handle": derived }));
                     continue;
@@ -361,40 +351,9 @@ fn admin(args: &[String]) -> Result<(), String> {
             );
             Ok(())
         }
-        "verify-link" => {
-            // The confirmation link, minted by hand. Sign-up mails one and
-            // stores only the token's hash, so a mail that never arrived
-            // — a provider still in its sandbox, a bounce, a spam filter
-            // — leaves an account that can sign in and do nothing, with
-            // no way to read the link back. This mints a fresh token for
-            // the address and prints exactly the URL the mail would have
-            // carried: the same one-use, 24-hour token, redeemed at the
-            // same route. The operator hands it over; nothing here marks
-            // the address verified by fiat.
-            let email = flag("--email").ok_or("--email ADDRESS required")?;
-            let public_url = flag("--public-url")
-                .or_else(|| std::env::var("STRATUM_PUBLIC_URL").ok())
-                .ok_or("--public-url URL required (or STRATUM_PUBLIC_URL)")?;
-            let user = stratum_control::users::by_email(&db, &email)?
-                .ok_or_else(|| format!("no account for {email:?}"))?;
-            let token = stratum_control::usertokens::issue(
-                &db,
-                &user.id,
-                stratum_control::usertokens::Kind::Verify,
-            )?;
-            println!(
-                "{}",
-                serde_json::json!({
-                    "user": { "id": user.id, "email": user.email },
-                    "already_verified": user.verified_at.is_some(),
-                    "url": mail::templates::verification_url(&public_url, &token),
-                })
-            );
-            Ok(())
-        }
         other => Err(format!(
             "unknown admin command {other:?} (bootstrap | mint | \
-             user-create | user-disable | user-enable | verify-link)"
+             user-create | repair-identities | user-disable | user-enable)"
         )),
     }
 }

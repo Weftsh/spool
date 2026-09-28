@@ -330,19 +330,24 @@ fn the_org_wide_list_shows_exactly_what_the_per_repo_list_would() {
     }
 
     // Another organization's token reads none of it: each repository is
-    // the masked 404 a missing one is, so none of their changes are in
-    // the page. (The page itself is an empty 200, as `GET …/changesets`
-    // answers the same caller.)
+    // the masked 404 a missing one is, and so is the org-wide page — the
+    // same answer a name nobody holds gets. It used to be an empty 200,
+    // which told the caller that `acme` exists.
     let rival = server.bootstrap_org("rival");
     for repo in ["api", "web"] {
         let (st, _) = server.get(&format!("/v1/orgs/acme/repos/{repo}/changes"), &rival);
         assert_eq!(st, 404, "{repo} answered another org's token");
     }
-    let (st, out) = server.get(ORG_CHANGES, &rival);
-    assert_eq!(st, 200, "{out}");
-    assert!(
-        labels(&out).is_empty(),
-        "another org read acme's changes: {out}"
+    let outside = server.get(ORG_CHANGES, &rival);
+    let missing = server.get("/v1/orgs/nobody-holds-this/changes", &rival);
+    assert_eq!(
+        outside, missing,
+        "another org's token told acme from a missing org"
+    );
+    assert_eq!(
+        outside.0, 404,
+        "another org read acme's changes: {}",
+        outside.1
     );
     // A token that does not resolve at all is a 401, never a 404: the
     // caller has to be told their credential is the problem.

@@ -43,6 +43,11 @@ pub struct AcceptInviteBody {
     /// Required only when the invitation is for a new account.
     #[serde(default)]
     pub password: Option<String>,
+    /// The new account's handle — the `you` in `/you/repo`. Optional:
+    /// left out, it is made from the invited address, and it is ignored
+    /// when the invitation is for an account that already has one.
+    #[serde(default)]
+    pub handle: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -57,10 +62,6 @@ fn user_json(user: &User, memberships: &[(String, String, Role)]) -> serde_json:
         "email": user.email,
         "name": user.name,
         "created_at": user.created_at,
-        // The dashboard needs this to say why creating is refused. It is
-        // the signed-in person's own row, so it tells them nothing about
-        // anybody else.
-        "verified_at": user.verified_at,
         // Who this account *is*, publicly.
         //
         // The person-shaped routes are addressed by handle —
@@ -246,14 +247,20 @@ pub async fn accept_invite(
     State(state): State<SharedState>,
     Json(body): Json<AcceptInviteBody>,
 ) -> Response {
+    use stratum_control::invites::AcceptError;
     let accepted = match stratum_control::invites::accept(
         &state.db,
         &body.invite,
         &body.name,
         body.password.as_deref(),
+        body.handle.as_deref(),
     ) {
         Ok(a) => a,
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
+        Err(AcceptError::Refused(e)) => return json_error(StatusCode::BAD_REQUEST, e),
+        // The invitation is untouched: the same link accepts with
+        // another handle.
+        Err(AcceptError::HandleTaken(e)) => return json_error(StatusCode::CONFLICT, e),
+        Err(AcceptError::Failed(e)) => return internal(e),
     };
     let user = match users::by_id(&state.db, &accepted.user_id) {
         Ok(Some(u)) => u,
@@ -329,25 +336,13 @@ pub async fn change_password(
 }
 
 // ---------------------------------------------------------------------
-// Signing yourself up, proving your address, and getting back in.
+// Getting back in.
+//
+// There is no signing yourself up. A person arrives by invitation from
+// somebody already inside, or from an operator's `admin user-create`,
+// and either way their address is proved on arrival: the invitation was
+// mailed to it, and the operator vouched for it.
 // ---------------------------------------------------------------------
-
-#[derive(Deserialize)]
-pub struct SignupBody {
-    pub email: String,
-    pub name: String,
-    pub password: String,
-    /// The personal namespace this account will own — the `you` in
-    /// `/you/repo`. Asked for rather than derived, because a name in
-    /// every clone URL forever should be chosen, not guessed from an
-    /// address.
-    pub handle: String,
-}
-
-#[derive(Deserialize)]
-pub struct TokenBody {
-    pub token: String,
-}
 
 #[derive(Deserialize)]
 pub struct EmailBody {
@@ -378,8 +373,8 @@ const MAIL_WINDOW: Duration = Duration::from_secs(600);
 
 /// Recent address-mailing attempts. Process-local, like the origin
 /// probe's, and honest about it: a fleet of N tasks allows N times this.
-/// What must hold everywhere is that an unproved address cannot create
-/// anything, and that is enforced in the database, not here.
+/// It limits mail, not access — a reset link is worth nothing to anybody
+/// but the holder of the mailbox it went to.
 static RECENT_MAIL: Mutex<Option<Vec<(String, Instant)>>> = Mutex::new(None);
 
 fn allow_mail_to(address: &str) -> bool {
@@ -399,10 +394,10 @@ fn allow_mail_to(address: &str) -> bool {
 
 /// The one answer every address-taking endpoint gives.
 ///
-/// Identical for "we just mailed you", "that address already has an
-/// account", "that address has no account" and "you have asked too many
-/// times". Sign-in already answers this way for the same reason: any
-/// difference here is a way to ask whether somebody has an account.
+/// Identical for "we just mailed you", "that address has no account",
+/// "that account is disabled" and "you have asked too many times".
+/// Sign-in already answers this way for the same reason: any difference
+/// here is a way to ask whether somebody has an account.
 fn mailed_if_it_applies() -> Response {
     (
         StatusCode::ACCEPTED,
@@ -421,174 +416,6 @@ fn send_quietly(state: &SharedState, msg: &crate::mail::Message) {
     if let Err(e) = state.mailer.send(msg) {
         eprintln!("weft: mail to {}: {e}", msg.to);
     }
-}
-
-/// Create an account and its personal namespace.
-///
-/// The namespace is checked *first* and its failures are reported
-/// plainly — a namespace name is a public URL, so "that one is taken" is
-/// not a secret. Everything after it is uniform, because everything
-/// after it is about an email address.
-pub async fn signup(State(state): State<SharedState>, Json(body): Json<SignupBody>) -> Response {
-    let handle = body.handle.trim().to_string();
-    if let Err(e) = stratum_control::registry::valid_namespace_name("handle", &handle) {
-        return json_error(StatusCode::BAD_REQUEST, e);
-    }
-    if stratum_control::registry::org_by_name(&state.db, &handle)
-        .map(|o| o.is_some())
-        .unwrap_or(true)
-    {
-        return json_error(StatusCode::CONFLICT, format!("{handle:?} is already taken"));
-    }
-    // Password strength is the caller's business to satisfy and ours to
-    // state: refusing it here is not an oracle, because it does not
-    // depend on the address.
-    if let Err(e) = users::check_password_strength(&body.password) {
-        return json_error(StatusCode::BAD_REQUEST, e);
-    }
-    let email = users::normalize_email(&body.email);
-    if !users::valid_email(&email) {
-        return json_error(StatusCode::BAD_REQUEST, "invalid email address");
-    }
-    if body.name.trim().is_empty() || body.name.trim().chars().count() > 200 {
-        return json_error(StatusCode::BAD_REQUEST, "name must be 1-200 characters");
-    }
-
-    // From here on the answer is fixed. Every branch below returns the
-    // same body, so none of them can be told apart from outside.
-    if !allow_mail_to(&email) {
-        return mailed_if_it_applies();
-    }
-    match users::by_email(&state.db, &email) {
-        Ok(Some(_)) => {
-            // Somebody typed an address that already has an account.
-            // Nothing is created and nothing is changed — but the person
-            // who owns the mailbox is told, because if it was them they
-            // are stuck otherwise, and if it was not them they should
-            // know somebody is trying.
-            send_quietly(
-                &state,
-                &crate::mail::templates::account_exists(&email, &state.public_url),
-            );
-            return mailed_if_it_applies();
-        }
-        Ok(None) => {}
-        Err(e) => return internal(e),
-    }
-    let user = match users::create(&state.db, &email, &body.name, Some(&body.password)) {
-        Ok(u) => u,
-        // A concurrent signup for the same address won the race. Same
-        // answer as the branch above, for the same reason.
-        Err(e) if stratum_engine::errclass::is_already_exists(&e) => return mailed_if_it_applies(),
-        Err(e) => return json_error(StatusCode::BAD_REQUEST, e),
-    };
-    if let Err(e) =
-        stratum_control::registry::create_personal_namespace(&state.db, &user.id, &handle, None)
-    {
-        // The account exists but has nowhere to put anything. Say so
-        // rather than leaving somebody with a half-made account and a
-        // cheerful "check your email".
-        return internal(format!("create namespace: {e}"));
-    }
-    match stratum_control::usertokens::issue(
-        &state.db,
-        &user.id,
-        stratum_control::usertokens::Kind::Verify,
-    ) {
-        Ok(token) => send_quietly(
-            &state,
-            &crate::mail::templates::verification(&email, &state.public_url, &token),
-        ),
-        Err(e) => return internal(e),
-    }
-    mailed_if_it_applies()
-}
-
-/// Redeem a verification link, and sign the person in.
-///
-/// Somebody who just proved they hold the address has proved as much as
-/// the sign-in form asks for, and sending them to a login screen after
-/// clicking a link from their own inbox is friction with no security
-/// behind it.
-pub async fn verify_email(
-    State(state): State<SharedState>,
-    Json(body): Json<TokenBody>,
-) -> Response {
-    let user_id = match stratum_control::usertokens::redeem(
-        &state.db,
-        &body.token,
-        stratum_control::usertokens::Kind::Verify,
-    ) {
-        Ok(Some(id)) => id,
-        Ok(None) => {
-            return json_error(
-                StatusCode::NOT_FOUND,
-                "this confirmation link is not valid any more",
-            )
-        }
-        Err(e) => return internal(e),
-    };
-    if let Err(e) = stratum_control::usertokens::mark_verified(&state.db, &user_id) {
-        return internal(e);
-    }
-    let user = match users::by_id(&state.db, &user_id) {
-        Ok(Some(u)) => u,
-        Ok(None) => return internal("verified user vanished".into()),
-        Err(e) => return internal(e),
-    };
-    // A disabled account gets its address marked proved and nothing
-    // else: the row is now accurate, and they still cannot sign in.
-    if user.disabled_at.is_some() {
-        return json_error(StatusCode::UNAUTHORIZED, "this account is disabled");
-    }
-    let (_, token) = match sessions::create(&state.db, &user.id, sessions::DEFAULT_TTL_SECS) {
-        Ok(x) => x,
-        Err(e) => return internal(e),
-    };
-    let orgs = match memberships(&state, &user.id) {
-        Ok(o) => o,
-        Err(e) => return internal(e),
-    };
-    (
-        StatusCode::OK,
-        [(
-            header::SET_COOKIE,
-            set_cookie(&state, &token, sessions::DEFAULT_TTL_SECS),
-        )],
-        Json(user_json(&user, &orgs)),
-    )
-        .into_response()
-}
-
-/// Another confirmation link, for the one that went astray.
-pub async fn resend_verification(
-    State(state): State<SharedState>,
-    Json(body): Json<EmailBody>,
-) -> Response {
-    let email = users::normalize_email(&body.email);
-    if !users::valid_email(&email) || !allow_mail_to(&email) {
-        return mailed_if_it_applies();
-    }
-    match users::by_email(&state.db, &email) {
-        // Already proved, or no such account: nothing to send, and the
-        // caller cannot tell which.
-        Ok(Some(u)) if u.verified_at.is_none() && u.disabled_at.is_none() => {
-            match stratum_control::usertokens::issue(
-                &state.db,
-                &u.id,
-                stratum_control::usertokens::Kind::Verify,
-            ) {
-                Ok(token) => send_quietly(
-                    &state,
-                    &crate::mail::templates::verification(&email, &state.public_url, &token),
-                ),
-                Err(e) => return internal(e),
-            }
-        }
-        Ok(_) => {}
-        Err(e) => return internal(e),
-    }
-    mailed_if_it_applies()
 }
 
 /// Ask for a reset link.
@@ -654,9 +481,10 @@ pub async fn reset_password(
     if let Err(e) = users::set_password(&state.db, &user_id, &body.new_password) {
         return internal(e);
     }
-    // Holding the mailed link proves the address as surely as the
-    // confirmation link does, so this also finishes a signup somebody
-    // abandoned.
+    // Holding the mailed link proves the address. A no-op for an account
+    // made since sign-up closed — every one is proved on the way in — and
+    // for one left unproved by open sign-up, whose credentials were all
+    // taken away, it is how the owner of the mailbox gets it back.
     if let Err(e) = stratum_control::usertokens::mark_verified(&state.db, &user_id) {
         return internal(e);
     }

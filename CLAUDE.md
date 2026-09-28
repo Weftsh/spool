@@ -28,7 +28,7 @@ None of them is optional, and none of them is "usually fine".
 | **manual browser pass** | a person's-eye view of every screen the change touches, reporting **0 problems** | `web/dashboard/tools/walkthrough.mjs` |
 | **manual S3 contract** | the conditional-PUT semantics I9 rests on hold on the backend a deployment actually uses, under the role it actually uses | `scripts/manual-s3.sh check --both-addressing-styles` |
 | **manual CI contract** | real GitHub answers the refusals our poller classifies, every `status`/`conclusion` pair it emits is one we map, and a real non-GitHub CI's verdict reaches the intake | `scripts/manual-ci.sh all`, plus `intake watch` |
-| **manual GitHub-sign-in contract** | real GitHub answers `GET /user/emails` in the shape the sign-in reads, and the `verified` flag on the `primary` entry — the single fact that lets a GitHub sign-up skip our confirmation mail — is really there | `scripts/manual-github-signin.sh all`, then `fixtures` |
+| **manual GitHub-sign-in contract** | real GitHub answers `GET /user/emails` in the shape the sign-in reads, and the `verified` flag on the `primary` entry — the single fact that lets a first GitHub sign-in be linked to the account with that address — is really there | `scripts/manual-github-signin.sh all`, then `fixtures` |
 | **manual mirror-push contract** | real GitHub takes the exact `git push` a forwarded mirror push sends under the App installation, and every refusal it prints — a protected branch, a stale lease, a missing `Contents: write` — lands on the answer `classify` gives it | `scripts/manual-mirror-push.sh all`, then `fixtures` |
 
 The manual ones are manual for the same reason the browser pass is: they

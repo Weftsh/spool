@@ -6,10 +6,10 @@
 //!
 //!  * [`Null`] drops everything, and is the default. A server that has
 //!    not been told where to send mail should say so at boot, not
-//!    discover it when the first person cannot verify their address.
+//!    discover it when the first invitation never arrives.
 //!  * [`capture::Capture`] writes each message to a file. This is what
-//!    the e2e suites and the manual browser pass read, so the funnel a
-//!    stranger runs — sign up, open the mail, click the link — is
+//!    the e2e suites and the manual browser pass read, so the way a
+//!    person joins — invited, open the mail, follow the link — is
 //!    exercised by machines and by people without a mail server.
 //!  * [`smtp::Smtp`] speaks the protocol to a relay, for self-hosting.
 //!  * [`ses::Ses`] posts to Amazon SES v2, signed with the SigV4 the
@@ -19,8 +19,8 @@
 //! CR and LF first** ([`Message::validate`]). A newline in a `To:` is not
 //! a formatting bug: in SMTP and in the SES simple-content API alike it
 //! ends the header and starts another, so an attacker-chosen address
-//! becomes an attacker-chosen `Bcc:`. Signup takes an email address from
-//! a stranger, which is exactly the input this guards.
+//! becomes an attacker-chosen `Bcc:`. Forgotten-password takes an address
+//! from anybody at all, which is exactly the input this guards.
 
 pub mod capture;
 pub mod ses;

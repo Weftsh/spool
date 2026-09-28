@@ -849,53 +849,35 @@ fn page_json(
 /// resolve — may read none of them, and is told to sign in (401) rather
 /// than handed an empty page: the per-repo list answers each repository
 /// that way, and an empty 200 here would be the one door in the org a
-/// signed-out caller could open. A token belonging to another
-/// organization is put through the per-repository gate and comes out
-/// reading nothing, which is the page `GET …/changesets` gives it too.
+/// signed-out caller could open. A credential from another organization
+/// is answered 404, exactly as a name that is nobody's organization is —
+/// an empty page would say this one exists. `GET …/changesets` answers
+/// both the same way.
 pub async fn list_in_org(
     State(state): State<SharedState>,
     Path(org_name): Path<String>,
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
-    if let Err(r) = crate::authx::require_authenticated(&state.db, &headers) {
-        return r;
-    }
-    // Who is asking, for the two `?q=` terms that are about a person —
-    // and **only** for those. Every authority question below still goes
-    // through `rest_repo_auth` per repository with the raw headers, so
-    // this resolves an identity and never a permission.
+    // Who is asking — somebody inside this organisation, or told what a
+    // missing one tells them — for the two `?q=` terms that are about a
+    // person. Every authority question below still goes through
+    // `rest_repo_auth` per repository with the raw headers, so this
+    // resolves an identity and never a permission.
     //
     // The session fallback is not optional: the per-repo list gets its
     // principal from `rest_repo_auth`, which falls back to a browser
     // session, and a route that read the bearer token alone would tell
     // the dashboard — where nobody holds a token — to sign in on a page
     // it is already signed in on.
-    let principal =
-        match crate::authx::principal_opt(&state.db, &headers, crate::authx::Challenge::None) {
-            Ok(Some(p)) => p,
-            Ok(None) => match crate::authx::session_principal(&state.db, &headers, &org.id, None) {
-                // Signed in, and not a member of this organisation. Still a
-                // person: `author:@me` asks who they are, not what they may
-                // do, and what they may see is decided per repository.
-                Ok(crate::authx::SessionAuth::NoAccess(user_id)) => {
-                    stratum_control::auth::Principal::for_user(&org.id, &user_id, Vec::new())
-                }
-                Ok(crate::authx::SessionAuth::Principal(p)) => p,
-                // The session authenticated a moment ago, in
-                // `require_authenticated`, and has expired or been revoked
-                // since. The answer that check gives a signed-out caller.
-                Ok(crate::authx::SessionAuth::None) => {
-                    return crate::authx::unauthorized(crate::authx::Challenge::None)
-                }
-                Err(r) => return r,
-            },
-            Err(r) => return r,
-        };
+    let principal = match crate::authx::principal_in_org(&state.db, &headers, &org.id) {
+        Ok(p) => p,
+        Err(r) => return r,
+    };
     let f = match filters(&params, &principal, &state.db, 100) {
         Ok(f) => f,
         Err(r) => return r,
@@ -1076,7 +1058,7 @@ pub async fn get(
 /// The acting person, or the refusal that explains why there is none:
 /// an approval is a human judgement, and sufficiency counts people, so
 /// a service token is refused. Every caller that reaches here has
-/// authenticated — `rest_repo_auth`, or `require_authenticated` on the
+/// authenticated — `rest_repo_auth`, or `principal_in_org` on the
 /// org-wide list, answers a signed-out one 401 first — so a principal
 /// with no person behind it can only be a token, and the one sentence
 /// says so.

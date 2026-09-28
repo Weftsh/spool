@@ -24,7 +24,6 @@
 use std::time::{Duration, Instant};
 use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::Scratch;
-use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
 
 const PASSWORD: &str = "a long enough password";
@@ -1150,47 +1149,6 @@ fn groups_can_be_managed_and_the_default_cannot_be_taken_away() {
 // A change from a fork
 // ---------------------------------------------------------------------
 
-fn urldecode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v as char);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle, "email": email, "name": handle, "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let msg = mail.wait_for(email, Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let token = urldecode(link.split_once("#verify=").expect("a verify link").1);
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
-}
-
 /// A change from a fork is held for approval **even though** the job
 /// would run on the maintainer's own machine — and especially then.
 ///
@@ -1206,17 +1164,15 @@ fn a_change_from_a_fork_is_held_even_for_a_machine_the_maintainer_owns() {
     let minio = Minio::shared();
     let bucket = minio.bucket("sh-fork");
     let scratch = Scratch::new("sh-fork");
-    let mail = Mailbox::temp("sh-fork");
     let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .db_hint("sh-fork")
         .data_dir(scratch.path().join("data"))
-        .envs(&mail.env())
         .env("STRATUM_RUNNER_POLL_SECS", "1")
         .env("STRATUM_RUNNER_CLAIM_WAIT_MS", "700")
         .start();
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
+    let mut bob = Browser::stranger(&server, "bob", "bob@example.com");
     // A personal namespace has no members, so a repository somebody
     // else can read lives in an organisation.
     let (st, body) = ada.req(

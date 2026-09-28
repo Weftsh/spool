@@ -7,8 +7,8 @@
 //! parameterised segment over the git wire and anything else the
 //! fallback decides, so a reserved name would quietly have become
 //! somebody's profile. These tests hold that ordering, and hold the two
-//! things it must not disturb: a typo is still a real 404, and the git
-//! wire is untouched.
+//! things it must not disturb: a reserved or ill-formed name is still a
+//! real 404, and the git wire is untouched.
 //!
 //! The shell is content-free. Every repository is private to its
 //! organisation, so what a signed-out visitor sees on one of these pages
@@ -58,7 +58,7 @@ fn get_as(server: &Server, path: &str, token: &str) -> (u16, String) {
 }
 
 #[test]
-fn forge_urls_render_the_spa_and_typos_still_404() {
+fn forge_urls_render_the_spa_and_never_say_which_names_exist() {
     let minio = Minio::shared();
     let bucket = minio.bucket("forge-pages");
     let scratch = Scratch::new("forge-pages");
@@ -111,18 +111,44 @@ fn forge_urls_render_the_spa_and_typos_still_404() {
     let (absent, _) = anon_get(&server, "/v1/orgs/acme/repos/no-such-repo");
     assert_eq!((real, absent), (401, 401));
 
-    // A namespace nobody has taken is a real 404, not a soft one. This
-    // is the reason the fallback pays for a lookup instead of gating on
-    // name shape alone: a 200 here would make every typo and every
-    // crawler probe an indexable page indistinguishable from a real one.
-    for path in ["/typo-here", "/typo-here/widget", "/nobody/at/all"] {
+    // A namespace nobody has taken is the same shell, byte for byte,
+    // as one somebody has — and so is a person's handle. It used to be a
+    // 404, on the grounds that sign-up already told anyone which names
+    // were taken; with sign-up gone, that 404 was the one door on the
+    // server that told a signed-out stranger which organizations exist,
+    // and who works here. Nothing is public, so there is no search index
+    // for a soft 404 to pollute.
+    let (st, known) = anon_get(&server, "/acme");
+    assert_eq!(st, 200);
+    server.admin_json(&[
+        "admin",
+        "user-create",
+        "--org",
+        "acme",
+        "--role",
+        "member",
+        "--email",
+        "ada@acme.test",
+        "--password",
+        "a long enough password",
+        "--handle",
+        "ada",
+    ]);
+    for path in ["/ada", "/typo-here", "/typo-here/widget", "/nobody/at/all"] {
         let (st, body) = anon_get(&server, path);
-        assert_eq!(st, 404, "{path} answered {st} with {body:?}");
+        assert_eq!(
+            (st, &body),
+            (200, &known),
+            "{path} told a missing name apart"
+        );
     }
+    // …and the API behind the shell refuses both alike.
+    let (real, _) = anon_get(&server, "/v1/orgs/acme/repos");
+    let (absent, _) = anon_get(&server, "/v1/orgs/typo-here/repos");
+    assert_eq!((real, absent), (401, 401));
 
-    // …and an ill-formed first segment never reaches Postgres at all;
-    // it is settled by shape. Observable only as the same 404, which is
-    // the point — scanner noise costs the control plane nothing.
+    // An ill-formed first segment is settled by shape, and is a real
+    // 404: no namespace could ever hold it, so saying so says nothing.
     for path in ["/.env", "/has%20space", &format!("/{}", "x".repeat(300))] {
         let (st, _) = anon_get(&server, path);
         assert_eq!(st, 404, "{path}");

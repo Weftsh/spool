@@ -303,7 +303,7 @@ pub async fn create(
     headers: HeaderMap,
     Json(body): Json<CreateRepoBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -311,11 +311,6 @@ pub async fn create(
         Ok(p) => p,
         Err(r) => return r,
     };
-    // Creating costs storage and outbound fetches, so it is the line an
-    // unproved address does not cross.
-    if let Err(r) = authx::require_verified(&state.db, &principal) {
-        return r;
-    }
     if let Err(r) = crate::api::refuse_public(body.public) {
         return r;
     }
@@ -725,7 +720,7 @@ pub async fn list(
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -775,7 +770,7 @@ pub async fn batch_create(
     headers: HeaderMap,
     Json(body): Json<BatchCreateBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -783,11 +778,6 @@ pub async fn batch_create(
         Ok(p) => p,
         Err(r) => return r,
     };
-    // Creating costs storage and outbound fetches, so it is the line an
-    // unproved address does not cross.
-    if let Err(r) = authx::require_verified(&state.db, &principal) {
-        return r;
-    }
     if body.repos.len() > 1000 {
         return json_error(StatusCode::BAD_REQUEST, "batch limited to 1000 repos");
     }
@@ -856,7 +846,7 @@ pub async fn batch_delete(
     headers: HeaderMap,
     Json(body): Json<BatchDeleteBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -980,7 +970,7 @@ pub async fn fork(
 
     // Target namespace: named, or the forker's own.
     let target = match body.org.as_deref() {
-        Some(name) => match crate::app::org_or_404(&state, name) {
+        Some(name) => match crate::app::org_or_masked(&state, &headers, name) {
             Ok(o) => o,
             Err(r) => return r,
         },
@@ -1007,9 +997,6 @@ pub async fn fork(
         Ok(p) => p,
         Err(r) => return r,
     };
-    if let Err(r) = authx::require_verified(&state.db, &principal) {
-        return r;
-    }
 
     let name = body.name.clone().unwrap_or_else(|| src.name.clone());
     // Is the name already taken in the target, and by what? Decided

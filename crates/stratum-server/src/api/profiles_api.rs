@@ -231,7 +231,7 @@ pub async fn list_emails(
 /// `POST /v1/users/:handle/emails` — claim an address and mail its
 /// holder a link.
 ///
-/// Unlike signup, the answers here are *not* uniform, and that is
+/// Unlike forgotten-password, the answers here are *not* uniform, and that is
 /// deliberate: the caller has already authenticated as this account, so
 /// "that address is spoken for" tells them about their own request
 /// rather than about somebody else's existence. What the 409 must never
@@ -339,19 +339,26 @@ pub async fn delete_email(
     }
 }
 
-/// `GET /v1/orgs/:org/profile` — anybody signed in.
+/// `GET /v1/orgs/:org/profile` — anybody in the organization, by
+/// session or by token.
+///
+/// It used to be anybody signed in at all, which made it the one door
+/// where a person from another organization could tell a real
+/// organization (200) from a name that is nobody's (404). Outsiders are
+/// answered as a missing organization is. A token minted in the
+/// organization reads it too; it used to be refused as "not signed in".
 pub async fn get_org_profile(
     State(state): State<SharedState>,
     Path(org_name): Path<String>,
     headers: HeaderMap,
 ) -> Response {
-    if let Err(r) = require_signed_in(&state, &headers) {
-        return r;
-    }
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
+    if let Err(r) = authx::principal_in_org(&state.db, &headers, &org.id) {
+        return r;
+    }
     org_profile_response(&state, &org)
 }
 
@@ -380,7 +387,7 @@ pub async fn patch_org_profile(
     headers: HeaderMap,
     Json(body): Json<PatchOrgProfileBody>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };

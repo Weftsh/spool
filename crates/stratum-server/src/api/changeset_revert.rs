@@ -192,7 +192,7 @@ pub async fn revert(
     headers: HeaderMap,
     Json(body): Json<RevertChangeset>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };

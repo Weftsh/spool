@@ -30,8 +30,6 @@ use stratum_testkit::gitcli::{self, Scratch};
 use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
 
-const PASSWORD: &str = "a long enough password";
-
 /// The server under test, with the walker polling fast enough that a
 /// test does not spend its life waiting for a five-second tick.
 fn spawn(store_url: &str, scratch: &Scratch, hint: &str, mail: &Mailbox) -> Server {
@@ -78,33 +76,6 @@ fn mailed_token(mail: &Mailbox, address: &str, key: &str) -> String {
         .unwrap_or_else(|| panic!("{link} carries no #{key}="))
         .1;
     urldecode(raw)
-}
-
-/// Sign somebody up through the product's own flow. Their sign-up
-/// address is proved by the flow itself, which is what makes it usable
-/// as an authorship address.
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let token = mailed_token(mail, email, "verify");
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
 }
 
 /// Add a second address to an account and prove it, the way the product
@@ -254,7 +225,7 @@ fn a_proved_address_counts_and_an_unproved_one_counts_for_nobody() {
     let mail = Mailbox::temp("contribs");
     let server = spawn(&bucket.base_url, &scratch, "contribs", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     // The address a decade of her commits is actually signed with.
     add_proved_address(&mut ada, &mail, "ada", "ada@old-laptop.example");
     // And one she has only *claimed*. This is the gaming attempt in its
@@ -371,6 +342,71 @@ fn a_proved_address_counts_and_an_unproved_one_counts_for_nobody() {
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
 
+/// Somebody who arrived by invitation is credited with their own work.
+///
+/// Accepting an invitation made the `users` row and nothing else, so the
+/// address the invitation went to — proved by the invitation reaching
+/// it — was never an *owned* address, and authorship is resolved through
+/// owned addresses. The result was silent: every commit an invited
+/// person wrote counted for nobody, and nothing anywhere said so.
+///
+/// Built like the anti-gaming test above, for the same reason: the
+/// repository is pushed with a *service* token, so "pushed by" credits
+/// nobody and the address is the only ground. Pushed with the person's
+/// own token, this would pass against the bug — the pusher ground would
+/// credit them for an address the server had never heard of.
+#[test]
+fn an_invited_persons_commits_are_theirs() {
+    let minio = Minio::shared();
+    let bucket = minio.bucket("contribs-e2e-invited");
+    let scratch = Scratch::new("contribs-invited");
+    let mail = Mailbox::temp("contribs-invited");
+    let server = spawn(&bucket.base_url, &scratch, "contribs_invited", &mail);
+
+    let admin = server.bootstrap_org("acme");
+    let mut olive = Browser::person(&server, "acme", "owner", "olive", "olive@acme.test");
+    // Nobody has this address yet: accepting is what makes the account,
+    // and the handle is the one made from the address.
+    olive.invite_and_accept("acme", "new.dev@example.com", "member");
+    let (st, body) = server.req(
+        "POST",
+        "/v1/orgs/acme/repos",
+        &admin,
+        Some(serde_json::json!({ "name": "widget" })),
+    );
+    assert_eq!(st, 201, "{body}");
+
+    let work = scratch.path().join("widget");
+    build_repo(
+        &work,
+        &[
+            ("new.dev@example.com", "2026-04-01", "first day"),
+            ("new.dev@example.com", "2026-04-02", "second day"),
+            // Nobody's, so the rail is not simply "everything".
+            ("nobody@example.invalid", "2026-04-03", "a stranger"),
+        ],
+    );
+    push(&server, &work, &admin, "acme", "widget");
+
+    let c = contributors_until(
+        &server,
+        "acme",
+        "widget",
+        &admin,
+        "an invited person's own commits never counted for them",
+        |c| total(c) >= 2,
+    );
+    assert_eq!(
+        totals(&c),
+        [("new-dev".to_string(), 2)],
+        "both of the invited person's commits are theirs, under the \
+         handle their invitation gave them, and the stranger's is \
+         nobody's: {c}"
+    );
+
+    assert!(server.healthy());
+}
+
 /// The second ground a commit can count on, and the one case that must
 /// count for nobody.
 #[test]
@@ -381,7 +417,7 @@ fn an_unknown_address_counts_for_the_pusher_and_an_agents_commit_for_nobody() {
     let mail = Mailbox::temp("contribs-pusher");
     let server = spawn(&bucket.base_url, &scratch, "contribs_pusher", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs/ada/repos",
@@ -476,7 +512,7 @@ fn the_walker_can_be_turned_off_and_its_bound_drops_history_rather_than_doubling
     }
     let mut server = b.start();
 
-    let _ada = signup(&server, &mail, "ada", "ada@example.com");
+    let _ada = Browser::stranger(&server, "ada", "ada@example.com");
     let admin = server.bootstrap_org("acme");
     let (st, body) = server.req(
         "POST",
@@ -600,8 +636,8 @@ fn contributors_are_ranked_with_their_totals_for_a_member_and_nobody_else() {
     let mail = Mailbox::temp("contribs-people");
     let server = spawn(&bucket.base_url, &scratch, "contribs_people", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let _bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
+    let _bob = Browser::stranger(&server, "bob", "bob@example.com");
     let admin = server.bootstrap_org("acme");
     for name in ["widget", "untouched"] {
         let (st, body) = server.req(
@@ -624,8 +660,9 @@ fn contributors_are_ranked_with_their_totals_for_a_member_and_nobody_else() {
     let reader = minted["token"].as_str().unwrap().to_string();
 
     // Pushed with a *service* token, so nothing here is attributable to
-    // the pusher and the proved sign-up addresses are the only ground —
-    // which is what makes the two totals below a fact about authorship.
+    // the pusher and the addresses the accounts were made with — proved
+    // on the way in — are the only ground, which is what makes the two
+    // totals below a fact about authorship.
     let work = scratch.path().join("widget");
     build_repo(
         &work,
@@ -777,13 +814,13 @@ fn a_private_repositorys_contributors_are_masked_exactly_as_the_repository_is() 
     let mail = Mailbox::temp("contribs-mask");
     let server = spawn(&bucket.base_url, &scratch, "contribs_mask", &mail);
 
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
+    let mut ada = Browser::stranger(&server, "ada", "ada@example.com");
     // A perfectly real account with no business in ada's organization.
     // A signed-in stranger is a different masking case from a signed-out
     // one, and they are told apart by status code.
-    let mut carol = signup(&server, &mail, "carol", "carol@example.com");
+    let mut carol = Browser::stranger(&server, "carol", "carol@example.com");
     // And a viewer of it, who is not the owner.
-    let mut dave = signup(&server, &mail, "dave", "dave@example.com");
+    let mut dave = Browser::stranger(&server, "dave", "dave@example.com");
 
     // Hers, in an organization she runs.
     let (st, body) = ada.req(

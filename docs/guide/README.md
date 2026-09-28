@@ -12,9 +12,9 @@ Put your own server's URL in its place.
 ## Start here
 
 1. **Get an account on your server.** Whoever runs the server creates the
-   first one from the command line. After that, people sign up with an
-   email address (or with GitHub, when the server has a GitHub App), and
-   an organization's admins invite them in.
+   first one from the command line. After that, an organization's admins
+   invite people in by email, and the operator can add them from the
+   command line too. There is no signing yourself up.
    [Authentication](authentication.md)
 2. **Join an organization and mint a token.** An organization is where
    your team's repositories live. A token is what your CI and scripts

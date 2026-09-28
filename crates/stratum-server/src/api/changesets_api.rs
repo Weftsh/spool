@@ -399,7 +399,7 @@ pub async fn verdict(
     Path((org_name, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -526,7 +526,7 @@ pub async fn create(
     headers: HeaderMap,
     Json(body): Json<CreateChangeset>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -611,11 +611,13 @@ pub async fn list(
     Query(params): Query<HashMap<String, String>>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
-    if let Err(r) = crate::authx::require_authenticated(&state.db, &headers) {
+    // An outsider is answered as a missing organisation is, not with an
+    // empty page that says this one exists.
+    if let Err(r) = crate::authx::principal_in_org(&state.db, &headers, &org.id) {
         return r;
     }
     let state_filter = params.get("state").map(String::as_str);
@@ -653,7 +655,7 @@ pub async fn get(
     Path((org_name, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -685,7 +687,7 @@ pub async fn workspace(
     Path((org_name, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -764,7 +766,7 @@ pub async fn diffstat(
     Path((org_name, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -851,7 +853,7 @@ pub async fn add_member(
     headers: HeaderMap,
     Json(body): Json<MemberRef>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -894,7 +896,7 @@ pub async fn remove_member(
     Path((org_name, key, repo, change)): Path<(String, String, String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -935,7 +937,7 @@ pub async fn set_edges(
     headers: HeaderMap,
     Json(body): Json<SetEdges>,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -974,7 +976,7 @@ pub async fn abandon(
     Path((org_name, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };
@@ -1049,7 +1051,7 @@ pub async fn land(
     Path((org_name, key)): Path<(String, String)>,
     headers: HeaderMap,
 ) -> Response {
-    let org = match crate::app::org_or_404(&state, &org_name) {
+    let org = match crate::app::org_or_masked(&state, &headers, &org_name) {
         Ok(o) => o,
         Err(r) => return r,
     };

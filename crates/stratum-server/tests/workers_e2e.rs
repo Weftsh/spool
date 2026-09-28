@@ -563,11 +563,16 @@ fn web_assets_and_openapi_served() {
     assert!(ct.starts_with("text/javascript"));
     assert!(cache.contains("immutable"));
 
-    // Unknown paths still 404; API routes are not shadowed by the fallback.
-    let err = ureq::get(&format!("{}/no-such-page", server.base))
-        .call()
-        .unwrap_err();
-    assert!(matches!(err, ureq::Error::Status(404, _)));
+    // A path no namespace could ever hold still 404s — a reserved name,
+    // or one the registry would refuse. (A well-formed name gets the
+    // shell whether or not anybody holds it; see forge_pages_e2e.) API
+    // routes are not shadowed by the fallback.
+    for path in ["/monorepo", "/.env"] {
+        let err = ureq::get(&format!("{}{path}", server.base))
+            .call()
+            .unwrap_err();
+        assert!(matches!(err, ureq::Error::Status(404, _)), "{path}: {err}");
+    }
     let (health, _, _) = get("/healthz");
     assert_eq!(health, "ok\n");
 }

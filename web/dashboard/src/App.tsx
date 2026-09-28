@@ -3,14 +3,13 @@ import { toast } from "sonner";
 import { api, loadSession, saveSession, type Me, type Session } from "./api";
 import { NEW_ORG } from "@/components/app-sidebar";
 import { AdminShell } from "@/shells/admin-shell";
-import { ConfirmBanner } from "@/components/confirm-banner";
 import { ClaimInstall } from "@/components/claim-install";
 import { ConnectBanner, connectOutcomeOf } from "@/components/connect-banner";
 import { githubOutcomeOf } from "@/components/github-signin-banner";
 import { Loading } from "@/components/feedback";
 import { NotFound } from "@/components/not-found";
 import { settingsSections } from "@/lib/settings-sections";
-import { AcceptInvite, Login, RedeemLink } from "@/views/auth";
+import { AcceptInvite, Login, ResetPassword } from "@/views/auth";
 import { ChangesetsView } from "@/views/changesets";
 import { NewRepo } from "@/views/newrepo";
 import { NewOrg, OrgView } from "@/views/org";
@@ -22,12 +21,13 @@ import { ForgeView } from "@/views/forge";
 
 /// A token an emailed link carries, if this is one of those links.
 ///
-/// Every mailed credential — an invitation, a confirmation, a password
-/// reset — rides in the fragment rather than the query, so that it is
-/// never sent to a server, never lands in an access log, and never
-/// travels in a `Referer` when this page loads a font. Each is read once,
-/// at boot, and cleared from the address bar as soon as it has been
-/// used: a bearer credential left in a URL gets bookmarked and shared.
+/// Every mailed credential — an invitation, a password reset, the proof
+/// of an added address — rides in the fragment rather than the query, so
+/// that it is never sent to a server, never lands in an access log, and
+/// never travels in a `Referer` when this page loads a font. Each is read
+/// once, at boot, and cleared from the address bar as soon as it has
+/// been used: a bearer credential left in a URL gets bookmarked and
+/// shared.
 function tokenFromHash(key: string): string | null {
   const m = new RegExp(`(?:^#|&)${key}=([^&]+)`).exec(window.location.hash);
   if (!m) return null;
@@ -65,20 +65,18 @@ export default function App() {
   const [invite, setInvite] = useState<string | null>(() =>
     tokenFromHash("invite"),
   );
-  const [confirming, setConfirming] = useState<string | null>(() =>
-    tokenFromHash("verify"),
-  );
   const [resetting, setResetting] = useState<string | null>(() =>
     tokenFromHash("reset"),
   );
   // The link mailed when somebody adds a second address to an account
   // they are already signed in on.
   //
-  // Distinct from `verify`, which proves the address you *signed up*
-  // with from a page nobody is signed in on. This one names an account
-  // that already exists, and the server refuses it unless the caller is
-  // that account — so it is redeemed here, after the session is known,
-  // rather than by the signed-out redeemer above.
+  // The only address-proving link there is: the address an account signs
+  // in with was proved when the account was made, by the invitation
+  // reaching it or by the operator who made it. This one names an
+  // account that already exists, and the server refuses it unless the
+  // caller is that account — so it is redeemed here, after the session
+  // is known, rather than on a signed-out screen like the others.
   //
   // Without this the mail was a promise we did not keep: the server has
   // always sent `#verify-email=`, and nothing read it, so clicking the
@@ -135,27 +133,24 @@ export default function App() {
   // carries an outcome rather than a credential — the session rode home
   // in an HttpOnly cookie.
   const githubOutcome = route.query.get("github");
+  // GitHub only signs somebody in to an account they already have, so
+  // there is no "new account" outcome to onboard: `ok` lands on the
+  // overview like any other sign-in, and a refusal lands on the sign-in
+  // screen with its sentence.
   const githubProblem = githubOutcomeOf(githubOutcome);
-  // A brand-new account made through GitHub has exactly one thing left
-  // to do, and this is the whole reason the sign-up asks through GitHub
-  // at all: say which repositories to mirror. Landing them on an empty
-  // overview and trusting them to find "New repository" is how an
-  // onboarding that exists gets missed.
-  const onboardingMirrors = githubOutcome === "new";
 
   // A mailed link opened while this page is already showing changes only
   // the fragment, which is a *same-document* navigation: the browser
   // fires `hashchange` and never reloads, so the initializers above
   // never run again. Somebody signed in with the dashboard open in a
-  // tab — the ordinary case for a confirmation link — would click it and
-  // watch nothing happen at all.
+  // tab — the ordinary case for a link proving an added address — would
+  // click it and watch nothing happen at all.
   //
   // `clearHash` uses `replaceState`, which deliberately does not fire
   // this, so redeeming a link cannot re-trigger itself.
   useEffect(() => {
     const reread = () => {
       setInvite(tokenFromHash("invite"));
-      setConfirming(tokenFromHash("verify"));
       setProvingEmail(tokenFromHash("verify-email"));
       setResetting(tokenFromHash("reset"));
     };
@@ -215,28 +210,9 @@ export default function App() {
     setMe(who);
   };
 
-  if (confirming) {
-    return (
-      <RedeemLink
-        kind="verify"
-        token={confirming}
-        onDone={(who) => {
-          clearHash();
-          setConfirming(null);
-          signedIn(who);
-        }}
-        onDismissed={() => {
-          clearHash();
-          setConfirming(null);
-        }}
-      />
-    );
-  }
-
   if (resetting) {
     return (
-      <RedeemLink
-        kind="reset"
+      <ResetPassword
         token={resetting}
         onDone={(who) => {
           clearHash();
@@ -270,8 +246,8 @@ export default function App() {
   }
 
   // Which page the address means, decided *after* the mailed-link gates
-  // on purpose: a confirmation or invitation link has to be redeemable
-  // from whatever page it was opened on.
+  // on purpose: a reset or invitation link has to be redeemable from
+  // whatever page it was opened on.
   const forge = match(browserRoute.path, browserRoute.query);
   // `/login` is the one page somebody who is not signed in may see.
   // Signing in returns to where they were, which is the whole reason
@@ -280,7 +256,6 @@ export default function App() {
     const back = forge.next;
     return (
       <Login
-        initialMode={forge.mode === "signup" ? "signup" : "person"}
         githubOutcome={githubProblem}
         onSignedIn={(s, who) => {
           if (s.token) saveSession(s);
@@ -384,7 +359,7 @@ export default function App() {
         githubOutcome={githubProblem}
         notice={
           claimingInstall
-            ? "Your GitHub installation is ready to connect. Sign in, or create an account, and then choose the organization it belongs to."
+            ? "Your GitHub installation is ready to connect. Sign in, and then choose the organization it belongs to."
             : undefined
         }
         onSignedIn={(s, who) => {
@@ -437,7 +412,6 @@ export default function App() {
       onNavigate={navigate}
       onSignOut={signOut}
     >
-      {me && me.verified_at == null && <ConfirmBanner email={me.email} />}
       {connectProblem && <ConnectBanner outcome={connectProblem} />}
       {claimingInstall && (
         <ClaimInstall
@@ -496,11 +470,11 @@ export default function App() {
             saveSession({ org, token: "" });
           }}
         />
-      ) : routedNew || onboardingMirrors ? (
+      ) : routedNew ? (
         <NewRepo
           session={session}
           navigate={navigate}
-          justConnected={connectOutcome === "ok" || onboardingMirrors}
+          justConnected={connectOutcome === "ok"}
         />
       ) : routed.length === 0 ? (
         <OrgView

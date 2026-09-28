@@ -222,8 +222,8 @@ data "aws_iam_policy_document" "store_user" {
   # while the account is in the sandbox — where every recipient must be a
   # verified identity — so a grant on the sending domain alone answers
   # `not authorized to perform ses:SendEmail on resource
-  # …identity/<recipient>` for every message: sign-up verification,
-  # invitations, notifications, all of it, with nothing on screen to say
+  # …identity/<recipient>` for every message: invitations, password
+  # resets, notifications, all of it, with nothing on screen to say
   # so. If this account holds SES identities that belong to something
   # else, narrow this to the ones the server should use.
   dynamic "statement" {

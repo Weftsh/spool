@@ -3,9 +3,14 @@
 #
 # What this proves that CI cannot
 # ------------------------------
-# Signing up with GitHub skips our own confirmation mail. The entire
-# justification for that is one field in one response we have never
-# seen: `verified`, on the `primary` entry of `GET /user/emails`. Every
+# Signing in with GitHub the first time finds the account by address:
+# the one GitHub reports as the person's primary and verified one is
+# linked to the account here that signs in with it. The entire
+# justification for trusting that address is one field in one response
+# we have never seen: `verified`, on the `primary` entry of
+# `GET /user/emails`. Were it wrong, a GitHub account holding an
+# address it never proved would be handed the account here that uses
+# it. Every
 # automated test of it runs against `stratum-testkit`'s `fake_github` —
 # the `/user` and `/user/emails` arms, and `fake_user` beside them —
 # which we wrote from the documentation and from memory.

@@ -21,11 +21,13 @@ pub struct User {
     pub created_at: i64,
     pub disabled_at: Option<i64>,
     /// Their personal namespace's name, once they have one. `None` for
-    /// accounts created before namespaces existed, and for any created
-    /// by an operator against an org rather than through signup.
+    /// accounts made before namespaces existed, until
+    /// `admin repair-identities` gives them one.
     pub handle: Option<String>,
-    /// When this address was proved. `None` means the account may sign
-    /// in and look around but not create anything that costs us money.
+    /// When this address was proved. Every account made now is proved on
+    /// the way in; `None` is one left by a build with open sign-up, whose
+    /// credentials a migration took away until the mailbox's owner
+    /// proves it (see `db::ACCOUNTS_NOBODY_PROVED`).
     pub verified_at: Option<i64>,
 }
 
@@ -306,36 +308,6 @@ pub fn set_password(db: &ControlDb, user_id: &str, password: &str) -> Result<(),
     Ok(())
 }
 
-/// Take the password off an account, leaving it reachable only through
-/// a linked identity.
-///
-/// This exists for one case, and it is a security one. Somebody can sign
-/// up with an address they do not own and never confirm it — that
-/// account can do nothing, which is the point of the confirmation gate,
-/// but it *is* sitting on the address with a password its maker knows.
-/// If the real owner of that mailbox then signs in through a provider
-/// that has proved the address, adopting the waiting account as-is would
-/// hand them an account the first person can still open. That is account
-/// pre-hijacking, and the fix is to make the waiting credential
-/// worthless at the moment the address is finally proved by somebody
-/// else.
-///
-/// Safe to call on an account that has no password: `NULL = NULL` is
-/// still `NULL`, and the row is simply written with what it held.
-pub fn clear_password(db: &ControlDb, user_id: &str) -> Result<(), String> {
-    let n = db
-        .lock()
-        .execute(
-            "UPDATE users SET password_hash = NULL WHERE id = $1",
-            &[&user_id.to_string()],
-        )
-        .map_err(|e| format!("clear password: {e}"))?;
-    if n == 0 {
-        return Err("no such user".into());
-    }
-    Ok(())
-}
-
 /// Disable an account. Deliberately not a delete: the audit trail refers
 /// to this user by id, and rows that point at a vanished person are worse
 /// than rows that point at a disabled one.
@@ -356,43 +328,6 @@ mod tests {
 
     fn db() -> ControlDb {
         ControlDb::open(&stratum_testkit::pg::test_db_url("users")).unwrap()
-    }
-
-    /// Clearing a password must actually close the door, not just blank
-    /// a column: `authenticate` has to refuse a NULL hash rather than
-    /// treat it as "no password required".
-    #[test]
-    fn clearing_a_password_closes_the_door_it_opened() {
-        let db = db();
-        let u = create(
-            &db,
-            "clearme@example.com",
-            "Clear Me",
-            Some("a long password"),
-        )
-        .unwrap();
-        assert!(authenticate(&db, "clearme@example.com", "a long password")
-            .unwrap()
-            .is_some());
-
-        clear_password(&db, &u.id).unwrap();
-        assert!(authenticate(&db, "clearme@example.com", "a long password")
-            .unwrap()
-            .is_none());
-        // And an empty string is not a way back in either.
-        assert!(authenticate(&db, "clearme@example.com", "")
-            .unwrap()
-            .is_none());
-
-        // Idempotent: an account that already had no password is left
-        // exactly as it was rather than erroring.
-        clear_password(&db, &u.id).unwrap();
-
-        // A user that is not there is an error, not a silent no-op —
-        // this runs on a security path and "nothing happened" must never
-        // read as "the credential is gone".
-        let err = clear_password(&db, "01hxxxxxxxxxxxxxxxxxxxxxxx").unwrap_err();
-        assert!(err.contains("no such user"), "{err}");
     }
 
     #[test]
