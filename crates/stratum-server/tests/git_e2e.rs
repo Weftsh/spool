@@ -382,29 +382,46 @@ fn v2_gate_still_enforced() {
     let (status, _) = server.post(
         "/v1/orgs/acme/repos",
         &admin,
-        serde_json::json!({ "name": "app", "public": true }),
+        serde_json::json!({ "name": "app" }),
     );
     assert_eq!(status, 201);
 
-    // Public repo advert works anonymously with the v2 header…
-    let ok = ureq::get(&format!(
-        "{}/acme/app/info/refs?service=git-upload-pack",
-        server.base
-    ))
-    .set("Git-Protocol", "version=2")
-    .call();
-    assert!(ok.is_ok());
+    let advert = |repo: &str, token: &str, v2: bool| -> u16 {
+        let mut r = ureq::get(&format!(
+            "{}/acme/{repo}/info/refs?service=git-upload-pack",
+            server.base
+        ));
+        if !token.is_empty() {
+            r = r.set("Authorization", &format!("Bearer {token}"));
+        }
+        if v2 {
+            r = r.set("Git-Protocol", "version=2");
+        }
+        match r.call() {
+            Ok(x) => x.status(),
+            Err(ureq::Error::Status(c, _)) => c,
+            Err(e) => panic!("transport: {e}"),
+        }
+    };
+
+    // The advert works for a reader with the v2 header…
+    assert_eq!(advert("app", &admin, true), 200);
 
     // …and a v0 client is refused loudly.
-    let resp = ureq::get(&format!(
-        "{}/acme/app/info/refs?service=git-upload-pack",
-        server.base
-    ))
-    .call();
-    match resp {
-        Err(ureq::Error::Status(400, _)) => {}
-        other => panic!("expected 400 for v0 client, got {other:?}"),
+    assert_eq!(
+        advert("app", &admin, false),
+        400,
+        "expected 400 for a v0 client"
+    );
+
+    // The protocol gate is not an existence oracle: anonymous is told to
+    // authenticate, in either protocol, for a repository that exists and
+    // one that does not — never "wrong protocol" for the real one only.
+    for v2 in [true, false] {
+        assert_eq!(advert("app", "", v2), 401, "anonymous, v2={v2}");
+        assert_eq!(advert("ghost", "", v2), 401, "anonymous absent, v2={v2}");
     }
+    assert!(server.healthy());
 }
 
 /// Push a branch, delete it, push it again. Ordinary, and it was refused.

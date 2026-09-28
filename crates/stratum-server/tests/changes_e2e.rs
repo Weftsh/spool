@@ -2296,7 +2296,7 @@ fn the_conversation_carries_the_review_not_just_the_verdict() {
     let (st, _) = server.post(
         "/v1/orgs/acme/repos",
         admin,
-        Some(serde_json::json!({"name": "openbook", "public": true})),
+        Some(serde_json::json!({"name": "openbook"})),
     );
     assert_eq!(st, 201);
     commit(server, admin, "openbook", "main", "base", &[("a.txt", "1")]);
@@ -5822,7 +5822,7 @@ fn a_drafted_comment_is_invisible_to_everybody_but_its_author() {
     let (st, out) = server.post(
         "/v1/orgs/acme/repos",
         admin,
-        Some(serde_json::json!({"name": "openbook", "public": true})),
+        Some(serde_json::json!({"name": "openbook"})),
     );
     assert_eq!(st, 201, "{out}");
     commit(
@@ -7257,7 +7257,7 @@ fn the_org_wide_query_narrows_by_repository_and_masks_what_it_cannot_see() {
         let (st, out) = server.post(
             "/v1/orgs/acme/repos",
             admin,
-            Some(serde_json::json!({"name": name, "public": public})),
+            Some(serde_json::json!({"name": name})),
         );
         assert_eq!(st, 201, "{out}");
     }

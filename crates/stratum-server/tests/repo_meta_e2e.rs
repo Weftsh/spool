@@ -43,12 +43,12 @@ const APACHE: &str = "                                 Apache License\n\
                         http://www.apache.org/licenses/\n\n\
    TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n";
 
-fn create(server: &Server, token: &str, org: &str, repo: &str, public: bool) {
+fn create(server: &Server, token: &str, org: &str, repo: &str) {
     let (st, out) = server.req(
         "POST",
         &format!("/v1/orgs/{org}/repos"),
         token,
-        Some(serde_json::json!({ "name": repo, "public": public })),
+        Some(serde_json::json!({ "name": repo })),
     );
     assert_eq!(st, 201, "{out}");
 }
@@ -67,7 +67,7 @@ fn commit(server: &Server, token: &str, org: &str, repo: &str, ops: serde_json::
 /// different quantities, a licence, a contributing guide at the root and
 /// a security policy in `.github/`.
 fn seed_project(server: &Server, token: &str, org: &str, repo: &str) {
-    create(server, token, org, repo, true);
+    create(server, token, org, repo);
     commit(
         server,
         token,
@@ -174,7 +174,7 @@ fn an_empty_repository_answers_emptily() {
     let scratch = Scratch::new("meta-empty");
     let server = spawn(&bucket.base_url, &scratch, "meta-empty");
     let token = server.bootstrap_org("acme");
-    create(&server, &token, "acme", "fresh", true);
+    create(&server, &token, "acme", "fresh");
 
     let (st, meta) = server.req("GET", "/v1/orgs/acme/repos/fresh/meta", &token, None);
     assert_eq!(st, 200, "{meta}");
@@ -185,7 +185,7 @@ fn an_empty_repository_answers_emptily() {
     assert_eq!(meta["topics"], serde_json::json!([]));
 
     // And a repository with content but nothing recognisable in it.
-    create(&server, &token, "acme", "prose", true);
+    create(&server, &token, "acme", "prose");
     commit(
         &server,
         &token,
@@ -235,7 +235,7 @@ fn a_readme_is_reported_by_path_and_its_absence_is_null() {
 
     // A project with everything *but* a README. This is the case that
     // must not be indistinguishable from one that has one.
-    create(&server, &token, "acme", "bare", true);
+    create(&server, &token, "acme", "bare");
     commit(
         &server,
         &token,
@@ -257,7 +257,7 @@ fn a_readme_is_reported_by_path_and_its_absence_is_null() {
     // Not a Markdown rule. A `.rst` README is a README, because the
     // naming rule is the server's business — the client is handed a
     // path and never has to know which extensions count.
-    create(&server, &token, "acme", "rst", true);
+    create(&server, &token, "acme", "rst");
     commit(
         &server,
         &token,
@@ -269,7 +269,7 @@ fn a_readme_is_reported_by_path_and_its_absence_is_null() {
 
     // And an extensionless one, which is what a project that predates
     // Markdown looks like.
-    create(&server, &token, "acme", "plain", true);
+    create(&server, &token, "acme", "plain");
     commit(
         &server,
         &token,
@@ -281,7 +281,7 @@ fn a_readme_is_reported_by_path_and_its_absence_is_null() {
 
     // `.github/` is where a project puts the files it does not want at
     // the root, and a README there is still this project's README.
-    create(&server, &token, "acme", "hidden", true);
+    create(&server, &token, "acme", "hidden");
     commit(
         &server,
         &token,
@@ -295,7 +295,7 @@ fn a_readme_is_reported_by_path_and_its_absence_is_null() {
     // files follow, and it falls out of the walk order rather than out
     // of a tie-break — but a rule nothing exercises is a rule nobody
     // knows still holds.
-    create(&server, &token, "acme", "both", true);
+    create(&server, &token, "acme", "both");
     commit(
         &server,
         &token,
@@ -312,7 +312,7 @@ fn a_readme_is_reported_by_path_and_its_absence_is_null() {
     // same rule that keeps `vendor/foo/LICENSE` from being read as this
     // project's licence: hoisting it would attribute somebody else's
     // front page to this repository.
-    create(&server, &token, "acme", "nested", true);
+    create(&server, &token, "acme", "nested");
     commit(
         &server,
         &token,
@@ -351,7 +351,7 @@ fn an_unrecognised_licence_is_said_to_be_unrecognised() {
     // A LICENSE holding only the licence's *name*. This is common —
     // plenty of repositories ship exactly this — and it is the case a
     // substring match on "MIT" reports as MIT.
-    create(&server, &token, "acme", "named", true);
+    create(&server, &token, "acme", "named");
     commit(
         &server,
         &token,
@@ -375,7 +375,7 @@ fn an_unrecognised_licence_is_said_to_be_unrecognised() {
     // all until a browser pass looked at the real page — a
     // dual-licensed project reading as unlicensed, which is exactly the
     // misreading the feature exists to prevent.
-    create(&server, &token, "acme", "dual", true);
+    create(&server, &token, "acme", "dual");
     commit(
         &server,
         &token,
@@ -419,7 +419,7 @@ fn an_unrecognised_licence_is_said_to_be_unrecognised() {
     // A licence somewhere other than the root belongs to that
     // directory, not to the project — the same rule that keeps a
     // `docs/README.md` from being hoisted onto the front page.
-    create(&server, &token, "acme", "vendored", true);
+    create(&server, &token, "acme", "vendored");
     commit(
         &server,
         &token,
@@ -439,7 +439,7 @@ fn topics_are_lowercased_at_the_write_and_replaced_whole() {
     let scratch = Scratch::new("meta-topics");
     let server = spawn(&bucket.base_url, &scratch, "meta-topics");
     let token = server.bootstrap_org("acme");
-    create(&server, &token, "acme", "widget", true);
+    create(&server, &token, "acme", "widget");
     let path = "/v1/orgs/acme/repos/widget/topics";
 
     // Sent with capitals. The column's CHECK refuses a non-lowercase
@@ -501,7 +501,7 @@ fn a_hostile_topic_is_refused_and_the_stored_set_survives_it() {
     let scratch = Scratch::new("meta-bounds");
     let server = spawn(&bucket.base_url, &scratch, "meta-bounds");
     let token = server.bootstrap_org("acme");
-    create(&server, &token, "acme", "widget", true);
+    create(&server, &token, "acme", "widget");
     let path = "/v1/orgs/acme/repos/widget/topics";
 
     let (st, _) = server.req(
@@ -574,7 +574,7 @@ fn a_walk_that_hits_its_bound_says_so() {
         ])
         .start();
     let token = server.bootstrap_org("acme");
-    create(&server, &token, "acme", "big", true);
+    create(&server, &token, "acme", "big");
     commit(
         &server,
         &token,
@@ -597,7 +597,7 @@ fn a_walk_that_hits_its_bound_says_so() {
     // A repository small enough to finish under the same bound is *not*
     // reported as truncated — otherwise this would pass against a
     // server that flagged everything.
-    create(&server, &token, "acme", "small", true);
+    create(&server, &token, "acme", "small");
     commit(
         &server,
         &token,
@@ -613,7 +613,7 @@ fn a_walk_that_hits_its_bound_says_so() {
     // one, the root is walked and nothing below it is — so the nested
     // file is uncounted and the answer says the bar is partial rather
     // than reporting a repository with no Rust in it.
-    create(&server, &token, "acme", "deep", true);
+    create(&server, &token, "acme", "deep");
     commit(
         &server,
         &token,
@@ -741,7 +741,7 @@ fn topics_need_write_access() {
     let scratch = Scratch::new("meta-write");
     let server = spawn(&bucket.base_url, &scratch, "meta-write");
     let admin = server.bootstrap_org("acme");
-    create(&server, &admin, "acme", "widget", true);
+    create(&server, &admin, "acme", "widget");
 
     let (st, minted) = server.req(
         "POST",
@@ -790,7 +790,7 @@ fn a_private_repositorys_panel_is_masked_from_everyone_who_may_not_read_it() {
     let acme = server.bootstrap_org("acme");
     let other = server.bootstrap_org("other");
 
-    create(&server, &acme, "acme", "secret", false);
+    create(&server, &acme, "acme", "secret");
     commit(
         &server,
         &acme,
@@ -820,6 +820,7 @@ fn a_private_repositorys_panel_is_masked_from_everyone_who_may_not_read_it() {
     // "private" from "absent".
     let (anon_st, anon_body) = server.req("GET", meta, "", None);
     let (ghost_st, _) = server.req("GET", ghost, "", None);
+    assert_eq!(anon_st, 401, "anonymous: {anon_body}");
     assert_eq!(anon_st, ghost_st, "anonymous: {anon_body}");
     assert!(
         !anon_body.to_string().contains("payments"),
@@ -840,34 +841,44 @@ fn a_private_repositorys_panel_is_masked_from_everyone_who_may_not_read_it() {
     assert!(!body.to_string().contains("Rust"), "{body}");
 
     // And the write door, from both.
-    for (who, tok) in [("anonymous", ""), ("foreign", other.as_str())] {
+    for (who, tok, expect) in [("anonymous", "", 401), ("foreign", other.as_str(), 404)] {
         let (st, body) = server.req(
             "PUT",
             topics,
             tok,
             Some(serde_json::json!({ "topics": ["stolen"] })),
         );
-        assert!(st == 401 || st == 404, "{who} write: {st} {body}");
+        assert_eq!(st, expect, "{who} write: {body}");
     }
     // The owner's topics are untouched by any of that.
     let (st, mine) = server.req("GET", meta, &acme, None);
     assert_eq!(st, 200, "{mine}");
     assert_eq!(mine["topics"], serde_json::json!(["payments"]));
 
-    // A public repository in the same namespace still answers a
-    // stranger — otherwise this test would pass against a server that
-    // had simply stopped serving the endpoint.
-    create(&server, &acme, "acme", "open", true);
-    commit(
-        &server,
+    // Somebody the organisation *has* let read it gets the whole panel,
+    // on the weakest credential there is — a read-only token — so this
+    // test would not pass against a server that had simply stopped
+    // serving the endpoint, or served it to its owner alone.
+    let (st, minted) = server.req(
+        "POST",
+        "/v1/orgs/acme/tokens",
         &acme,
-        "acme",
-        "open",
-        serde_json::json!([{ "op": "put", "path": "main.rs", "content": "fn main() {}\n" }]),
+        Some(serde_json::json!({ "scopes": ["repo:read"], "label": "reader" })),
     );
-    let (st, open) = server.req("GET", "/v1/orgs/acme/repos/open/meta", "", None);
-    assert_eq!(st, 200, "a public repo must answer a stranger: {open}");
-    assert_eq!(open["languages"][0]["name"], "Rust", "{open}");
+    assert_eq!(st, 201, "{minted}");
+    let reader = minted["token"].as_str().unwrap().to_string();
+    let (st, read) = server.req("GET", meta, &reader, None);
+    assert_eq!(st, 200, "a reader of the org was refused the panel: {read}");
+    assert_eq!(read["languages"][0]["name"], "Rust", "{read}");
+    assert_eq!(read["topics"], serde_json::json!(["payments"]), "{read}");
+    // Reading is not writing, even inside the org.
+    let (st, body) = server.req(
+        "PUT",
+        topics,
+        &reader,
+        Some(serde_json::json!({ "topics": ["stolen"] })),
+    );
+    assert_eq!(st, 404, "a reader wrote topics: {body}");
 
     // The server survived every refusal and is still serving.
     assert_eq!(server.status_get("/healthz", None), 200);

@@ -3,10 +3,10 @@ terraform {
   # (`use_lockfile`); before that it needed a DynamoDB table.
   required_version = ">= 1.10"
 
-  # Values come from `terraform init -backend-config` (the deploy workflow
-  # supplies the bucket from a repository variable and `use_lockfile=true`;
-  # local runs pass the bootstrap outputs). Empty here so credential-free `init -backend=false`
-  # + `validate` works in CI.
+  # Values come from `terraform init -backend-config`: the bucket the
+  # bootstrap stack created, a key per environment, and
+  # `use_lockfile=true` (`scripts/tf.sh` passes all of them). Empty here
+  # so a credential-free `init -backend=false` + `validate` works in CI.
   backend "s3" {}
 
   required_providers {

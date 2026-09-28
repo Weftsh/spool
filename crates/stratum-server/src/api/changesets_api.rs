@@ -127,6 +127,9 @@ pub(crate) fn load(
     key: &str,
     need: Scope,
 ) -> Result<(Changeset, Vec<Loaded>), Response> {
+    // Before the key is looked up: an anonymous caller is told to sign
+    // in whether or not the key exists.
+    crate::authx::require_authenticated(&state.db, headers)?;
     let masked = || json_error(StatusCode::NOT_FOUND, format!("no changeset {key:?}"));
     let cs = match changesets::get(&state.db, org_id, key) {
         Ok(Some(cs)) => cs,
@@ -136,9 +139,7 @@ pub(crate) fn load(
     // A member the caller may not reach makes the whole changeset not
     // exist for them — the same masking each repository applies alone.
     // Anything else a member's authority check says is about *this*
-    // caller and must reach them: the read-only 402 in particular names
-    // the fix, and hiding it behind "no changeset" would send the org's
-    // admin looking for a record they can see perfectly well.
+    // caller and must reach them.
     let members = load_members(state, headers, org_name, &cs, need).map_err(|r| {
         if matches!(r.status(), StatusCode::NOT_FOUND | StatusCode::UNAUTHORIZED) {
             masked()
@@ -616,6 +617,9 @@ pub async fn list(
         Ok(o) => o,
         Err(r) => return r,
     };
+    if let Err(r) = crate::authx::require_authenticated(&state.db, &headers) {
+        return r;
+    }
     let state_filter = params.get("state").map(String::as_str);
     if let Some(s) = state_filter {
         if !matches!(s, "open" | "landing" | "landed" | "abandoned" | "failed") {

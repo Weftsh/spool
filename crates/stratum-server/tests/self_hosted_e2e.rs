@@ -5,28 +5,24 @@
 //! side: a registration token minted through the dashboard's route, a
 //! `POST /v1/runners/register` with a bearer that is not a session and
 //! not an API token, a `POST /v1/runners/claim` that blocks, and then
-//! exactly the five per-job calls a hosted runner makes. That is the
-//! point of the suite — a self-hosted runner is a separate process on
-//! somebody's network, and a test that reached in through a Rust
-//! function would prove our code agrees with itself and nothing about
-//! the wire.
+//! exactly the five per-job calls a runner makes. That is the point of
+//! the suite — a runner is a separate process on somebody's network,
+//! and a test that reached in through a Rust function would prove our
+//! code agrees with itself and nothing about the wire.
 //!
 //! The two properties everything else hangs off:
 //!
 //! * **A repository has to be admitted to a machine.** The group's
-//!   repository access, the public-repository lock and the
-//!   organisation's policy are three different people's decisions, and
-//!   each is checked at trigger time (so a person reads a sentence) and
-//!   again at claim time (so a policy change catches a queued job).
-//! * **Nothing about this pool costs us anything**, so the budget, the
-//!   suspension and the concurrency limit stop at it — and the fork gate
-//!   emphatically does not, because the thing being protected there is
-//!   the machine's owner.
+//!   repository access and the organisation's policy are two different
+//!   people's decisions, and each is checked at trigger time (so a
+//!   person reads a sentence) and again at claim time (so a policy
+//!   change catches a queued job).
+//! * **Every machine belongs to the organisation that registered it**,
+//!   so the fork gate applies to every job: the thing being protected
+//!   is the machine's owner.
 
 use std::time::{Duration, Instant};
-use stratum_control::{registry, ControlDb};
 use stratum_testkit::browser::Browser;
-use stratum_testkit::fake_ecs::{runner_bin_next_to, FakeEcs};
 use stratum_testkit::gitcli::Scratch;
 use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{Minio, Server};
@@ -71,65 +67,28 @@ jobs:
         run: cargo test
 ";
 
-/// An ordinary hosted file, for the cases that need both pools.
-const HOSTED: &str = "\
-name: ci
-on: push
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - name: Work
-        run: echo hosted
-";
-
-/// One file, both fleets — allowed, and each job routes to its own pool.
-const MIXED: &str = "\
-name: ci
-on: push
-jobs:
-  ours:
-    runs-on: ubuntu-latest
-    steps:
-      - run: echo hosted
-  theirs:
-    runs-on: [self-hosted]
-    steps:
-      - run: echo mine
-";
-
 // ---------------------------------------------------------------------
 // The world
 // ---------------------------------------------------------------------
 
 struct World {
     server: Server,
-    db: ControlDb,
     admin: String,
-    org_id: String,
-    #[allow(dead_code)]
-    ecs: FakeEcs,
     #[allow(dead_code)]
     scratch: Scratch,
 }
 
 fn world(hint: &str) -> World {
-    world_with(hint, &[], true)
+    world_with(hint, &[])
 }
 
-/// `runner` decides whether the fake ECS starts the real hosted runner
-/// binary. Most cases here never dispatch a hosted job and do not need
-/// one; the ones that prove the two pools coexist do.
-fn world_with(hint: &str, extra: &[(&str, String)], runner: bool) -> World {
+fn world_with(hint: &str, extra: &[(&str, String)]) -> World {
     let minio = Minio::shared();
     let bucket = minio.bucket(hint);
     let scratch = Scratch::new(hint);
-    let bin = runner.then(|| runner_bin_next_to(env!("CARGO_BIN_EXE_stratum-server")));
-    let ecs = FakeEcs::start(bin, scratch.path().join("runners"));
     let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"))
-        .envs(&ecs.env())
         .env("STRATUM_RUNNER_POLL_SECS", "1")
         // The claim's long poll, shortened so a "nothing to do" answer
         // is a fast 204 rather than twenty seconds of test.
@@ -143,14 +102,9 @@ fn world_with(hint: &str, extra: &[(&str, String)], runner: bool) -> World {
         Some(serde_json::json!({"name": "app"})),
     );
     assert_eq!(st, 201, "{out}");
-    let db = ControlDb::open(&server.db_url).expect("a second session on the server's database");
-    let org_id = registry::org_by_name(&db, "acme").unwrap().unwrap().id;
     World {
         server,
-        db,
         admin,
-        org_id,
-        ecs,
         scratch,
     }
 }
@@ -500,15 +454,13 @@ fn a_registered_machine_takes_a_job_and_its_verdict_reaches_the_run() {
     let sha = w.commit("app", "main", &[(".weft/ci.yml", MINE)]);
     let (job_id, token) = sh.wait_for_job(&w.server, "the pushed job");
 
-    // The spec is the hosted one, unchanged. That is the design: a
-    // self-hosted runner runs the same five calls with the same
-    // credential shape, so nothing about this surface had to move.
+    // The spec carries what the job asked for — its labels, in the
+    // order the file wrote them — and the commit to check out.
     let (st, spec) = spec(&w.server, &job_id, &token);
     assert_eq!(st, 200, "{spec}");
     assert_eq!(spec["job"], "test", "{spec}");
     assert_eq!(spec["commit_sha"], sha, "{spec}");
     assert_eq!(spec["fetch_ref"], "refs/heads/main", "{spec}");
-    assert_eq!(spec["pool"], "self_hosted", "{spec}");
     assert_eq!(spec["labels"][0], "self-hosted", "{spec}");
     assert!(
         spec["clone_url"]
@@ -583,41 +535,35 @@ fn a_registered_machine_takes_a_job_and_its_verdict_reaches_the_run() {
     assert!(w.audited("runner.registered"));
 }
 
-/// A hosted job is never handed to a registered machine, and a
-/// self-hosted job is never launched on our fleet.
+/// A file that asks for a hosted runner is refused on its line, and no
+/// machine is offered anything for it.
 ///
-/// One file, both pools, so the two are competing for the same run —
-/// which is the arrangement that would actually go wrong.
+/// There is no fleet behind this server, and `runs-on: ubuntu-latest`
+/// is what a pasted Actions file says. Queueing it would leave a check
+/// waiting for a runner nobody will ever register; handing it to one of
+/// the organisation's own machines would run it somewhere its author
+/// did not ask for.
 #[test]
-fn each_job_in_a_mixed_file_goes_to_its_own_pool() {
-    let w = world("sh-mixed");
+fn a_file_that_asks_for_a_hosted_runner_is_refused_on_its_line() {
+    let w = world("sh-hosted");
     let sh = w.register("build-box", &[], None);
-    let sha = w.commit("app", "main", &[(".weft/ci.yml", MIXED)]);
-
-    let (job_id, token) = sh.wait_for_job(&w.server, "the self-hosted half");
-    let (_, spec) = spec(&w.server, &job_id, &token);
-    assert_eq!(
-        spec["job"], "theirs",
-        "a runner took the hosted job: {spec}"
+    let sha = w.commit(
+        "app",
+        "main",
+        &[(
+            ".weft/ci.yml",
+            "name: ci\non: push\njobs:\n  test:\n    runs-on: ubuntu-latest\n    steps:\n      - run: echo hosted\n",
+        )],
     );
-    assert_eq!(
-        finish(&w.server, &job_id, &token, "passed", None, None).0,
-        200
-    );
-
-    // The hosted half runs on the fleet, and the runner never sees it.
-    let run = w.wait_settled("app", &sha);
-    assert_eq!(run["state"], "passed", "{run}");
-    let ours = job(&run, "ours");
-    assert_eq!(ours["pool"], "hosted", "{ours}");
+    let refused = w.wait_settled("app", &sha);
+    assert_eq!(refused["state"], "failed", "{refused}");
+    let error = refused["error"].as_str().unwrap_or_default();
     assert!(
-        ours["runner"].is_null(),
-        "a hosted job named a runner: {ours}"
+        error.contains("`runs-on: ubuntu-latest` names a hosted runner, and this server has none"),
+        "{refused}"
     );
-    let theirs = job(&run, "theirs");
-    assert_eq!(theirs["pool"], "self_hosted", "{theirs}");
-    assert_eq!(theirs["runner"]["name"], "build-box", "{theirs}");
-    sh.expect_nothing(&w.server, "the hosted job is not the runner's to take");
+    assert!(refused["blocked_reason"].is_null(), "{refused}");
+    sh.expect_nothing(&w.server, "a machine was offered a hosted job");
 }
 
 /// Labels are a subset test, and a job asking for one nobody has is
@@ -659,82 +605,14 @@ fn a_job_routes_only_to_a_machine_with_every_label_it_asked_for() {
     assert_eq!(job(&run, "test")["runner"]["name"], "gpu-box", "{run}");
 }
 
-/// A public repository is not admitted until somebody says so, and the
-/// refusal names the settings page that fixes it.
-///
-/// The default is the security property: a public repository can be
-/// forked, a fork's change carries its own `run:` lines, and admitting
-/// public repositories by default would hand the first stranger who
-/// opens a change a shell on somebody's build box.
+/// The organisation's policy, each setting, and the sentence it leaves
+/// behind.
 #[test]
-fn a_public_repository_is_refused_until_the_group_allows_one() {
-    let w = world("sh-public");
-    w.register("build-box", &[], None);
-    let (st, out) = w.server.post(
-        "/v1/orgs/acme/repos",
-        &w.admin,
-        Some(serde_json::json!({"name": "open", "public": true})),
-    );
-    assert_eq!(st, 201, "{out}");
-
-    let sha = w.commit("open", "main", &[(".weft/ci.yml", MINE)]);
-    let refused = w.wait_settled("open", &sha);
-    assert_eq!(refused["state"], "failed", "{refused}");
-    assert_eq!(
-        refused["error"],
-        "no runner group admits this repository; add it to a group under Settings → Runners",
-        "{refused}"
-    );
-
-    // Allow it, push again, and the same file runs.
-    let group = w.default_group();
-    let (st, out) = w.server.req(
-        "PATCH",
-        &format!(
-            "/v1/orgs/acme/runner-groups/{}",
-            group["id"].as_str().unwrap()
-        ),
-        &w.admin,
-        Some(serde_json::json!({ "allow_public": true })),
-    );
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(out["allow_public"], true, "{out}");
-    assert!(w.audited("runner_group.updated"));
-
-    let sh = w.register("build-box-2", &[], None);
-    let sha = w.commit("open", "main", &[("README.md", "# open\n")]);
-    let (job_id, token) = sh.wait_for_job(&w.server, "a job from the public repository");
-    assert_eq!(
-        finish(&w.server, &job_id, &token, "passed", None, None).0,
-        200
-    );
-    assert_eq!(w.wait_settled("open", &sha)["state"], "passed");
-}
-
-/// The organisation's policy, both switches, and the sentence each one
-/// leaves behind.
-#[test]
-fn the_policy_refuses_each_pool_in_its_own_words() {
+fn the_policy_refuses_in_its_own_words() {
     let w = world("sh-policy");
     w.register("build-box", &[], None);
 
-    // Hosted off: an ordinary `runs-on: ubuntu-latest` file is refused
-    // with the alternative in the sentence.
-    let (st, out) = w.set_policy(serde_json::json!({ "hosted": "disabled" }));
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(out["hosted"], "disabled", "{out}");
-    assert!(w.audited("runner_policy.updated"));
-
-    let sha = w.commit("app", "hosted-branch", &[(".weft/ci.yml", HOSTED)]);
-    let refused = w.wait_settled("app", &sha);
-    assert_eq!(refused["state"], "failed", "{refused}");
-    assert_eq!(
-        refused["error"],
-        "hosted runners are disabled for this organisation; use runs-on: [self-hosted, …]",
-        "{refused}"
-    );
-
-    // …while a self-hosted file in the same organisation runs.
+    // Allowed by default: a file for the organisation's machines runs.
     let sh = w.register("box-2", &[], None);
     let sha = w.commit("app", "mine-branch", &[(".weft/ci.yml", MINE)]);
     let (job_id, token) = sh.wait_for_job(&w.server, "the self-hosted job");
@@ -744,9 +622,11 @@ fn the_policy_refuses_each_pool_in_its_own_words() {
     );
     assert_eq!(w.wait_settled("app", &sha)["state"], "passed");
 
-    // Self-hosted off: now the other half is refused too.
+    // Off: now it is refused, in the policy's own words.
     let (st, out) = w.set_policy(serde_json::json!({ "self_hosted": "disabled" }));
     assert_eq!(st, 200, "{out}");
+    assert_eq!(out["self_hosted"], "disabled", "{out}");
+    assert!(w.audited("runner_policy.updated"));
     let sha = w.commit("app", "mine-branch", &[("README.md", "# again\n")]);
     let refused = w.wait_settled("app", &sha);
     assert_eq!(
@@ -790,12 +670,11 @@ fn the_policy_refuses_each_pool_in_its_own_words() {
     assert_eq!(w.wait_settled("app", &sha)["state"], "passed");
 
     // A value outside the enumeration is refused, and nothing moves.
-    assert_eq!(w.set_policy(serde_json::json!({ "hosted": "off" })).0, 422);
     assert_eq!(
         w.set_policy(serde_json::json!({ "self_hosted": "some" })).0,
         422
     );
-    assert_eq!(w.policy()["hosted"], "disabled");
+    assert_eq!(w.policy()["self_hosted"], "selected");
 }
 
 /// The last of the five refusals: a repository whose organisation has
@@ -813,81 +692,13 @@ fn a_file_for_a_pool_with_no_machines_says_so_at_trigger_time() {
     assert!(refused["blocked_reason"].is_null(), "{refused}");
 }
 
-/// A self-hosted-only file runs while the organisation is over its
-/// hosted budget **and** while its hosted workflows are suspended.
+/// A miner caught on the organisation's own machine fails the job and
+/// stops there.
 ///
-/// Both refusals are about what our fleet costs, and this pool costs
-/// nothing: stopping a build on hardware somebody bought because the
-/// month's hosted minutes are gone would be charging them for their own
-/// electricity. The hosted half of the same organisation is still
-/// refused, which is what makes this a narrowing rather than a hole.
-#[test]
-fn budget_and_suspension_do_not_reach_a_machine_the_organisation_owns() {
-    let w = world_with(
-        "sh-budget",
-        &[("STRATUM_RUNNER_MINUTES_PER_MONTH", "1".into())],
-        true,
-    );
-    let sh = w.register("build-box", &[], None);
-
-    // One real hosted build spends the organisation's whole month. The
-    // job being admitted is not counted against its own admission, so
-    // this one runs and the next hosted one cannot.
-    let sha = w.commit("app", "main", &[(".weft/ci.yml", HOSTED)]);
-    assert_eq!(w.wait_settled("app", &sha)["state"], "passed");
-
-    // Suspend it as well, so both refusals are live at once — and the
-    // suspension is the stronger of the two, so it is the code the
-    // hosted refusal must carry.
-    assert!(stratum_control::workflows::suspend_ci(
-        &w.db,
-        &w.org_id,
-        "mining software detected: xmrig",
-        stratum_control::ids::now_ms(),
-    )
-    .unwrap());
-
-    // The hosted file is refused… (on `main`, where it lives: a commit
-    // to a branch that does not exist yet is a root commit, and a root
-    // commit carries only the files the request names.)
-    let sha = w.commit("app", "main", &[("README.md", "# again\n")]);
-    let refused = w.wait_settled("app", &sha);
-    assert_eq!(refused["state"], "blocked", "{refused}");
-    assert_eq!(refused["blocked_reason"], "suspended", "{refused}");
-
-    // …and a self-hosted-only file in the same organisation runs anyway.
-    let sha = w.commit("app", "mine", &[(".weft/ci.yml", MINE)]);
-    let (job_id, token) = sh.wait_for_job(&w.server, "a self-hosted job under a suspension");
-    // Ten seconds of work, so it would be a whole billed minute if this
-    // pool were metered.
-    std::thread::sleep(Duration::from_millis(200));
-    assert_eq!(
-        finish(&w.server, &job_id, &token, "passed", None, None).0,
-        200
-    );
-    let run = w.wait_settled("app", &sha);
-    assert_eq!(
-        run["state"], "passed",
-        "a suspended organisation could not use its own machine: {run}"
-    );
-
-    // And it put nothing on the bill: the hosted build's one minute is
-    // still the whole of it.
-    let (st, bill) = w.server.get("/v1/orgs/acme/billing", &w.admin);
-    assert_eq!(st, 200, "{bill}");
-    assert_eq!(
-        bill["ci_minutes_used"], 1,
-        "self-hosted minutes were metered: {bill}"
-    );
-}
-
-/// A miner caught on somebody's own machine fails the job and stops
-/// there. It does not suspend the organisation.
-///
-/// The watch is protecting the machine's owner from a stranger's change,
-/// and that part is identical on both pools. What differs is layer four:
-/// a suspension exists to stop an organisation spending *our* compute,
-/// and there is none being spent here.
+/// The watch is protecting the machine's owner from a stranger's change.
+/// There is no compute of ours being spent, so there is nothing to
+/// suspend: the job fails in the runner's words and the audit log says
+/// so.
 #[test]
 fn a_miner_on_a_self_hosted_machine_fails_the_job_and_nothing_else() {
     let w = world("sh-abuse");
@@ -913,24 +724,18 @@ fn a_miner_on_a_self_hosted_machine_fails_the_job_and_nothing_else() {
         "{run}"
     );
 
-    // The organisation is untouched — asked of the column the
-    // suspension actually lives in, not of a page that renders it.
-    let suspended = stratum_control::workflows::ci_suspension(&w.db, &w.org_id).unwrap();
-    assert!(
-        suspended.is_none(),
-        "a self-hosted miner suspended the organisation: {suspended:?}"
+    // And the organisation's next push still runs on its machine: the
+    // watch stopped one job, it did not stop the organisation.
+    let sha = w.commit("app", "main", &[("README.md", "# after\n")]);
+    let (job_id, token) = sh.wait_for_job(&w.server, "the next job after the miner");
+    assert_eq!(
+        finish(&w.server, &job_id, &token, "passed", None, None).0,
+        200
     );
-    let (st, bill) = w.server.get("/v1/orgs/acme/billing", &w.admin);
-    assert_eq!(st, 200, "{bill}");
-    assert!(bill["ci_suspended_reason"].is_null(), "{bill}");
-
-    // …and its hosted work still runs, which is the thing a suspension
-    // would have stopped.
-    let sha = w.commit("app", "hosted", &[(".weft/ci.yml", HOSTED)]);
     assert_eq!(w.wait_settled("app", &sha)["state"], "passed");
 
-    // It is still recorded, and the entry says which pool it was on —
-    // otherwise the missing suspension reads as one we forgot.
+    // It is recorded, where an owner deciding what to do about the
+    // repository will look.
     let entry = w
         .audit()
         .into_iter()
@@ -1109,7 +914,6 @@ fn a_lapsed_lease_moves_the_job_and_the_attempt_cap_ends_it() {
             ("STRATUM_RUNNER_START_LEASE_SECS", "1".into()),
             ("STRATUM_RUNNER_MAX_ATTEMPTS", "2".into()),
         ],
-        false,
     );
     let first = w.register("first", &[], None);
     let second = w.register("second", &[], None);
@@ -1190,7 +994,7 @@ fn membership_decides_who_may_read_and_who_may_write() {
         (
             "PATCH",
             "/v1/orgs/acme/runner-policy".into(),
-            serde_json::json!({ "hosted": "disabled" }),
+            serde_json::json!({ "self_hosted": "disabled" }),
         ),
         (
             "POST",
@@ -1200,7 +1004,7 @@ fn membership_decides_who_may_read_and_who_may_write() {
         (
             "PATCH",
             format!("/v1/orgs/acme/runner-groups/{gid}"),
-            serde_json::json!({ "allow_public": true }),
+            serde_json::json!({ "name": "renamed" }),
         ),
         (
             "DELETE",
@@ -1227,7 +1031,7 @@ fn membership_decides_who_may_read_and_who_may_write() {
         assert_eq!(st, 404, "a member wrote {method} {path}: {out}");
     }
     // Nothing moved.
-    assert_eq!(w.policy()["hosted"], "allowed");
+    assert_eq!(w.policy()["self_hosted"], "all");
     assert_eq!(w.groups().len(), 1);
 
     // A person with no role in this organisation cannot tell it from one
@@ -1272,7 +1076,6 @@ fn groups_can_be_managed_and_the_default_cannot_be_taken_away() {
     );
     assert_eq!(st, 201, "{out}");
     assert_eq!(out["repos"], serde_json::json!(["app"]), "{out}");
-    assert_eq!(out["allow_public"], false, "{out}");
     assert_eq!(out["runners"], 0, "{out}");
     let gid = out["id"].as_str().unwrap().to_string();
     assert!(w.audited("runner_group.created"));
@@ -1388,26 +1191,25 @@ fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> 
     b
 }
 
-/// A stranger's change is held for approval **even though** the job
+/// A change from a fork is held for approval **even though** the job
 /// would run on the maintainer's own machine — and especially then.
 ///
-/// This is the case the fork gate matters most for. A hosted fork run
-/// spends our compute; a self-hosted one runs a stranger's `run:` lines
+/// This is the case the fork gate matters most for: a fork's change
+/// carries its own `run:` lines, and on a self-hosted machine they run
 /// on hardware in somebody's office, with whatever is on that network
-/// reachable from it. The group's `allow_public` is the second lock and
-/// this is the first, and the test opens the second one deliberately so
-/// that what it is proving is the first.
+/// reachable from it. bob can read ada's organisation's repository — he
+/// was invited in as a viewer, which is the only way anybody reads it —
+/// and that is exactly not the same thing as being trusted to run code
+/// on her box.
 #[test]
 fn a_change_from_a_fork_is_held_even_for_a_machine_the_maintainer_owns() {
     let minio = Minio::shared();
     let bucket = minio.bucket("sh-fork");
     let scratch = Scratch::new("sh-fork");
     let mail = Mailbox::temp("sh-fork");
-    let ecs = FakeEcs::start(None, scratch.path().join("runners"));
     let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .db_hint("sh-fork")
         .data_dir(scratch.path().join("data"))
-        .envs(&ecs.env())
         .envs(&mail.env())
         .env("STRATUM_RUNNER_POLL_SECS", "1")
         .env("STRATUM_RUNNER_CLAIM_WAIT_MS", "700")
@@ -1415,25 +1217,26 @@ fn a_change_from_a_fork_is_held_even_for_a_machine_the_maintainer_owns() {
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
     let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    // A personal namespace has no members, so a repository somebody
+    // else can read lives in an organisation.
     let (st, body) = ada.req(
         "POST",
-        "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        "/v1/orgs",
+        Some(serde_json::json!({ "name": "acme" })),
     );
     assert_eq!(st, 201, "{body}");
-
-    // ada's own machine, and a group that admits her public repository —
-    // so the only thing that can hold bob's change is the fork gate.
-    let (st, groups) = ada.req("GET", "/v1/orgs/ada/runner-groups", None);
-    assert_eq!(st, 200, "{groups}");
-    let gid = groups["groups"][0]["id"].as_str().unwrap().to_string();
     let (st, body) = ada.req(
-        "PATCH",
-        &format!("/v1/orgs/ada/runner-groups/{gid}"),
-        Some(serde_json::json!({ "allow_public": true })),
+        "POST",
+        "/v1/orgs/acme/repos",
+        Some(serde_json::json!({ "name": "widget" })),
     );
-    assert_eq!(st, 200, "{body}");
-    let (st, minted) = ada.req("POST", "/v1/orgs/ada/runners/registration-token", None);
+    assert_eq!(st, 201, "{body}");
+    ada.invite_and_accept("acme", "bob@example.com", "viewer");
+
+    // ada's own machine, in the default group, which admits every
+    // repository — so the only thing that can hold bob's change is the
+    // fork gate.
+    let (st, minted) = ada.req("POST", "/v1/orgs/acme/runners/registration-token", None);
     assert_eq!(st, 201, "{minted}");
     let sh = Sh::register(
         &server,
@@ -1446,7 +1249,7 @@ fn a_change_from_a_fork_is_held_even_for_a_machine_the_maintainer_owns() {
 
     let (st, body) = ada.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/commits",
+        "/v1/orgs/acme/repos/widget/commits",
         Some(serde_json::json!({
             "message": "add ci",
             "operations": [
@@ -1467,7 +1270,7 @@ fn a_change_from_a_fork_is_held_even_for_a_machine_the_maintainer_owns() {
     );
     let _ = seed;
 
-    let (st, body) = bob.req("POST", "/v1/orgs/ada/repos/widget/forks", None);
+    let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
     assert_eq!(st, 202, "{body}");
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
@@ -1497,7 +1300,7 @@ fn a_change_from_a_fork_is_held_even_for_a_machine_the_maintainer_owns() {
     let sha = body["commit"].as_str().unwrap().to_string();
     let (st, opened) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({ "from": "contrib", "source": "bob/widget" })),
     );
     assert_eq!(st, 201, "{opened}");
@@ -1508,7 +1311,7 @@ fn a_change_from_a_fork_is_held_even_for_a_machine_the_maintainer_owns() {
     let held = loop {
         let (_, out) = ada.req(
             "GET",
-            &format!("/v1/orgs/ada/repos/widget/workflow-runs?commit_sha={sha}"),
+            &format!("/v1/orgs/acme/repos/widget/workflow-runs?commit_sha={sha}"),
             None,
         );
         let runs = out["runs"].as_array().cloned().unwrap_or_default();
@@ -1658,7 +1461,7 @@ fn no_runners_route_admits_an_unknown_namespace_or_a_foreign_token() {
     // being served — a surface that survives an attack by refusing
     // everybody has failed differently, not passed.
     assert!(w.server.healthy());
-    assert_eq!(w.policy()["hosted"], "allowed");
+    assert_eq!(w.policy()["self_hosted"], "all");
     assert_eq!(w.groups().len(), 1);
     assert_eq!(w.runner_list().len(), 1);
     let sha = w.commit("app", "main", &[(".weft/ci.yml", MINE)]);

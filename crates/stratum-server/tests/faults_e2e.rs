@@ -1098,12 +1098,6 @@ fn an_unenqueueable_job_does_not_fail_the_write_that_asked_for_it() {
     // exactly the same discipline — a queue that will not take the row
     // warns and the write still succeeds, because a push that happened
     // must not be un-pushed by a bookkeeping failure.
-    //
-    // `sitepublish` joined them with static site hosting, and holds to
-    // the same rule: `workers::sitepublish::enqueue` warns and returns
-    // on a queue that refuses the row, so a push whose site failed to
-    // be scheduled is still a push. The zero-count assertion above is
-    // what proves that, and it covers this kind too.
     let (st, _) = commit(&server, &admin, rp, "after.txt", "ok\n");
     assert_eq!(st, 201);
     let mut kinds: Vec<String> = ctl
@@ -1119,7 +1113,6 @@ fn an_unenqueueable_job_does_not_fail_the_write_that_asked_for_it() {
             "cdnpack".to_string(),
             "compact".to_string(),
             "contrib".to_string(),
-            "sitepublish".to_string()
         ]
     );
 }

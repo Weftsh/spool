@@ -157,14 +157,13 @@ fn wait_for_mail_about(mailbox: &Mailbox, addr: &str, needle: &str) -> CapturedM
 fn repo_with_change(
     ada: &mut Browser<'_>,
     repo: &str,
-    public: bool,
     owner: &str,
     change_id: &str,
 ) -> String {
     let (st, out) = ada.req(
         "POST",
         "/v1/orgs/acme/repos",
-        Some(serde_json::json!({ "name": repo, "public": public })),
+        Some(serde_json::json!({ "name": repo })),
     );
     assert_eq!(st, 201, "create {repo}: {out}");
     let (st, out) = ada.req(
@@ -233,14 +232,12 @@ fn composing_a_changeset_tells_every_members_reviewers_once_and_never_the_compos
     let app = repo_with_change(
         &mut ada,
         "app",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000000a01",
     );
     let lib = repo_with_change(
         &mut ada,
         "lib",
-        false,
         "cy@acme.test",
         "I0000000000000000000000000000000000000b01",
     );
@@ -319,13 +316,19 @@ fn composing_a_changeset_tells_every_members_reviewers_once_and_never_the_compos
 /// A changeset read needs read on **every** member, and so does a mail
 /// about one.
 ///
-/// Zoe has an account in another organization entirely and commented on
-/// a change in acme's *public* repository, which she may do and which
-/// makes her a participant by every other rule in this file. The
-/// changeset she is now adjacent to also contains a private repository
-/// she cannot see — and the mail names its members, so sending it would
-/// tell her that `shut` exists. `changesets_api::load` masks exactly
-/// this on the wire; a notification is the same read by another route.
+/// Zoe has an account in another organization and was, until recently,
+/// a viewer of acme: she commented on a change in `open`, which makes her
+/// a participant by every other rule in this file. Then she left. The
+/// changeset composed afterwards contains `open` and also `shut` — and
+/// the mail names its members, so sending it would tell somebody who may
+/// read nothing here that `shut` exists. `changesets_api::load` masks
+/// exactly this on the wire; a notification is the same read by another
+/// route.
+///
+/// This used to be an outsider commenting on a *public* member while a
+/// private one sat beside it. There are no public repositories, and
+/// every member of an organization reads every repository in it, so the
+/// person who took part and may not read is the one who left.
 #[test]
 fn somebody_who_cannot_read_one_member_is_never_told_the_changeset_exists() {
     let minio = Minio::shared();
@@ -338,35 +341,44 @@ fn somebody_who_cannot_read_one_member_is_never_told_the_changeset_exists() {
     member(&server, "acme", "bo@acme.test", "Bo", "member");
     server.bootstrap_org("elsewhere");
     member(&server, "elsewhere", "zoe@elsewhere.test", "Zoe", "owner");
+    member(&server, "acme", "zoe@elsewhere.test", "Zoe", "viewer");
 
     let mut ada = Browser::signed_in(&server, "ada@acme.test", PASSWORD);
     let mut zoe = Browser::signed_in(&server, "zoe@elsewhere.test", PASSWORD);
     let open = repo_with_change(
         &mut ada,
         "open",
-        true,
         "bo@acme.test",
         "I0000000000000000000000000000000000000c01",
     );
     let shut = repo_with_change(
         &mut ada,
         "shut",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000000d01",
     );
 
-    // An outsider taking part in a public project's review, which is
-    // what a public project is for.
+    // A viewer taking part in the review, which is what a viewer is for.
     let (st, out) = zoe.req(
         "POST",
         &format!("/v1/orgs/acme/repos/open/changes/{open}/comments"),
         Some(serde_json::json!({ "body": "does this cover the retry path?" })),
     );
-    assert_eq!(
-        st, 201,
-        "an outsider could not comment on a public change: {out}"
+    assert_eq!(st, 201, "a viewer could not comment on a change: {out}");
+
+    // And then she leaves, and reads nothing here any more — the wire
+    // agrees before the notifier is asked to.
+    let (st, me) = zoe.req("GET", "/v1/auth/me", None);
+    assert_eq!(st, 200, "{me}");
+    let zoe_id = me["id"].as_str().expect("zoe has an id").to_string();
+    let (st, out) = ada.req("DELETE", &format!("/v1/orgs/acme/members/{zoe_id}"), None);
+    assert_eq!(st, 204, "remove zoe: {out}");
+    let (st, out) = zoe.req(
+        "GET",
+        &format!("/v1/orgs/acme/repos/open/changes/{open}"),
+        None,
     );
+    assert_eq!(st, 404, "a former member still reads the change: {out}");
 
     let (st, out) = ada.req(
         "POST",
@@ -471,7 +483,6 @@ fn owners_that_cannot_be_read_costs_the_reviewers_and_not_the_notification() {
     let change = repo_with_change(
         &mut ada,
         "app",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000000f01",
     );
@@ -535,14 +546,12 @@ fn a_landed_changeset_mails_its_people_and_the_link_it_carries_resolves() {
     let app = repo_with_change(
         &mut ada,
         "app",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000000e01",
     );
     let lib = repo_with_change(
         &mut ada,
         "lib",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000000f01",
     );
@@ -724,14 +733,12 @@ fn a_changeset_notification_this_build_cannot_read_fails_the_job_and_mails_no_gu
     let app = repo_with_change(
         &mut ada,
         "app",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000001a01",
     );
     let lib = repo_with_change(
         &mut ada,
         "lib",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000001b01",
     );
@@ -839,15 +846,15 @@ fn a_changeset_notification_this_build_cannot_read_fails_the_job_and_mails_no_gu
 ///
 /// Signing up mints the namespace immediately and leaves `verified_at`
 /// null until the link is clicked, so between those two moments a person
-/// can take part in a public project's review with an address that is
-/// still only a claim. Mailing a claim is how a forge becomes the thing
-/// that sends strangers' review traffic to an address nobody confirmed —
-/// and the claim can be somebody else's address.
+/// can take part in a review with an address that is still only a claim.
+/// Mailing a claim is how a forge becomes the thing that sends review
+/// traffic to an address nobody confirmed — and the claim can be
+/// somebody else's address.
 ///
 /// The differential is what makes this test mean something: Eve and Dee
-/// do exactly the same thing from outside the org, on the same public
-/// change, and the only difference between them is that one of them
-/// proved her address.
+/// are both viewers an operator added to acme, they do exactly the same
+/// thing on the same change, and the only difference between them is
+/// that one of them proved her address.
 #[test]
 fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
     let minio = Minio::shared();
@@ -860,10 +867,12 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
     member(&server, "acme", "bo@acme.test", "Bo", "member");
     server.bootstrap_org("elsewhere");
     member(&server, "elsewhere", "eve@elsewhere.test", "Eve", "owner");
+    member(&server, "acme", "eve@elsewhere.test", "Eve", "viewer");
 
     // The unproved one: signed up, never clicked the link. This is an
     // ordinary state, not a contrived one — every account passes through
-    // it, and some stay there.
+    // it, and some stay there. An operator adding the account to an org
+    // proves nothing about its address, so it stays unproved.
     let (st, out) = server.req(
         "POST",
         "/v1/auth/signup",
@@ -876,6 +885,7 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
         })),
     );
     assert_eq!(st, 202, "signup: {out}");
+    member(&server, "acme", "dee@example.test", "Dee", "viewer");
 
     let mut ada = Browser::signed_in(&server, "ada@acme.test", PASSWORD);
     let mut eve = Browser::signed_in(&server, "eve@elsewhere.test", PASSWORD);
@@ -887,19 +897,18 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
         "the fixture is verified, so this test proves nothing: {me}"
     );
 
-    // Two public members, so nobody here is filtered by the read rule
-    // the leak test above is about: what is under test is the address.
+    // Two members both of them may read, so nobody here is filtered by
+    // the read rule the leak test above is about: what is under test is
+    // the address.
     let open = repo_with_change(
         &mut ada,
         "open",
-        true,
         "bo@acme.test",
         "I0000000000000000000000000000000000002a01",
     );
     let also = repo_with_change(
         &mut ada,
         "also",
-        true,
         "bo@acme.test",
         "I0000000000000000000000000000000000002b01",
     );
@@ -912,7 +921,7 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
             &format!("/v1/orgs/acme/repos/open/changes/{open}/comments"),
             Some(serde_json::json!({ "body": "does this cover the retry path?" })),
         );
-        assert_eq!(st, 201, "{who} could not comment on a public change: {out}");
+        assert_eq!(st, 201, "{who} could not comment on a change: {out}");
     }
 
     let (st, out) = ada.req(
@@ -920,7 +929,7 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
         "/v1/orgs/acme/changesets",
         Some(serde_json::json!({
             "key": "CS-5",
-            "title": "two public members",
+            "title": "two readable members",
             "members": [
                 {"repo": "open", "change": open},
                 {"repo": "also", "change": also},
@@ -931,7 +940,7 @@ fn an_address_nobody_proved_is_not_mailed_about_a_changeset() {
 
     // Eve took part with a proved address and is told, which is what
     // makes Dee's silence a statement about the address rather than
-    // about outsiders.
+    // about viewers.
     wait_for_changeset_mail(&mailbox, "eve@elsewhere.test", "composed changeset CS-5");
     assert!(
         changeset_mails(&mailbox, "dee@example.test").is_empty(),
@@ -980,14 +989,12 @@ fn a_mail_transport_that_refuses_costs_the_notification_and_not_the_worker() {
     let app = repo_with_change(
         &mut ada,
         "app",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000003a01",
     );
     let lib = repo_with_change(
         &mut ada,
         "lib",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000003b01",
     );
@@ -1092,14 +1099,12 @@ fn a_queue_that_cannot_be_written_does_not_fail_composing_a_changeset() {
     let app = repo_with_change(
         &mut ada,
         "app",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000004a01",
     );
     let lib = repo_with_change(
         &mut ada,
         "lib",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000004b01",
     );
@@ -1142,7 +1147,6 @@ fn a_queue_that_cannot_be_written_does_not_fail_composing_a_changeset() {
     let web = repo_with_change(
         &mut ada,
         "web",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000004c01",
     );
@@ -1197,7 +1201,6 @@ fn a_node_with_the_changeset_notifier_off_leaves_the_work_on_the_queue() {
     let app = repo_with_change(
         &mut ada,
         "app",
-        false,
         "bo@acme.test",
         "I0000000000000000000000000000000000005a01",
     );
@@ -1281,14 +1284,12 @@ fn a_member_whose_repository_is_gone_is_skipped_and_the_rest_are_still_told() {
         let app = repo_with_change(
             &mut ada,
             "app",
-            false,
             "bo@acme.test",
             "I0000000000000000000000000000000000006a01",
         );
         let lib = repo_with_change(
             &mut ada,
             "lib",
-            false,
             "cy@acme.test",
             "I0000000000000000000000000000000000006b01",
         );
@@ -1367,7 +1368,6 @@ fn a_set_whose_only_repository_is_gone_is_done_with_nobody_to_tell() {
         let app = repo_with_change(
             &mut ada,
             "app",
-            false,
             "bo@acme.test",
             "I0000000000000000000000000000000000007a01",
         );

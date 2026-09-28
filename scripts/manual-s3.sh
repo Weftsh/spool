@@ -11,8 +11,9 @@
 # a CAS and the invariant is decoration.
 #
 # Those semantics had been verified against exactly one implementation —
-# MinIO, in tests — while production runs a fleet of stateless nodes
-# against real S3. reference/formats.md called that the top open item.
+# MinIO, in tests — while a deployment runs stateless nodes against
+# whatever S3-compatible store it chose. reference/formats.md called that
+# the top open item.
 #
 # It was right to. Real S3 answers 409 ConditionalRequestConflict when two
 # conditional writes to one key overlap, where MinIO only ever answers
@@ -40,6 +41,13 @@
 #   * Run it with the DEPLOYMENT'S IAM policy, not an admin key. The
 #     404-not-403 case exists to catch a least-privilege policy turning
 #     absence into AccessDenied, and an admin key can never fail it.
+#
+# Not on AWS? Set STRATUM_S3_ENDPOINT to the store's origin (e.g.
+# https://s3.example.com) and the bucket is addressed under it —
+# path-style as <endpoint>/<bucket>, virtual-host-style as
+# <bucket>.<endpoint host>. A pass there says nothing about AWS, and a
+# pass on AWS says nothing about it: the point of this gate is that each
+# backend answers conditional writes its own way.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -61,8 +69,14 @@ Set STRATUM_S3_BUCKET, AWS_REGION, and the AWS_* credentials for the role you de
 # else is never disturbed and two runs cannot collide.
 prefix() { echo "store-contract/$(date +%s)-$$"; }
 
-path_style_url() { echo "https://s3.${AWS_REGION}.amazonaws.com/${STRATUM_S3_BUCKET}"; }
-vhost_style_url() { echo "https://${STRATUM_S3_BUCKET}.s3.${AWS_REGION}.amazonaws.com"; }
+# AWS by default; any S3-compatible origin when STRATUM_S3_ENDPOINT says so.
+endpoint() { echo "${STRATUM_S3_ENDPOINT:-https://s3.${AWS_REGION}.amazonaws.com}" | sed 's#/*$##'; }
+path_style_url() { echo "$(endpoint)/${STRATUM_S3_BUCKET}"; }
+vhost_style_url() {
+  local e scheme host
+  e=$(endpoint); scheme=${e%%://*}; host=${e#*://}
+  echo "${scheme}://${STRATUM_S3_BUCKET}.${host}"
+}
 
 run_one() {
   local url="$1" style="$2" pfx
@@ -117,7 +131,8 @@ cmd_clean() {
   [ -n "$pfx" ] || die "usage: scripts/manual-s3.sh clean <prefix>"
   command -v aws >/dev/null || die "the aws CLI is needed to sweep a prefix"
   say "removing s3://${STRATUM_S3_BUCKET}/${pfx}"
-  aws s3 rm "s3://${STRATUM_S3_BUCKET}/${pfx}" --recursive
+  aws s3 rm "s3://${STRATUM_S3_BUCKET}/${pfx}" --recursive \
+    ${STRATUM_S3_ENDPOINT:+--endpoint-url "$STRATUM_S3_ENDPOINT"}
 }
 
 case "${1:-}" in
@@ -129,7 +144,8 @@ usage: scripts/manual-s3.sh check [--both-addressing-styles]
        scripts/manual-s3.sh clean <prefix>
 
 Environment: STRATUM_S3_BUCKET, AWS_REGION, AWS_ACCESS_KEY_ID,
-AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN if the role needs one).
+AWS_SECRET_ACCESS_KEY (and AWS_SESSION_TOKEN if the role needs one);
+STRATUM_S3_ENDPOINT for an S3-compatible store that is not AWS.
 
 Use the credentials you actually deploy with, not an admin key.
 USAGE

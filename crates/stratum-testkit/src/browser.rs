@@ -76,4 +76,32 @@ impl<'a> Browser<'a> {
         assert_eq!(st, 200, "sign in as {email}");
         b
     }
+
+    /// Invite `email` into `org` as `role` from this session, which must
+    /// be an admin of `org`, and accept the invitation from a fresh
+    /// browser — the link is the credential, so no password is needed
+    /// for a person who already has an account.
+    ///
+    /// Every repository is private to its organisation, so this is how a
+    /// second person comes to read one: to fork it, to open a change
+    /// against it, to be the stranger a fork gate is about.
+    pub fn invite_and_accept(&mut self, org: &str, email: &str, role: &str) {
+        let (st, inv) = self.req(
+            "POST",
+            &format!("/v1/orgs/{org}/invites"),
+            Some(serde_json::json!({ "email": email, "role": role })),
+        );
+        assert_eq!(st, 201, "invite {email} into {org}: {inv}");
+        let link = inv["invite_link"]
+            .as_str()
+            .unwrap_or_else(|| panic!("the invite carries its link: {inv}"))
+            .to_string();
+        let mut them = Browser::new(self.server);
+        let (st, out) = them.req(
+            "POST",
+            "/v1/auth/accept-invite",
+            Some(serde_json::json!({ "invite": link, "name": email })),
+        );
+        assert_eq!(st, 201, "{email} accepting the invite into {org}: {out}");
+    }
 }

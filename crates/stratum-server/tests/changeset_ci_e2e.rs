@@ -1,4 +1,5 @@
-//! Composed CI for a changeset, end to end, with the real runner.
+//! Composed CI for a changeset, end to end, through a real `weft-runner`
+//! agent the organisation registered.
 //!
 //! A changeset is landed as one thing, so it has to be *tested* as one
 //! thing: a job declared `on: changeset` runs once per member repository
@@ -6,10 +7,11 @@
 //! and its verdict lands on the changeset — not on any one commit — where
 //! the changeset's land gate reads it. Everything between the changeset
 //! API and that gate is the product: the trigger, the composition hash,
-//! the dispatcher, the fake ECS starting the **real `weft-runner`**,
-//! the per-member read tokens the spec hands it, the checkout of every
-//! member, the step env, the mirror into `changeset_checks`, the fold
-//! into the verdict.
+//! the claim a registered machine makes, the per-member read tokens the
+//! spec hands it, the checkout of every member, the step env, the mirror
+//! into `changeset_checks`, the fold into the verdict. The machine is the
+//! real agent — `weft-runner register`, then `weft-runner run` as its own
+//! process — and what the suite knows of it is what it printed.
 //!
 //! The situations are the ones that happen. A composed run that passes
 //! and lets the changeset land; a composed check that fails and blocks
@@ -18,11 +20,11 @@
 //! under a live build; a member token that can read its own repository
 //! and nothing else, and is dead the moment the job is.
 
+use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use stratum_testkit::browser::Browser;
-use stratum_testkit::fake_ecs::{runner_bin_next_to, FakeEcs};
 use stratum_testkit::gitcli::Scratch;
-use stratum_testkit::mailbox::Mailbox;
+use stratum_testkit::runner_bin::{registration_token, runner_bin_next_to, Agent, Registered};
 use stratum_testkit::{wait_for, wait_until, Minio, Server};
 
 const CS: &str = "/v1/orgs/acme/changesets";
@@ -35,13 +37,16 @@ const CS: &str = "/v1/orgs/acme/changesets";
 /// the arithmetic that justifies the wait lives.
 const POLL_SECS: &str = "0.1";
 
-/// How long to give a worker to do the thing we are asserting it does
-/// *not* do: five ticks of `POLL_SECS`. Enough that a missed tick is not
-/// the reason the assertion held, short enough that it is not the test's
-/// runtime. This is the only shape of wait in this file that is a
-/// duration rather than an observable, because there is no observable
-/// for "and then nothing happened".
-const NEGATIVE_WINDOW: Duration = Duration::from_millis(500);
+/// How long to give the server to do the thing we are asserting it does
+/// *not* do. The slowest thing that could do it is a listening agent's
+/// claim, which looks for work every half second (`CLAIM_POLL` in the
+/// runners API); this is three of those, and fifteen ticks of
+/// `POLL_SECS`. Enough that a missed poll is not the reason the
+/// assertion held, short enough that it is not the test's runtime. This
+/// is the only shape of wait in this file that is a duration rather than
+/// an observable, because there is no observable for "and then nothing
+/// happened".
+const NEGATIVE_WINDOW: Duration = Duration::from_millis(1500);
 
 /// How often a bespoke poll loop below re-reads the server. The same
 /// interval `stratum_testkit::wait` polls at; these loops exist only
@@ -90,11 +95,17 @@ jobs:
         run: echo \"event=$WEFT_EVENT\"; exit 3
 ";
 
-/// Composed only; sleeps while the api member's patchset says `slow`,
-/// so the composition it belongs to can be superseded under it — and
-/// finishes at once when a later patchset says otherwise. The sleep is
-/// keyed on another member's file so that the very thing that ends the
-/// wait is a new composition.
+/// Composed only; never ends while the api member's patchset says
+/// `slow`, so the composition it belongs to can be superseded under it —
+/// and finishes at once when a later patchset says otherwise. The wait
+/// is keyed on another member's file so that the very thing that ends
+/// it is a new composition.
+///
+/// It prints its pid, which is how a test proves a cancellation reached
+/// the machine — that process is gone — and it keeps printing, because a
+/// runner learns its job is over from the answer to its next call: a
+/// step that prints is flushed every second, one that is silent gets a
+/// heartbeat every thirty.
 const SLOW_WHILE_API_SLOW: &str = "\
 name: ci
 on: changeset
@@ -103,11 +114,14 @@ jobs:
     steps:
       - name: Wait
         run: |
-          if grep -q slow \"$WEFT_WORKSPACE/api/feature.txt\"; then echo waiting; sleep 60; fi
+          if grep -q slow \"$WEFT_WORKSPACE/api/feature.txt\"; then
+            echo \"waiting pid=$$\"
+            while true; do echo tick; sleep 0.2; done
+          fi
           echo quick
 ";
 
-/// Composed only; sleeps while web is a member.
+/// Composed only; never ends while web is a member.
 const SLOW_WHILE_WEB_IN: &str = "\
 name: ci
 on: changeset
@@ -116,38 +130,77 @@ jobs:
     steps:
       - name: Wait
         run: |
-          case \"$WEFT_CHANGESET_MEMBERS\" in *web*) echo waiting; sleep 60;; esac
+          case \"$WEFT_CHANGESET_MEMBERS\" in *web*)
+            echo \"waiting pid=$$\"
+            while true; do echo tick; sleep 0.2; done;;
+          esac
           echo quick
 ";
 
+/// How long a cancellation may take to reach an agent whose step is
+/// printing: the log is flushed every second and the answer to that
+/// flush is the 410. Generous for a loaded machine, and far short of
+/// anything the steps above would reach by finishing on their own —
+/// while they wait, they never do.
+const REACH: Duration = Duration::from_secs(30);
+
 struct World {
+    /// First, so they are stopped while the server they call is still
+    /// there: struct fields drop in declaration order.
+    agents: Vec<Agent>,
     server: Server,
-    ecs: FakeEcs,
     admin: String,
-    /// Held so the scratch tree outlives the server writing into it.
-    #[allow(dead_code)]
     scratch: Scratch,
 }
 
-/// A server dispatching ten times a second through a fake ECS that
-/// starts the real runner, with a bootstrapped `acme`.
+/// The environment every server in this file starts with: every worker
+/// at `POLL_SECS`, and a claim's long poll short enough that an idle
+/// agent — and the server's shutdown behind it — is not held for twenty
+/// seconds. The claim looks for work every half second either way.
+fn fast() -> Vec<(&'static str, String)> {
+    vec![
+        ("STRATUM_RUNNER_POLL_SECS", POLL_SECS.into()),
+        ("STRATUM_LAND_POLL_SECS", POLL_SECS.into()),
+        ("STRATUM_RUNNER_CLAIM_WAIT_MS", "700".into()),
+        // Only the fork case forks, but the fork worker's default poll is
+        // five seconds — long enough that its wait was mostly this knob
+        // rather than anything about forking.
+        ("STRATUM_FORK_POLL_SECS", POLL_SECS.into()),
+    ]
+}
+
+fn runner_bin() -> PathBuf {
+    runner_bin_next_to(env!("CARGO_BIN_EXE_stratum-server"))
+}
+
+/// A server with a bootstrapped `acme`, and one machine — `box-1` —
+/// registered to it and listening.
 fn world(hint: &str) -> World {
+    world_with(hint, &["box-1"])
+}
+
+fn world_with(hint: &str, agents: &[&str]) -> World {
     let minio = Minio::shared();
     let bucket = minio.bucket(hint);
     let scratch = Scratch::new(hint);
-    let runner = runner_bin_next_to(env!("CARGO_BIN_EXE_stratum-server"));
-    let ecs = FakeEcs::start(Some(runner), scratch.path().join("runners"));
     let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"))
-        .envs(&ecs.env())
-        .env("STRATUM_RUNNER_POLL_SECS", POLL_SECS)
-        .env("STRATUM_LAND_POLL_SECS", POLL_SECS)
+        .envs(&fast())
         .start();
     let admin = server.bootstrap_org("acme");
+    let bin = runner_bin();
+    let agents = agents
+        .iter()
+        .map(|name| {
+            let token = registration_token(&server, &admin, "acme");
+            let dir = scratch.path().join(format!("agent-{name}"));
+            Agent::attach(&bin, &server.base, &token, name, &[], &dir)
+        })
+        .collect();
     World {
+        agents,
         server,
-        ecs,
         admin,
         scratch,
     }
@@ -158,6 +211,19 @@ fn put(path: &str, content: &str) -> serde_json::Value {
 }
 
 impl World {
+    fn agent(&self, name: &str) -> &Agent {
+        self.agents
+            .iter()
+            .find(|a| a.name() == name)
+            .unwrap_or_else(|| panic!("no agent {name}"))
+    }
+
+    /// What every agent said — the half of a failure the run list cannot
+    /// show.
+    fn said(&self) -> String {
+        self.agents.iter().map(Agent::said).collect()
+    }
+
     fn commit(
         &self,
         repo: &str,
@@ -189,7 +255,7 @@ impl World {
         let (st, out) = self.server.post(
             "/v1/orgs/acme/repos",
             &self.admin,
-            Some(serde_json::json!({"name": repo, "public": false})),
+            Some(serde_json::json!({"name": repo})),
         );
         assert_eq!(st, 201, "create repo {repo}: {out}");
         self.commit(
@@ -340,8 +406,9 @@ impl World {
             }
             assert!(
                 Instant::now() < deadline,
-                "waited 60s for {what} in {repo}; runs were:\n{}",
-                serde_json::to_string_pretty(&runs).unwrap()
+                "waited 60s for {what} in {repo}; runs were:\n{}\n{}",
+                serde_json::to_string_pretty(&runs).unwrap(),
+                self.said()
             );
             std::thread::sleep(POLL);
         }
@@ -380,6 +447,17 @@ impl World {
         }
     }
 
+    /// The pid a waiting step printed, once it has: the moment there is
+    /// a build in progress on a machine to do something to.
+    fn wait_step(&self, repo: &str, job_id: &str) -> u32 {
+        let log = self.wait_log(repo, job_id, "waiting pid=");
+        let rest = &log[log.find("waiting pid=").unwrap() + "waiting pid=".len()..];
+        let digits: String = rest.chars().take_while(char::is_ascii_digit).collect();
+        digits
+            .parse()
+            .unwrap_or_else(|e| panic!("no pid after `waiting pid=` ({e}):\n{log}"))
+    }
+
     fn checks(&self, repo: &str, sha: &str) -> Vec<serde_json::Value> {
         let (st, out) = self.server.get(
             &format!("/v1/orgs/acme/repos/{repo}/commits/{sha}/checks"),
@@ -405,6 +483,44 @@ fn job<'a>(run: &'a serde_json::Value, key: &str) -> &'a serde_json::Value {
         .iter()
         .find(|j| j["key"] == key)
         .unwrap_or_else(|| panic!("no job {key} in {run}"))
+}
+
+/// Whether the step that printed `pid` is still running: the process
+/// exists, is not a zombie, and is still the shell running one of the
+/// waiting loops above — the last so that a pid the kernel has since
+/// handed to something else cannot pass for it. Asked of `ps` rather
+/// than `/proc` so the answer means the same on a Mac as on Linux.
+fn step_alive(pid: u32) -> bool {
+    let out = std::process::Command::new("ps")
+        .args(["-o", "stat=", "-o", "command=", "-p", &pid.to_string()])
+        .output()
+        .expect("run ps");
+    let line = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    !line.is_empty() && !line.starts_with('Z') && line.contains("tick")
+}
+
+/// That a cancelled composed build really stopped on the machine: the
+/// step's process is gone, and the agent is done with the job in its own
+/// words — `cancelled, exiting quietly`, the ending a 410 gets and not
+/// the one a verdict gets.
+fn assert_stopped_on_the_machine(agent: &Agent, job_id: &str, pid: u32) {
+    wait_until(
+        &format!("the step of job {job_id} (pid {pid}) to be killed"),
+        REACH,
+        || !step_alive(pid),
+    );
+    agent.wait_until(
+        &format!("{} to let go of job {job_id}", agent.name()),
+        REACH,
+        |a| a.finished().iter().any(|j| j == job_id),
+    );
+    assert!(
+        agent
+            .stderr()
+            .contains(&format!("job {job_id}: cancelled, exiting quietly")),
+        "the agent did not end the job as a cancellation:\n{}",
+        agent.said()
+    );
 }
 
 fn the_one(runs: Vec<serde_json::Value>) -> serde_json::Value {
@@ -583,8 +699,8 @@ fn a_composed_run_materialises_every_member_and_lets_the_changeset_land() {
     assert_eq!(st, 200, "the same tip is the same patchset: {out}");
     assert_eq!(out["patchset"]["number"], 1, "{out}");
     // Nothing to wait *for*: the claim is that no third run appears. Give
-    // the dispatcher `NEGATIVE_WINDOW` — five of its polls — to have made
-    // the mistake, then read the list.
+    // the server `NEGATIVE_WINDOW` to have made the mistake, then read the
+    // list.
     std::thread::sleep(NEGATIVE_WINDOW);
     assert_eq!(w.runs("api").len(), 2, "{:?}", w.runs("api"));
     assert_eq!(w.runs("web").len(), 2);
@@ -636,8 +752,24 @@ fn a_composed_run_materialises_every_member_and_lets_the_changeset_land() {
         },
     );
     assert_eq!(landed["state"], "landed", "{landed}");
-    let exits = w.ecs.wait_all(Duration::from_secs(20));
-    assert_eq!(exits.len(), 4, "{exits:?}");
+    // Four jobs — two change runs, two composed — each taken by the one
+    // machine and each ended cleanly: a job that could not report its
+    // verdict is announced with the runner's exit code after its id.
+    let agent = w.agent("box-1");
+    agent.wait_until("the machine to be done with all four jobs", REACH, |a| {
+        a.finished().len() == 4
+    });
+    assert_eq!(agent.took().len(), 4, "{}", agent.said());
+    assert!(
+        agent
+            .stdout()
+            .lines()
+            .filter(|l| l.contains("(the runner exited"))
+            .count()
+            == 0,
+        "a job ended badly on the machine:\n{}",
+        agent.said()
+    );
     assert!(w.server.healthy());
 }
 
@@ -665,8 +797,8 @@ fn a_failing_composed_check_blocks_the_changeset_and_no_member() {
     let run = the_one(w.wait_all_settled("web", 1));
     assert_eq!(run["event"], "changeset", "{run}");
     assert_eq!(run["state"], "failed", "{run}");
-    // api declares nothing composed. An absence again: five dispatcher
-    // polls in which it could have started something, and did not.
+    // api declares nothing composed. An absence again: `NEGATIVE_WINDOW`
+    // in which it could have started something, and did not.
     std::thread::sleep(NEGATIVE_WINDOW);
     assert!(w.runs("api").is_empty(), "{:?}", w.runs("api"));
     let log = w.log("web", job(&run, "test")["id"].as_str().unwrap());
@@ -739,7 +871,7 @@ fn a_new_patchset_on_one_member_supersedes_the_whole_composition() {
         .find(|r| r["event"] == "changeset")
         .unwrap();
     let job1 = job(&run1, "test")["id"].as_str().unwrap().to_string();
-    w.wait_log("web", &job1, "waiting");
+    let pid1 = w.wait_step("web", &job1);
 
     // api's author pushes patchset 2. Nothing changed in web, but the
     // thing under test is the *composition*, and that is a different one.
@@ -759,7 +891,11 @@ fn a_new_patchset_on_one_member_supersedes_the_whole_composition() {
         "{run1}"
     );
     assert_eq!(run1["composition"], first, "{run1}");
-    assert_eq!(w.ecs.stop_tasks().len(), 1, "{:?}", w.ecs.stop_tasks());
+    // The cancellation reached the machine, which is the only thing that
+    // makes superseding save anything; and the machine it freed is the
+    // one that builds the new composition.
+    let agent = w.agent("box-1");
+    assert_stopped_on_the_machine(agent, &job1, pid1);
 
     let runs = w.wait_all_settled("web", 2);
     let run2 = runs.iter().find(|r| r["id"] != run1["id"]).unwrap();
@@ -774,6 +910,15 @@ fn a_new_patchset_on_one_member_supersedes_the_whole_composition() {
     assert!(
         log.contains("quick") && !log.contains("waiting"),
         "read api's second patchset: {log}"
+    );
+    assert_eq!(
+        agent.took(),
+        vec![
+            job1.clone(),
+            job(run2, "test")["id"].as_str().unwrap().to_string()
+        ],
+        "{}",
+        agent.said()
     );
 
     // The body shows the current composition only: one check, the green
@@ -814,7 +959,8 @@ fn membership_changes_recompose_and_abandoning_cancels() {
         .into_iter()
         .next()
         .unwrap();
-    w.wait_log("api", job(&run1, "test")["id"].as_str().unwrap(), "waiting");
+    let job1 = job(&run1, "test")["id"].as_str().unwrap().to_string();
+    let pid1 = w.wait_step("api", &job1);
 
     // web leaves. api's own tip is unchanged; the composition is not.
     let (st, out) = w
@@ -836,6 +982,7 @@ fn membership_changes_recompose_and_abandoning_cancels() {
     let run2 = runs.iter().find(|r| r["id"] != run1["id"]).unwrap();
     assert_eq!(run2["state"], "passed", "{run2}");
     assert_eq!(run2["composition"], alone, "{run2}");
+    assert_stopped_on_the_machine(w.agent("box-1"), &job1, pid1);
     assert_eq!(
         w.changeset("Ic5000001")["checks"].as_array().unwrap().len(),
         1
@@ -863,7 +1010,8 @@ fn membership_changes_recompose_and_abandoning_cancels() {
         .find(|r| r["state"] == "running")
         .unwrap();
     assert_eq!(run3["composition"], with_web, "{run3}");
-    w.wait_log("api", job(&run3, "test")["id"].as_str().unwrap(), "waiting");
+    let job3 = job(&run3, "test")["id"].as_str().unwrap().to_string();
+    let pid3 = w.wait_step("api", &job3);
     let v = w.verdict("Ic5000001");
     assert_eq!(v["gate"], "waiting", "{v}");
     assert_eq!(
@@ -880,7 +1028,8 @@ fn membership_changes_recompose_and_abandoning_cancels() {
     let run3 = runs.iter().find(|r| r["id"] == run3["id"]).unwrap();
     assert_eq!(run3["state"], "cancelled", "{run3}");
     assert_eq!(run3["error"], "changeset abandoned", "{run3}");
-    assert_eq!(w.ecs.stop_tasks().len(), 2, "{:?}", w.ecs.stop_tasks());
+    assert_stopped_on_the_machine(w.agent("box-1"), &job3, pid3);
+    assert_eq!(w.agent("box-1").took().len(), 3, "{}", w.said());
     assert!(w.server.healthy());
 }
 
@@ -888,9 +1037,34 @@ fn membership_changes_recompose_and_abandoning_cancels() {
 // The member token
 // ---------------------------------------------------------------------
 
+/// The one case in this file where the test is the machine.
+///
+/// What is under test is what a composed job's credentials can do, and
+/// the real agent — rightly — keeps them in memory, hands the member
+/// tokens to `git` through its environment and nowhere else, and writes
+/// none of them down. So the machine is registered by the real binary,
+/// and the test then asks for work with the credential that registration
+/// wrote, exactly as `weft-runner run` does: the claim hands over the
+/// job token, and the spec the job token fetches hands over the member
+/// tokens. That the agent really *uses* them — fetching the other
+/// member's patchset from outside — is what the green case above proves.
 #[test]
 fn a_member_token_reads_its_own_repository_only_and_dies_with_the_job() {
-    let w = world("cs-ci-token");
+    let w = world_with("cs-ci-token", &[]);
+    let token = registration_token(&w.server, &w.admin, "acme");
+    let machine = Registered::register(
+        &runner_bin(),
+        &w.server.base,
+        &token,
+        "inspector",
+        &[],
+        &w.scratch.path().join("inspector"),
+    );
+    let credential = machine.state()["credential"]
+        .as_str()
+        .expect("register wrote a credential")
+        .to_string();
+
     w.repo_with_change(
         "api",
         "oa@acme.test",
@@ -902,35 +1076,28 @@ fn a_member_token_reads_its_own_repository_only_and_dies_with_the_job() {
     let (st, out) = w.server.post(
         "/v1/orgs/acme/repos",
         &w.admin,
-        Some(serde_json::json!({"name": "vault", "public": false})),
+        Some(serde_json::json!({"name": "vault"})),
     );
     assert_eq!(st, 201, "{out}");
     w.compose("Ic5000001", &[("api", "Iaa000001"), ("web", "Ibb000002")]);
-    let run = w
-        .wait_runs("api", "the composed job to launch", |runs| {
-            runs.iter().any(|r| {
-                r["jobs"]
-                    .as_array()
-                    .is_some_and(|js| js.iter().any(|j| j["state"] == "running"))
-            })
-        })
-        .into_iter()
-        .next()
-        .unwrap();
-    let job_id = job(&run, "test")["id"].as_str().unwrap().to_string();
-    w.wait_log("api", &job_id, "waiting");
 
-    // The job token is what ECS was asked to hand the container; the spec
-    // it fetches is what the runner saw. Fetching it again mints a fresh
-    // set of member tokens and retires the runner's — which it has
-    // finished with, the checkout being behind it.
-    let launch = w
-        .ecs
-        .run_tasks()
-        .into_iter()
-        .find(|c| c.env().get("STRATUM_JOB_ID").map(String::as_str) == Some(job_id.as_str()))
-        .expect("the RunTask for the job");
-    let job_token = launch.env()["STRATUM_JOB_TOKEN"].clone();
+    // The claim long-polls and answers 204 when its wait runs out, so
+    // ask until it hands something over — as the agent does.
+    let claimed = wait_for(
+        "the composed job to be handed to the machine",
+        Duration::from_secs(30),
+        || {
+            let (st, body) = w.server.post("/v1/runners/claim", &credential, None);
+            (st == 200).then_some(body)
+        },
+    );
+    let job_id = claimed["job_id"].as_str().unwrap().to_string();
+    let job_token = claimed["token"].as_str().unwrap().to_string();
+    let run = the_one(w.composed_runs("api"));
+    assert_eq!(job(&run, "test")["id"], job_id.as_str(), "{run}");
+    assert_eq!(job(&run, "test")["state"], "running", "{run}");
+
+    // What a runner sees when it fetches the spec.
     let (st, spec) = w
         .server
         .get(&format!("/v1/runner/jobs/{job_id}"), &job_token);
@@ -959,10 +1126,28 @@ fn a_member_token_reads_its_own_repository_only_and_dies_with_the_job() {
             .ends_with("/acme/web.git"),
         "{spec}"
     );
-    let web_token = members[1]["token"]
+    let first_web_token = members[1]["token"]
         .as_str()
         .expect("a token for the other member")
         .to_string();
+
+    // Fetching it again — a runner retrying after a dropped answer —
+    // mints a fresh set of member tokens and retires the first: a set
+    // nobody will use again is a set to kill.
+    let (st, again) = w
+        .server
+        .get(&format!("/v1/runner/jobs/{job_id}"), &job_token);
+    assert_eq!(st, 200, "{again}");
+    let web_token = again["changeset"]["members"][1]["token"]
+        .as_str()
+        .expect("a token for the other member")
+        .to_string();
+    assert_ne!(
+        web_token, first_web_token,
+        "the second fetch reissued the first set"
+    );
+    let (st, _) = w.server.get("/v1/orgs/acme/repos/web", &first_web_token);
+    assert_eq!(st, 401, "the retired set still reads web");
 
     // It reads web, and nothing else in the org — not another member,
     // not a repository the changeset never mentioned.
@@ -983,7 +1168,7 @@ fn a_member_token_reads_its_own_repository_only_and_dies_with_the_job() {
     // Masked, like every insufficient scope: a read token is not an
     // oracle for what it may not do.
     assert_eq!(st, 404, "a member token wrote: {out}");
-    // The set the runner was given is gone.
+    // Two sets were minted, and only the latest is live.
     let live: Vec<_> = w
         .tokens()
         .into_iter()
@@ -1027,90 +1212,56 @@ fn a_member_token_reads_its_own_repository_only_and_dies_with_the_job() {
 // A member from a fork
 // ---------------------------------------------------------------------
 
-fn urldecode(s: &str) -> String {
-    let b = s.as_bytes();
-    let mut out = String::new();
-    let mut i = 0;
-    while i < b.len() {
-        if b[i] == b'%' && i + 2 < b.len() {
-            if let Ok(v) = u8::from_str_radix(&s[i + 1..i + 3], 16) {
-                out.push(v as char);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(b[i] as char);
-        i += 1;
-    }
-    out
-}
-
-fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> Browser<'a> {
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle, "email": email, "name": handle, "password": PASSWORD,
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let msg = mail.wait_for(email, Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let token = urldecode(link.split_once("#verify=").expect("a verify link").1);
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": token })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
-    b
-}
-
 const FORK_CHANGE_ID: &str = "Change-Id: I9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f9f";
 
 /// A composed job in the maintainer's own repository materialises the
-/// stranger's tree and may well execute it — `make -C
+/// contributor's tree and may well execute it — `make -C
 /// $WEFT_WORKSPACE/widget` is the natural thing to write. So one
 /// unapproved fork member holds *every* member's composed run, and the
 /// approval that a maintainer already gives the fork change's own
 /// workflows releases the whole composition.
+///
+/// The contributor is bob, a **viewer** of acme: he may read `widget`,
+/// fork it into his own namespace and propose a change from there, and
+/// may not push to it. In an edition with no public repositories that is
+/// the only contributor a fork gate can be about. acme's machine is
+/// listening throughout, so "nothing composed ran" is a decision the
+/// server made, not a machine that was absent.
 #[test]
 fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
-    let hint = "cs-ci-fork";
-    let minio = Minio::shared();
-    let bucket = minio.bucket(hint);
-    let scratch = Scratch::new(hint);
-    let mail = Mailbox::temp(hint);
-    let runner = runner_bin_next_to(env!("CARGO_BIN_EXE_stratum-server"));
-    let ecs = FakeEcs::start(Some(runner), scratch.path().join("runners"));
-    let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
-        .db_hint(hint)
-        .data_dir(scratch.path().join("data"))
-        .envs(&ecs.env())
-        .envs(&mail.env())
-        .env("STRATUM_RUNNER_POLL_SECS", POLL_SECS)
-        // This test is the only one that forks, and the fork worker's
-        // default poll is 5s — long enough that the wait below was
-        // mostly this knob rather than anything about forking.
-        .env("STRATUM_FORK_POLL_SECS", POLL_SECS)
-        .start();
-    let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let w = world("cs-ci-fork");
+    let server = &w.server;
+    for (email, role) in [("ada@acme.test", "owner"), ("bob@acme.test", "viewer")] {
+        server
+            .admin(&[
+                "admin",
+                "user-create",
+                "--org",
+                "acme",
+                "--email",
+                email,
+                "--password",
+                PASSWORD,
+                "--role",
+                role,
+            ])
+            .unwrap_or_else(|e| panic!("user-create {email}: {e}"));
+    }
+    let mut ada = Browser::signed_in(server, "ada@acme.test", PASSWORD);
+    let mut bob = Browser::signed_in(server, "bob@acme.test", PASSWORD);
 
-    // ada's two public repositories, each with the composed workflow on
-    // trunk; `docs` also has ada's own open change.
+    // acme's two repositories, each with the composed workflow on trunk;
+    // `docs` also has ada's own open change.
     for repo in ["widget", "docs"] {
         let (st, body) = ada.req(
             "POST",
-            "/v1/orgs/ada/repos",
-            Some(serde_json::json!({"name": repo, "public": true})),
+            "/v1/orgs/acme/repos",
+            Some(serde_json::json!({"name": repo})),
         );
         assert_eq!(st, 201, "{body}");
         let (st, body) = ada.req(
             "POST",
-            &format!("/v1/orgs/ada/repos/{repo}/commits"),
+            &format!("/v1/orgs/acme/repos/{repo}/commits"),
             Some(serde_json::json!({
                 "message": "seed",
                 "operations": [put("feature.txt", &format!("trunk {repo}\n")), put(".weft/ci.yml", COMPOSED)],
@@ -1120,13 +1271,13 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
     }
     let (st, body) = ada.req(
         "POST",
-        "/v1/orgs/ada/repos/docs/branches",
+        "/v1/orgs/acme/repos/docs/branches",
         Some(serde_json::json!({"name": "feature", "from": "main"})),
     );
     assert_eq!(st, 201, "{body}");
     let (st, body) = ada.req(
         "POST",
-        "/v1/orgs/ada/repos/docs/commits",
+        "/v1/orgs/acme/repos/docs/commits",
         Some(serde_json::json!({
             "branch": "feature",
             "message": "docs change\n\nChange-Id: Idd000001\n",
@@ -1136,13 +1287,13 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
     assert_eq!(st, 201, "{body}");
     let (st, body) = ada.req(
         "POST",
-        "/v1/orgs/ada/repos/docs/changes",
+        "/v1/orgs/acme/repos/docs/changes",
         Some(serde_json::json!({"from": "feature"})),
     );
     assert_eq!(st, 201, "{body}");
 
     // bob forks widget and contributes.
-    let (st, body) = bob.req("POST", "/v1/orgs/ada/repos/widget/forks", None);
+    let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/widget/forks", None);
     assert_eq!(st, 202, "{body}");
     wait_until(
         "bob's fork of widget to become ready",
@@ -1167,7 +1318,7 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
     assert_eq!(st, 201, "{body}");
     let (st, opened) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/changes",
+        "/v1/orgs/acme/repos/widget/changes",
         Some(serde_json::json!({"from": "contrib", "source": "bob/widget"})),
     );
     assert_eq!(st, 201, "{opened}");
@@ -1180,7 +1331,7 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
     let runs = |who: &mut Browser, repo: &str| -> Vec<serde_json::Value> {
         let (st, out) = who.req(
             "GET",
-            &format!("/v1/orgs/ada/repos/{repo}/workflow-runs"),
+            &format!("/v1/orgs/acme/repos/{repo}/workflow-runs"),
             None,
         );
         assert_eq!(st, 200, "{out}");
@@ -1199,7 +1350,8 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
             }
             assert!(
                 Instant::now() < deadline,
-                "waited 60s for {what} in {repo}: {rs:?}"
+                "waited 60s for {what} in {repo}: {rs:?}\n{}",
+                w.said()
             );
             std::thread::sleep(POLL);
         }
@@ -1217,7 +1369,7 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
 
     let (st, cs) = ada.req(
         "POST",
-        "/v1/orgs/ada/changesets",
+        "/v1/orgs/acme/changesets",
         Some(
             serde_json::json!({"key": "Ic5000001", "title": "compose", "members": [
             {"repo": "widget", "change": fork_key}, {"repo": "docs", "change": "Idd000001"}]}),
@@ -1233,8 +1385,9 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
         });
     }
     // The claim after that is an absence — that neither composed run was
-    // handed a machine — so give the dispatcher `NEGATIVE_WINDOW`, five
-    // of its polls, to have done it anyway.
+    // handed to the machine that is listening — so give it
+    // `NEGATIVE_WINDOW`, a claim poll's worth of chances, to have taken
+    // one anyway.
     std::thread::sleep(NEGATIVE_WINDOW);
     // Both composed runs exist, and both are held — docs' too, though
     // docs' change is ada's own.
@@ -1256,20 +1409,25 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
     assert_eq!(docs_cs["state"], "blocked", "{docs_cs}");
     assert_eq!(docs_cs["blocked_reason"], "fork", "{docs_cs}");
     assert_eq!(docs_cs["error"], format!("member widget/{fork_key} comes from a fork; a maintainer has to approve its workflows before the changeset's runs"), "{docs_cs}");
-    // Nothing composed got a machine: every task launched so far is a
-    // push or ada's own change.
-    for call in ecs.run_tasks() {
-        let id = &call.env()["STRATUM_JOB_ID"];
-        assert!(
-            !widget_cs["jobs"].to_string().contains(id.as_str())
-                && !docs_cs["jobs"].to_string().contains(id.as_str()),
-            "{call:?}"
-        );
-    }
-    let (st, v) = ada.req("GET", "/v1/orgs/ada/changesets/Ic5000001/verdict", None);
+    // Nothing composed got a machine: a held run has no jobs to hand
+    // out, and the one job the machine did take is ada's own change in
+    // docs.
+    assert!(
+        widget_cs["jobs"].as_array().unwrap().is_empty(),
+        "{widget_cs}"
+    );
+    assert!(docs_cs["jobs"].as_array().unwrap().is_empty(), "{docs_cs}");
+    let docs_change_job = runs(&mut ada, "docs")
+        .into_iter()
+        .find(|r| r["event"] == "change")
+        .map(|r| job(&r, "test")["id"].as_str().unwrap().to_string())
+        .expect("docs' own change run");
+    let agent = w.agent("box-1");
+    assert_eq!(agent.took(), vec![docs_change_job], "{}", agent.said());
+    let (st, v) = ada.req("GET", "/v1/orgs/acme/changesets/Ic5000001/verdict", None);
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["gate"], "waiting", "{v}");
-    let (st, body) = ada.req("GET", "/v1/orgs/ada/changesets/Ic5000001", None);
+    let (st, body) = ada.req("GET", "/v1/orgs/acme/changesets/Ic5000001", None);
     assert_eq!(st, 200, "{body}");
     assert!(
         body["checks"]
@@ -1280,11 +1438,11 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
         "{body}"
     );
 
-    // ada approves the stranger's workflows — once, on the fork change,
+    // ada approves the contributor's workflows — once, on the fork change,
     // as she would have to anyway — and the whole composition runs.
     let (st, body) = ada.req(
         "POST",
-        &format!("/v1/orgs/ada/repos/widget/changes/{fork_key}/workflows/approve"),
+        &format!("/v1/orgs/acme/repos/widget/changes/{fork_key}/workflows/approve"),
         None,
     );
     assert_eq!(st, 202, "{body}");
@@ -1313,12 +1471,15 @@ fn one_member_from_a_fork_holds_every_composed_run_until_it_is_approved() {
         1,
         "the placeholder was replaced, not doubled: {docs_runs:?}"
     );
-    let (st, body) = ada.req("GET", "/v1/orgs/ada/changesets/Ic5000001", None);
+    // Every one of them on acme's machine: docs' change run before the
+    // hold, and after it widget's change run and both composed runs.
+    assert_eq!(w.agent("box-1").took().len(), 4, "{}", w.said());
+    let (st, body) = ada.req("GET", "/v1/orgs/acme/changesets/Ic5000001", None);
     assert_eq!(st, 200, "{body}");
     let checks = body["checks"].as_array().unwrap();
     assert_eq!(checks.len(), 2, "{body}");
     assert!(checks.iter().all(|c| c["state"] == "passing"), "{body}");
-    let (st, v) = ada.req("GET", "/v1/orgs/ada/changesets/Ic5000001/verdict", None);
+    let (st, v) = ada.req("GET", "/v1/orgs/acme/changesets/Ic5000001/verdict", None);
     assert_eq!(st, 200, "{v}");
     assert_eq!(v["gate"], "ready", "{v}");
     assert!(server.healthy());

@@ -246,7 +246,7 @@ fn a_proved_address_colours_a_square_and_an_unproved_one_colours_nothing() {
         "POST",
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
 
@@ -426,7 +426,7 @@ fn a_stranger_learns_nothing_about_a_private_repository_from_a_graph() {
             "POST",
             "/v1/orgs/acme/repos",
             &admin,
-            Some(serde_json::json!({ "name": name, "public": public })),
+            Some(serde_json::json!({ "name": name })),
         );
         assert_eq!(st, 201, "{body}");
     }
@@ -645,7 +645,7 @@ fn an_unknown_address_counts_for_the_pusher_and_an_agents_commit_for_nobody() {
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
     // A token that acts as *her*, which is what makes the push a fact
@@ -842,7 +842,7 @@ fn the_walker_can_be_turned_off_and_its_bound_drops_history_rather_than_doubling
         "POST",
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
     let _ = &mut ada;
@@ -1014,7 +1014,7 @@ fn contributors_are_ranked_with_their_totals_and_a_stranger_reads_a_public_repo(
             "POST",
             "/v1/orgs/acme/repos",
             &admin,
-            Some(serde_json::json!({ "name": name, "public": true })),
+            Some(serde_json::json!({ "name": name })),
         );
         assert_eq!(st, 201, "{body}");
     }
@@ -1168,7 +1168,7 @@ fn a_private_repositorys_contributors_are_masked_exactly_as_the_repository_is() 
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "skunkworks", "public": false })),
+        Some(serde_json::json!({ "name": "skunkworks" })),
     );
     assert_eq!(st, 201, "{body}");
     let (st, minted) = ada.req(

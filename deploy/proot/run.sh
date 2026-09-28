@@ -3,18 +3,17 @@
 #
 #   run.sh ROOTFS [-u UID:GID] [-b HOST:GUEST]... [-e K=V]... [--env-file F] [-w DIR] [--] [CMD...]
 #
-# --env-file reads K=V lines from F and deletes F once read: a job token
-# has to reach the runner without ever being in a command line, where
-# `ps` shows it, which is the same rule fake-ecs's docker branch keeps
-# with docker's --env-file.
+# --env-file reads K=V lines from F and deletes F once read, so a secret
+# can reach the process without ever being in a command line, where `ps`
+# shows it — the same rule docker's --env-file keeps.
 #
 # PRoot is a user-space chroot plus bind mounts, implemented with ptrace:
-# no namespaces, no capabilities, no daemon. It is what lets a job on a
-# Fargate task — which refuses privileged mode, every capability but
-# CAP_SYS_PTRACE, and user-namespace creation — start a Postgres, a
-# MinIO, or the production image itself, from the bytes a registry
-# served. See deploy/proot/README.md for what that does and does not
-# prove.
+# no namespaces, no capabilities, no daemon. It is what lets a CI job in
+# a sandbox that refuses privileged mode, every capability but
+# CAP_SYS_PTRACE, and user-namespace creation (a Fargate task, for one)
+# start a Postgres, a MinIO, or the server image itself, from the bytes
+# a registry served. See deploy/proot/README.md for what that does and
+# does not prove.
 #
 # The image config written by pull-image.py (ROOTFS/.image.json) supplies
 # Env, WorkingDir, User and Entrypoint+Cmd unless overridden: PRoot,

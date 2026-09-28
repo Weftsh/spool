@@ -1,11 +1,6 @@
 output "name_servers" {
-  description = "With a domain configured: the four name servers the registrar must delegate to. Nothing else in the stack finishes until it does."
+  description = "With a domain configured: the four name servers the parent zone must delegate `domain_name` to. The certificate — and so the full apply — waits until it does."
   value       = var.domain_name == "" ? [] : module.dns[0].name_servers
-}
-
-output "sites_name_servers" {
-  description = "With a sites domain configured: the four name servers its registrar must delegate to. Until it does, the sites certificate stays PENDING_VALIDATION and nothing can be served on that name."
-  value       = var.sites_domain_name == "" ? [] : module.sites[0].name_servers
 }
 
 output "base_url" {
@@ -24,7 +19,8 @@ output "ssh_endpoint" {
 }
 
 output "ecr_repository_url" {
-  value = module.app.ecr_repository_url
+  description = "Where to push the server image. The service runs `<this>:<image_tag>`."
+  value       = module.app.ecr_repository_url
 }
 
 output "cluster_name" {
@@ -39,22 +35,7 @@ output "store_bucket" {
   value = module.data.store_bucket
 }
 
-output "runner_cluster_name" {
-  value = module.runner.cluster_name
-}
-
-output "runner_task_definition" {
-  value = module.runner.task_definition_arn
-}
-
-output "runner_ecr_repository_url" {
-  value = module.runner.ecr_repository_url
-}
-
-output "github_runner_task_definition" {
-  value = module.runner.github_task_definition_arn
-}
-
-output "github_runner_ecr_repository_url" {
-  value = module.runner.github_ecr_repository_url
+output "github_app_secret_name" {
+  description = "The Secrets Manager secret to fill with your GitHub App's credentials before setting github_app_slug (docs/operations.md)."
+  value       = module.data.github_app_secret_name
 }

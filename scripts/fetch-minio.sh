@@ -11,12 +11,19 @@
 #
 # **This pulls the image without a container runtime**, straight off a
 # registry's HTTP API, and that is the whole reason the script exists
-# rather than a `docker create` + `docker cp`. The three jobs that need
-# MinIO — correctness, coverage, chaos — run on `weft-2x`, our own
-# runners, whose image has no docker CLI and no socket *on purpose*:
-# `Dockerfile.runner` says a runner that can talk to a daemon can escape
-# its container. Reaching for a daemon there would have undone that to
-# fetch a test dependency.
+# rather than a `docker create` + `docker cp`: the jobs that need MinIO —
+# correctness and chaos — must not depend on a docker daemon being there
+# to fetch a test dependency, and neither must a runner machine, which is
+# the one place a daemon is least welcome (a job that can talk to one can
+# escape its container).
+#
+# Where from: STRATUM_MINIO_IMAGE, a repository reference without a tag
+# (default ghcr.io/weftsh/minio, a byte-for-byte copy of
+# quay.io/minio/minio, every platform, by digest). Any registry that
+# speaks the distribution API with anonymous bearer tokens works — the
+# token endpoint is read from the registry's own challenge, not assumed —
+# so point it at quay.io/minio/minio, or at a mirror of your own, when
+# the default is not reachable from where you build.
 #
 # The pin comes from `.minio-version`, which `crates/stratum-testkit`
 # also `include_str!`s, so the harness and CI cannot run different
@@ -26,6 +33,7 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release="$(tr -d '[:space:]' < "$root/.minio-version")"
+image="${STRATUM_MINIO_IMAGE:-ghcr.io/weftsh/minio}"
 out="${1:-$root/.testkit/bin/minio}"
 
 if [ -x "$out" ]; then
@@ -46,7 +54,7 @@ carries a Linux one. Run it and point the harness at it instead:
 
   docker run -d --name stratum-test-minio -p 9000:9000 \\
     -e MINIO_ROOT_USER=stratum-test -e MINIO_ROOT_PASSWORD=stratum-test-only \\
-    ghcr.io/weftsh/minio:$release server /data
+    $image:$release server /data
   export STRATUM_MINIO_URL=http://127.0.0.1:9000
 MSG
     exit 1
@@ -59,25 +67,33 @@ case "$(uname -m)" in
   *) echo "no minio image for $(uname -m)" >&2; exit 1 ;;
 esac
 
-# The image is read from ghcr.io/weftsh/minio, a byte-for-byte copy of
-# quay.io/minio/minio made by github.com/weftsh/minio-mirror (every
-# platform, by digest). Not quay.io: the fleet's egress allow-list names
-# ghcr.io already, and the first day this script fetched for real on the
-# fleet (2026-09-14, after the zstd runner image changed the build-cache
-# version and every job missed at once) it died on quay.io, first with
-# "SSL connection timeout" from the firewall, then a 403. A test
-# dependency should come from a host we control and already allow.
-api=https://ghcr.io/v2/weftsh/minio
+# Not quay.io by default. Its anonymous tokens have come back granting no
+# pull at all (`"access":[{"actions":[]}]`, then 401 on the manifest) from
+# build machines behind an egress proxy, and a firewalled fleet died on it
+# with a 403 the first day this ran for real. The mirror is on ghcr.io,
+# which GitHub-hosted runners reach without an allow-list entry.
+registry=${image%%/*}
+repo=${image#*/}
+api=https://$registry/v2/$repo
 accept='application/vnd.docker.distribution.manifest.v2+json,application/vnd.oci.image.manifest.v1+json,application/vnd.docker.distribution.manifest.list.v2+json,application/vnd.oci.image.index.v1+json'
 
-# Anonymous pull. ghcr issues a token for the asking on a public package;
-# the header is still required, so this is not an unauthenticated request.
-token="$(curl -fsSL "https://ghcr.io/token?scope=repository:weftsh/minio:pull" \
-  | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+# Anonymous pull. A registry answers an unauthenticated /v2/ with a
+# `WWW-Authenticate: Bearer realm=…,service=…` challenge naming where to
+# get a token; ghcr (ghcr.io/token) and quay (quay.io/v2/auth) name
+# different places, so ask rather than hard-code one. The header is still
+# required, so this is not an unauthenticated request.
+challenge="$(curl -sS -o /dev/null -D - "https://$registry/v2/" | tr -d '\r' \
+  | sed -n 's/^[Ww][Ww][Ww]-[Aa]uthenticate: *[Bb]earer *//p')"
+realm="$(printf '%s' "$challenge" | sed -n 's/.*realm="\([^"]*\)".*/\1/p')"
+service="$(printf '%s' "$challenge" | sed -n 's/.*service="\([^"]*\)".*/\1/p')"
+[ -n "$realm" ] || { echo "$registry answered /v2/ with no bearer challenge; cannot fetch $image" >&2; exit 1; }
+token="$(curl -fsSL "$realm?service=$service&scope=repository:$repo:pull" \
+  | python3 -c 'import json,sys; d=json.load(sys.stdin); print(d.get("token") or d["access_token"])')"
 get() { curl -fsSL -H "Authorization: Bearer $token" -H "Accept: $accept" "$@"; }
 
 # A multi-arch tag resolves to an index; pick this machine's entry.
-index="$(get "$api/manifests/$release")"
+index="$(get "$api/manifests/$release")" \
+  || { echo "could not read $image:$release (a registry that grants anonymous tokens no pull answers 401 here); set STRATUM_MINIO_IMAGE to one that serves it" >&2; exit 1; }
 digest="$(printf '%s' "$index" | python3 -c "
 import json,sys
 m = json.load(sys.stdin)

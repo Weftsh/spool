@@ -1,9 +1,9 @@
 //! The five calls a runner makes, driven as a runner makes them.
 //!
-//! The setup deliberately stops short of the dispatcher: the run, the
+//! The setup deliberately stops short of the claim route: the run, the
 //! claim and the job token are created straight through the control
-//! plane, exactly as `workers::runner` will, and everything after that
-//! is plain HTTP with a bearer token — no helper of ours on the client
+//! plane, exactly as `POST /v1/runners/claim` does, and everything after
+//! that is plain HTTP with a bearer token — no helper of ours on the client
 //! side. That is the whole point of the suite. The runner is a separate
 //! process that will talk to this API over a network, so a test that
 //! reached in through a Rust function would prove that our own code
@@ -43,8 +43,8 @@ fn world(hint: &str, minio: &Minio, scratch: &Scratch) -> (World, WorkflowJob, S
     let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"))
-        // No dispatcher: this suite drives the queue by hand, and a
-        // background claimer would race every assertion in it.
+        // No sweeper: this suite drives the queue by hand, and a
+        // background sweep would race every assertion in it.
         .env("STRATUM_RUNNER_POLL_SECS", "0")
         .start();
     let admin = server.bootstrap_org("acme");
@@ -97,9 +97,7 @@ fn world(hint: &str, minio: &Minio, scratch: &Scratch) -> (World, WorkflowJob, S
     )
     .unwrap();
 
-    let job = workflows::claim(&db, 60_000)
-        .unwrap()
-        .expect("build is ready");
+    let job = claim(&db, &org.id).expect("build is ready");
     let token = launch(&db, &org.id, &repo.id, &job, None);
     let store_url = bucket.base_url.clone();
     (
@@ -116,7 +114,25 @@ fn world(hint: &str, minio: &Minio, scratch: &Scratch) -> (World, WorkflowJob, S
     )
 }
 
-/// Mint a job token and attach it, the way the dispatcher does.
+/// Claim the next ready job as a runner in the default group would —
+/// the query `POST /v1/runners/claim` makes, minus the long poll.
+fn claim(db: &ControlDb, org_id: &str) -> Option<WorkflowJob> {
+    let labels = vec!["self-hosted".to_string()];
+    workflows::claim_self_hosted(
+        db,
+        &workflows::RunnerRoute {
+            runner_id: "e2e-runner",
+            org_id,
+            group_id: "",
+            labels: &labels,
+            all_repos: true,
+        },
+        60_000,
+    )
+    .unwrap()
+}
+
+/// Mint a job token and attach it, the way the claim route does.
 fn launch(
     db: &ControlDb,
     org_id: &str,
@@ -434,9 +450,7 @@ fn a_change_run_is_fetched_by_its_patchset_ref() {
     // The first run's `build` is still running and holds a slot, so
     // claim until this run's job comes out.
     let job = loop {
-        let c = workflows::claim(&w.db, 60_000)
-            .unwrap()
-            .expect("a claimable job");
+        let c = claim(&w.db, &w.org_id).expect("a claimable job");
         if c.key == "test" {
             break c;
         }
@@ -972,9 +986,7 @@ fn a_verdict_revokes_the_credential_that_reported_it() {
         workflows::job(&w.db, &job.id).unwrap().unwrap().state,
         "passed"
     );
-    let next = workflows::claim(&w.db, 60_000)
-        .unwrap()
-        .expect("ship is ready");
+    let next = claim(&w.db, &w.org_id).expect("ship is ready");
     let token2 = launch(&w.db, &w.org_id, &w.repo_id, &next, None);
     let (st, out) = json(
         &w.server,
@@ -1031,9 +1043,7 @@ fn a_spec_that_is_not_an_object_is_answered_rather_than_500ed() {
     )
     .unwrap();
 
-    let job = workflows::claim(&w.db, 60_000)
-        .unwrap()
-        .expect("the new run's only job is ready");
+    let job = claim(&w.db, &w.org_id).expect("the new run's only job is ready");
     let token = launch(&w.db, &w.org_id, &w.repo_id, &job, None);
 
     let (st, spec) = json(
@@ -1073,234 +1083,5 @@ fn a_spec_that_is_not_an_object_is_answered_rather_than_500ed() {
             .state,
         "passed"
     );
-    assert!(w.server.healthy());
-}
-
-/// A verdict that reports abuse switches the organisation off, stops
-/// everything else it has running, and refuses what it pushes next.
-///
-/// Layer four of four, and the only one that remembers. The firewall is
-/// what a miner meets first, the parser refuses the obvious files, the
-/// runner kills the process group it finds — and every one of those is a
-/// *per-job* cost. An attacker who can queue jobs faster than we refuse
-/// them still gets compute, because nothing above this layer carries
-/// anything from one job to the next.
-///
-/// The three things it has to do are asserted separately, because they
-/// fail separately: the organisation is suspended with the runner's own
-/// sentence, its other builds — in other repositories, which is where
-/// the rest of a miner's jobs are — are cancelled with a reason a person
-/// can read, and the next push is told why nothing ran instead of
-/// waiting for a check that will never arrive.
-#[test]
-fn a_verdict_reporting_abuse_suspends_the_organisation_and_stops_its_other_work() {
-    let minio = Minio::shared();
-    let scratch = Scratch::new("runner-api-abuse");
-    let (w, job, token) = world("runner-api-abuse", minio, &scratch);
-
-    // A second repository with a build of its own, running right now.
-    let (st, out) = w.server.post(
-        "/v1/orgs/acme/repos",
-        &w.admin,
-        Some(serde_json::json!({"name": "other"})),
-    );
-    assert_eq!(st, 201, "{out}");
-    let other_repo = registry::repo_by_name(&w.db, &w.org_id, "other")
-        .unwrap()
-        .unwrap();
-    let elsewhere = workflows::create_run(
-        &w.db,
-        &w.org_id,
-        &other_repo.id,
-        &NewRun {
-            file: ".weft/ci.yml",
-            name: "ci",
-            commit_sha: SHA,
-            ref_name: Some("main"),
-            event: "push",
-            change_key: None,
-            changeset_id: None,
-            composition: None,
-            from_fork: false,
-        },
-        &[NewJob {
-            job_id: "test",
-            key: "test",
-            matrix: "{}",
-            needs: &[],
-            spec: SPEC,
-            ..Default::default()
-        }],
-    )
-    .unwrap();
-    let other_job = workflows::claim(&w.db, 60_000).unwrap().expect("claimable");
-    launch(&w.db, &w.org_id, &other_repo.id, &other_job, None);
-
-    // The runner caught the job mining and says so with its verdict.
-    let (st, out) = json(
-        &w.server,
-        "POST",
-        &format!("/v1/runner/jobs/{}/finish", job.id),
-        &token,
-        Some(r#"{"state":"failed","error":"mining software detected: xmrig","abuse":"mining"}"#),
-    );
-    assert_eq!(st, 200, "{out}");
-
-    // Suspended, in the runner's own words — "mining software detected:
-    // xmrig" is actionable where "abuse" is not.
-    let s = workflows::ci_suspension(&w.db, &w.org_id)
-        .unwrap()
-        .expect("the organisation is suspended");
-    assert_eq!(s.reason, "mining software detected: xmrig");
-    assert!(s.at > 0, "{s:?}");
-
-    // The other repository's build is stopped, with a reason a person
-    // reads rather than a bare cancellation.
-    let stopped = workflows::run_by_id(&w.db, &elsewhere.id).unwrap().unwrap();
-    assert_eq!(stopped.state, "cancelled", "{stopped:?}");
-    assert_eq!(
-        stopped.error.as_deref(),
-        Some(
-            "hosted workflows are suspended for this organisation: mining software detected: xmrig"
-        ),
-        "{stopped:?}"
-    );
-    assert_eq!(
-        workflows::job(&w.db, &other_job.id).unwrap().unwrap().state,
-        "cancelled"
-    );
-
-    // It is in the audit log, where an operator deciding whether to
-    // clear it will look.
-    let audited = stratum_control::audit::query(
-        &w.db,
-        &w.org_id,
-        &stratum_control::audit::AuditQuery {
-            action: Some("workflow.suspended"),
-            limit: 10,
-            ..Default::default()
-        },
-    )
-    .unwrap();
-    assert_eq!(
-        audited.len(),
-        1,
-        "the suspension was not recorded: {audited:?}"
-    );
-    let context = audited[0].context.clone().unwrap_or_default();
-    assert_eq!(context["abuse"], "mining", "{context}");
-    assert_eq!(context["job"], job.id, "{context}");
-    assert_eq!(
-        context["reason"], "mining software detected: xmrig",
-        "{context}"
-    );
-
-    // And the next push is told why nothing ran. Blocked rather than
-    // failed: nothing is wrong with the commit.
-    let (st, out) = w.server.post(
-        "/v1/orgs/acme/repos/app/commits",
-        &w.admin,
-        Some(serde_json::json!({
-            "message": "carry on",
-            "operations": [
-                { "op": "put", "path": ".weft/ci.yml",
-                  "content": "name: ci\non: push\njobs:\n  test:\n    steps:\n      - run: echo hi\n" },
-            ],
-        })),
-    );
-    assert_eq!(st, 201, "{out}");
-    let sha = out["commit"].as_str().unwrap();
-    let refused =
-        workflows::run_for_commit(&w.db, &w.repo_id, "push", sha, None, ".weft/ci.yml", None)
-            .unwrap()
-            .expect("a run was recorded for the push");
-    assert_eq!(refused.state, "blocked", "{refused:?}");
-    assert_eq!(
-        refused.blocked_reason.as_deref(),
-        Some("suspended"),
-        "a suspension is not a fork approval: {refused:?}"
-    );
-    assert_eq!(
-        refused.error.as_deref(),
-        Some(
-            "hosted workflows are suspended for this organisation: mining software detected: xmrig"
-        ),
-        "{refused:?}"
-    );
-
-    // A second miner reporting afterwards changes nothing. The first
-    // reason is what a member is reading and an operator is acting on,
-    // and a second offence overwriting it with an identical-looking
-    // sentence bearing a later timestamp would be a worse answer than
-    // silence. It also makes a retried verdict harmless.
-    workflows::create_run(
-        &w.db,
-        &w.org_id,
-        &w.repo_id,
-        &NewRun {
-            file: ".weft/other.yml",
-            name: "other",
-            commit_sha: SHA,
-            ref_name: Some("main"),
-            event: "push",
-            change_key: None,
-            changeset_id: None,
-            composition: None,
-            from_fork: false,
-        },
-        &[NewJob {
-            job_id: "mine",
-            key: "mine",
-            matrix: "{}",
-            needs: &[],
-            spec: SPEC,
-            ..Default::default()
-        }],
-    )
-    .unwrap();
-    let second_job = workflows::claim(&w.db, 60_000).unwrap().expect("claimable");
-    let second_token = launch(&w.db, &w.org_id, &w.repo_id, &second_job, None);
-    let (st, out) = json(
-        &w.server,
-        "POST",
-        &format!("/v1/runner/jobs/{}/finish", second_job.id),
-        &second_token,
-        Some(r#"{"state":"failed","error":"mining software detected: minerd","abuse":"mining"}"#),
-    );
-    assert_eq!(st, 200, "{out}");
-    assert_eq!(
-        workflows::ci_suspension(&w.db, &w.org_id)
-            .unwrap()
-            .unwrap()
-            .reason,
-        "mining software detected: xmrig",
-        "the second offence overwrote the first reason"
-    );
-    assert_eq!(
-        stratum_control::audit::query(
-            &w.db,
-            &w.org_id,
-            &stratum_control::audit::AuditQuery {
-                action: Some("workflow.suspended"),
-                limit: 10,
-                ..Default::default()
-            },
-        )
-        .unwrap()
-        .len(),
-        1,
-        "the same suspension was recorded twice"
-    );
-
-    // Where an owner sees it: the billing view carries the reason, so a
-    // person whose builds have all stopped is not left guessing.
-    let (st, bill) = w.server.get("/v1/orgs/acme/billing", &w.admin);
-    assert_eq!(st, 200, "{bill}");
-    assert_eq!(
-        bill["ci_suspended_reason"], "mining software detected: xmrig",
-        "{bill}"
-    );
-    assert!(bill["ci_suspended_at"].as_i64().unwrap_or(0) > 0, "{bill}");
-
     assert!(w.server.healthy());
 }

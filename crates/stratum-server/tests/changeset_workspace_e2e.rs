@@ -67,18 +67,11 @@ impl World {
     /// A repository whose trunk has `OWNERS` naming `owner`, a `feature`
     /// branch adding `feature.txt` (content `text`), and an open change
     /// `key` from it. Returns the change's tip.
-    fn repo_with_change(
-        &self,
-        repo: &str,
-        public: bool,
-        owner: &str,
-        key: &str,
-        text: &str,
-    ) -> String {
+    fn repo_with_change(&self, repo: &str, owner: &str, key: &str, text: &str) -> String {
         let (st, out) = self.server.post(
             "/v1/orgs/acme/repos",
             &self.admin,
-            Some(serde_json::json!({"name": repo, "public": public})),
+            Some(serde_json::json!({"name": repo})),
         );
         assert_eq!(st, 201, "create repo {repo}: {out}");
         self.commit(
@@ -166,16 +159,6 @@ impl World {
         );
         assert_eq!(st, 201, "{out}");
         out["token"].as_str().unwrap().to_string()
-    }
-
-    fn set_public(&self, repo: &str, public: bool) {
-        let (st, out) = self.server.req(
-            "PATCH",
-            &format!("/v1/orgs/acme/repos/{repo}"),
-            &self.admin,
-            Some(serde_json::json!({"public": public})),
-        );
-        assert_eq!(st, 200, "{out}");
     }
 
     /// `GET …/info/refs?service=git-upload-pack` as git would send it,
@@ -292,8 +275,8 @@ fn clone_recursive(parent: &Path, url: &str, dest: &Path, extra: &[&str]) {
 #[test]
 fn a_recursive_clone_of_the_workspace_checks_every_member_out_at_its_proposed_head() {
     let w = world("cs-ws-clone");
-    let api = w.repo_with_change("api", false, "oa@acme.test", "Iaa000001", "change api");
-    let web = w.repo_with_change("web", false, "ow@acme.test", "Ibb000002", "change web");
+    let api = w.repo_with_change("api", "oa@acme.test", "Iaa000001", "change api");
+    let web = w.repo_with_change("web", "ow@acme.test", "Ibb000002", "change web");
     w.compose("Ic5000001", &[("web", "Ibb000002"), ("api", "Iaa000001")]);
 
     // The view: every member at its head, in repository order regardless
@@ -439,8 +422,8 @@ fn a_recursive_clone_of_the_workspace_checks_every_member_out_at_its_proposed_he
 #[test]
 fn only_a_reader_of_every_member_may_see_or_clone_the_workspace() {
     let w = world("cs-ws-acl");
-    w.repo_with_change("api", false, "oa@acme.test", "Iaa000001", "change api");
-    w.repo_with_change("web", false, "ow@acme.test", "Ibb000002", "change web");
+    w.repo_with_change("api", "oa@acme.test", "Iaa000001", "change api");
+    w.repo_with_change("web", "ow@acme.test", "Ibb000002", "change web");
     w.compose("Ic5000001", &[("api", "Iaa000001"), ("web", "Ibb000002")]);
 
     // Read on one member is not read on the changeset: the view and the
@@ -490,24 +473,36 @@ fn only_a_reader_of_every_member_may_see_or_clone_the_workspace() {
     );
     assert_eq!(w.info_refs("Ic5000009", None).0, 401);
 
-    // Every member public: the workspace reads and clones anonymously,
-    // members included, because the relative URLs resolve to public
-    // repositories.
-    w.set_public("api", true);
-    w.set_public("web", true);
-    assert_eq!(w.info_refs("Ic5000001", None).0, 200);
-    let (st, out) = w.workspace_as("Ic5000001", "");
+    // The view is refused anonymously too, before anything is looked
+    // up — one 401 for a workspace that exists and one that does not.
+    assert_eq!(w.workspace_as("Ic5000001", "").0, 401);
+    assert_eq!(w.workspace_as("Ic5000009", "").0, 401);
+
+    // A reader of every member — the weakest credential that is one, a
+    // `repo:read` token that names no single repository — sees the view
+    // and clones the whole workspace, members included, because the
+    // relative URLs resolve against the credential it cloned with. This
+    // is what the api-only reader above was refused, so the refusal is
+    // about the members and not about the credential's kind.
+    let (st, out) = w.server.post(
+        "/v1/orgs/acme/tokens",
+        &w.admin,
+        Some(serde_json::json!({"scopes": ["repo:read"], "label": "reads everything"})),
+    );
+    assert_eq!(st, 201, "{out}");
+    let every = out["token"].as_str().unwrap().to_string();
+    assert_eq!(w.info_refs("Ic5000001", Some(&every)).0, 200);
+    let (st, out) = w.workspace_as("Ic5000001", &every);
     assert_eq!(st, 200, "{out}");
-    let anon = w.scratch.path().join("anon");
-    clone_recursive(w.scratch.path(), &w.anon_ws_url("Ic5000001"), &anon, &[]);
-    assert_eq!(head_of(&anon), out["tip"].as_str().unwrap());
-    assert!(anon.join("api/feature.txt").exists());
-    assert!(anon.join("web/feature.txt").exists());
-    // One member back to private and the whole workspace is private again.
-    w.set_public("web", false);
-    assert_eq!(w.info_refs("Ic5000001", None).0, 401);
-    assert_eq!(w.workspace_as("Ic5000001", "").0, 404);
-    assert_eq!(w.info_refs("Ic5000001", Some(&w.admin)).0, 200);
+    let read = w.scratch.path().join("reader");
+    clone_recursive(w.scratch.path(), &w.ws_url(&every, "Ic5000001"), &read, &[]);
+    assert_eq!(head_of(&read), out["tip"].as_str().unwrap());
+    assert!(read.join("api/feature.txt").exists());
+    assert!(read.join("web/feature.txt").exists());
+    // Reading is not pushing, for this reader either.
+    let (st, body) = w.raw_as(&every, "Ic5000001", "git-receive-pack", &[], b"0000");
+    assert_eq!(st, 200, "{}", text(&body));
+    assert!(text(&body).contains("read-only"), "{}", text(&body));
 
     // The wire is strict about what it will serve: only the workspace
     // tip, only with the capabilities the engine needs, and it says so
@@ -594,8 +589,8 @@ fn a_landing_changeset_says_so_and_a_vanished_member_leaves_the_tree() {
     // A lander that polls every ten minutes: `land` moves the changeset
     // to `landing` and nothing moves it further inside the test.
     let w = world_with("cs-ws-landing", &[("STRATUM_LAND_POLL_SECS", "600")]);
-    w.repo_with_change("api", false, "oa@acme.test", "Iaa000001", "change api");
-    w.repo_with_change("web", false, "ow@acme.test", "Ibb000002", "change web");
+    w.repo_with_change("api", "oa@acme.test", "Iaa000001", "change api");
+    w.repo_with_change("web", "ow@acme.test", "Ibb000002", "change web");
     w.compose("Ic5000001", &[("api", "Iaa000001"), ("web", "Ibb000002")]);
     approve(&w, "oa@acme.test", "api", "Iaa000001");
     approve(&w, "ow@acme.test", "web", "Ibb000002");
@@ -617,8 +612,8 @@ fn a_landing_changeset_says_so_and_a_vanished_member_leaves_the_tree() {
 
     // A member whose repository is deleted leaves the composition, the
     // view and the tree together; the last one leaving empties them.
-    let cli = w.repo_with_change("cli", false, "oc@acme.test", "Icc000003", "change cli");
-    w.repo_with_change("docs", false, "od@acme.test", "Idd000004", "change docs");
+    let cli = w.repo_with_change("cli", "oc@acme.test", "Icc000003", "change cli");
+    w.repo_with_change("docs", "od@acme.test", "Idd000004", "change docs");
     w.compose("Ic5000002", &[("cli", "Icc000003"), ("docs", "Idd000004")]);
     let (st, out) = w.server.delete("/v1/orgs/acme/repos/docs", &w.admin);
     assert_eq!(st, 204, "{out}");

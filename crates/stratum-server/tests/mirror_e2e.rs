@@ -2226,7 +2226,7 @@ fn a_push_under_an_installation_lacking_contents_write_is_refused_by_name() {
         assert_eq!(status, 200, "{out}");
     };
 
-    // 4007: runners approved, pushes not.
+    // 4007: approved before `Contents: write`, so pushes are not.
     mirror_via("4007", "prepush");
     let clone = scratch.path().join("prepush-clone");
     assert_eq!(

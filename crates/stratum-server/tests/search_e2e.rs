@@ -26,7 +26,7 @@ fn make_repo(server: &Server, org: &str, token: &str, name: &str, public: bool, 
         "POST",
         &format!("/v1/orgs/{org}/repos"),
         token,
-        Some(serde_json::json!({ "name": name, "public": public, "description": desc })),
+        Some(serde_json::json!({ "name": name, "description": desc })),
     );
     assert_eq!(st, 201, "create {org}/{name}: {out}");
 }

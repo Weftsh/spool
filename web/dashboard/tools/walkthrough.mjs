@@ -64,6 +64,9 @@ const shots = [];
 // wrong is the product working; recording it as a problem would bury the
 // real findings under noise.
 const EXPECTED = {
+  // The boot probe asks "am I signed in?" on each of the two signed-out
+  // pages, and is told no, which is the point.
+  "the front door, signed out": [401],
   "login form": [401], // the boot probe: nobody is signed in yet
   // Signing up through GitHub starts and ends signed out: the boot probe
   // before the round trip, and again after the sign-out that returns the
@@ -83,12 +86,19 @@ const EXPECTED = {
   // probe asks "am I signed in?" and is told no, which is the point.
   "an install begun on GitHub is claimed after signing in": [401],
   "settings / tokens": [401], // the token we just revoked, checked again
-  "repo view": [404], // a viewer asking for the access map
-  // Browsing starts from the repo screen, which asks for the access map
-  // again — and a viewer is refused it again, by the same masking 404.
   // The 401 is the boot probe in the fresh context this step opens to
-  // follow the file link the way somebody who was sent it would.
-  "browsing the code": [404, 401],
+  // follow the file link the way somebody who was sent it would. The 404
+  // is that same link: `/{owner}/{repo}/tree/<path>` does not say whether
+  // the path is a directory or a file, and a link with no listing behind
+  // it asks for the directory first and falls back to the file on a 404
+  // (`views/browse.tsx`, by design). Scoped to exactly that request —
+  // this entry used to excuse *every* 404 in the stage, for a reason
+  // (a viewer's access map) that stopped applying when the stage began
+  // running as the owner.
+  "browsing the code": [
+    401,
+    { status: 404, url: /\/v1\/orgs\/acme\/repos\/widget\/tree\/[^?]+$/ },
+  ],
   // the point of the stage: a direct commit to protected trunk is 403
   "changes / protect trunk": [403],
 };
@@ -143,9 +153,15 @@ function watch(page, where) {
       kind: `http.${r.status()}`,
       text: `${r.request().method()} ${r.url()}`,
     };
-    ((EXPECTED[where()] ?? []).includes(r.status()) ? benign : problems).push(
-      rec,
+    // An expectation is a status, or a status scoped to the one request
+    // it is expected on — so an expected refusal cannot hide a different
+    // request refused the same way.
+    const expected = (EXPECTED[where()] ?? []).some((e) =>
+      typeof e === "number"
+        ? e === r.status()
+        : e.status === r.status() && e.url.test(r.url()),
     );
+    (expected ? benign : problems).push(rec);
   });
 }
 
@@ -283,38 +299,42 @@ async function step(name, fn) {
   if (bad.length) console.log("  layout:", bad.join("; "));
 }
 
-await step("marketing home", async () => {
+// The way in, for somebody who is not signed in. There is no marketing
+// site and no public repository: `/` is the dashboard's own sign-in
+// form, and every other page — a repository's address included — sends
+// the visitor to `/login` carrying where they were going, and shows
+// nothing of what is there. Both halves are asserted, because a front
+// door that renders a private repository's README to a stranger and one
+// that dead-ends on a blank page look the same from a curl smoke test.
+await step("the front door, signed out", async () => {
   await page.goto(`${BASE}/`, { waitUntil: "networkidle" });
-  await shot(page, "01-home", "marketing landing page");
-});
-
-await step("docs authentication", async () => {
-  await page.goto(`${BASE}/docs/authentication/`, { waitUntil: "networkidle" });
-  const roles = await page.getByText("per-repo grant").first().isVisible();
-  if (!roles)
+  if (new URL(page.url()).pathname !== "/dashboard/")
     problems.push({
       where: stage,
-      kind: "content",
-      text: "roles section missing",
+      kind: "behaviour",
+      text: `/ should land a visitor on the dashboard's sign-in; it landed on ${page.url()}`,
     });
-  await shot(
-    page,
-    "02-docs-auth",
-    "authentication doc, rewritten around people",
-  );
-});
+  await page.getByLabel("Email").waitFor({ timeout: 15000 });
+  await shot(page, "01-front-door", "signed out: the way in is the sign-in form");
 
-await step("docs ssh", async () => {
-  await page.goto(`${BASE}/docs/ssh/`, { waitUntil: "networkidle" });
-  await shot(page, "03-docs-ssh", "ssh doc, personal key first");
-});
-
-await step('docs code review', async () => {
-  await page.goto(`${BASE}/docs/code-review/`, { waitUntil: 'networkidle' });
-  const grammar = await page.getByText('set noparent').first().isVisible();
-  if (!grammar)
-    problems.push({ where: stage, kind: 'content', text: 'the OWNERS grammar is missing from the review doc' });
-  await shot(page, '03b-docs-review', 'the review doc: OWNERS grammar and the verdict table');
+  // A repository's own address, as a link somebody was sent would carry.
+  await page.goto(`${BASE}/acme/widget`, { waitUntil: "networkidle" });
+  await page.getByLabel("Email").waitFor({ timeout: 15000 });
+  const at = new URL(page.url());
+  if (at.pathname !== "/login" || at.searchParams.get("next") !== "/acme/widget")
+    problems.push({
+      where: stage,
+      kind: "behaviour",
+      text: `a signed-out visitor to /acme/widget should be sent to /login?next=/acme/widget; they are on ${page.url()}`,
+    });
+  const body = (await page.innerText("body")).replace(/\s+/g, " ");
+  if (/The fast one/.test(body))
+    problems.push({
+      where: stage,
+      kind: "security",
+      text: "a signed-out visitor is shown the private repository's README",
+    });
+  await shot(page, "02-signed-out-repo", "a private repository's address, signed out: sign in first");
 });
 
 // The funnel a stranger runs, before any of the signed-in work below.
@@ -2333,7 +2353,7 @@ await step('changesets / abandon the revert and leave things as found', async ()
 // way a missing SSH URL does: a walkthrough against a half-configured
 // stack is a walkthrough of a different product.
 // ---------------------------------------------------------------------
-const CI_RUNNER = process.env.CI_RUNNER_URL ?? 'http://127.0.0.1:59120';
+const CI_RUNNER = process.env.CI_RUNNER_URL ?? 'http://127.0.0.1:29120';
 const CI_REPO = process.env.CI_RUNNER_REPO ?? 'pipeline';
 const CI_KEY = `I${(Date.now() + 1).toString(16).padStart(12, '0')}`;
 const CI_BRANCH = `ci-review-${Date.now()}`;

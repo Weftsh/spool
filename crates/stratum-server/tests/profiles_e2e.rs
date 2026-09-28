@@ -90,7 +90,7 @@ fn make_repo(b: &mut Browser, org: &str, name: &str, public: bool) {
     let (st, body) = b.req(
         "POST",
         &format!("/v1/orgs/{org}/repos"),
-        Some(serde_json::json!({ "name": name, "public": public })),
+        Some(serde_json::json!({ "name": name })),
     );
     assert_eq!(st, 201, "create {org}/{name}: {body}");
 }

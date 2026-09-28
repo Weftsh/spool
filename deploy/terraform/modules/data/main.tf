@@ -3,19 +3,17 @@
 
 variable "project" { type = string }
 variable "env" { type = string }
+variable "deletion_protection" {
+  description = "Keep the database, the bucket and the secrets from being destroyed by accident. See the root variable."
+  type        = bool
+}
 variable "vpc_id" { type = string }
 variable "private_subnets" { type = list(string) }
 variable "db_min_acu" { type = number }
 variable "db_max_acu" { type = number }
 variable "ci_log_retention_days" {
-  description = "How long a CI job's log survives under ci/logs/. Build logs are operational debris, not repository data, and nothing in the product reads one after the run is settled."
+  description = "How long a workflow job's log survives under ci/logs/. Build logs are operational debris, not repository data, and nothing in the product reads one after the run is settled."
   type        = number
-}
-
-variable "cache_retention_days" {
-  description = "Days a saved build-cache archive is kept, from its save. Mirrors STRATUM_CACHE_RETENTION_DAYS on the app."
-  type        = number
-  default     = 10
 }
 
 data "aws_caller_identity" "current" {}
@@ -23,6 +21,11 @@ data "aws_region" "current" {}
 
 locals {
   prefix = "${var.project}-${var.env}"
+  # A secret scheduled for deletion keeps its name for the recovery
+  # window, and the next apply of the same environment fails on "already
+  # scheduled for deletion" — so a stack meant to be torn down and
+  # rebuilt gets none.
+  secret_recovery_days = var.deletion_protection ? 30 : 0
 }
 
 # ------------------------------------------------------------- Aurora
@@ -81,10 +84,11 @@ resource "aws_rds_cluster" "db" {
   db_cluster_parameter_group_name = aws_rds_cluster_parameter_group.db.name
   storage_encrypted               = true
   backup_retention_period         = 7
-  # A final snapshot is prod's safety net and a test environment's
-  # leftover: it outlives `destroy`, is billed, and is the one thing the
-  # account sweep after a rehearsal keeps finding.
-  skip_final_snapshot       = var.env != "prod"
+  # With protection on, `destroy` is refused until it is turned off, and
+  # the cluster leaves a final snapshot behind when it does go. Without
+  # it neither: a snapshot outlives `destroy` and is billed.
+  deletion_protection       = var.deletion_protection
+  skip_final_snapshot       = !var.deletion_protection
   final_snapshot_identifier = "${local.prefix}-final"
 
   serverlessv2_scaling_configuration {
@@ -106,13 +110,8 @@ resource "aws_rds_cluster_instance" "db" {
 # the app's own advisory lock at boot; a least-privilege split is a noted
 # future step, not a v1 requirement).
 resource "aws_secretsmanager_secret" "db_url" {
-  name = "${var.project}/${var.env}/db-url"
-  # Prod keeps the recovery window; a test environment must not. A
-  # secret scheduled for deletion keeps its name for the window, and the
-  # next apply of the same environment fails on "already scheduled for
-  # deletion" — the person rebuilding a test stack is exactly who meets
-  # that. Seven of these outlived the first rehearsal's `destroy`.
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
+  name                    = "${var.project}/${var.env}/db-url"
+  recovery_window_in_days = local.secret_recovery_days
 }
 
 resource "aws_secretsmanager_secret_version" "db_url" {
@@ -131,9 +130,9 @@ resource "aws_secretsmanager_secret_version" "db_url" {
 resource "aws_s3_bucket" "store" {
   bucket = "${local.prefix}-store-${data.aws_caller_identity.current.account_id}"
   # The store is every repository's packs. Refusing to delete a bucket
-  # that still has them is right in prod and only stalls `destroy` on a
-  # test environment, whose packs are a rehearsal's.
-  force_destroy = var.env != "prod"
+  # that still has them is the point of deletion protection; without it,
+  # `destroy` empties the bucket first.
+  force_destroy = !var.deletion_protection
 }
 
 resource "aws_s3_bucket_public_access_block" "store" {
@@ -162,10 +161,11 @@ resource "aws_s3_bucket_lifecycle_configuration" "store" {
     }
   }
 
-  # CI logs are the one thing in this bucket that is NOT content-addressed
-  # and NOT referenced forever: a settled run's chunks are deleted by the
-  # finish handler, and this rule catches the stragglers a crashed runner
-  # leaves behind plus the complete logs of runs nobody will read again.
+  # Workflow logs are the one thing in this bucket that is NOT
+  # content-addressed and NOT referenced forever: a settled run's chunks
+  # are deleted by the finish handler, and this rule catches the
+  # stragglers a crashed runner leaves behind plus the complete logs of
+  # runs nobody will read again.
   rule {
     id     = "expire-ci-logs"
     status = "Enabled"
@@ -176,26 +176,6 @@ resource "aws_s3_bucket_lifecycle_configuration" "store" {
 
     expiration {
       days = var.ci_log_retention_days
-    }
-  }
-
-  # The build cache (`cache/<org>/<entry>/…`, written by the cache
-  # routes for `actions/cache` on Weft runners) is the other thing here
-  # that is neither content-addressed nor referenced forever. Retention
-  # is from the save, which is what a lifecycle rule can enforce; the
-  # control plane's rows carry the same window (`expires_at`) and its
-  # sweeper drops the rows the rule has emptied. Ten days, as
-  # STRATUM_CACHE_RETENTION_DAYS defaults to; change both together.
-  rule {
-    id     = "expire-build-cache"
-    status = "Enabled"
-
-    filter {
-      prefix = "cache/"
-    }
-
-    expiration {
-      days = var.cache_retention_days
     }
   }
 }
@@ -215,7 +195,7 @@ resource "aws_iam_user" "store" {
 }
 
 variable "ses_identity_arns" {
-  description = "SES identities this fleet sends as. Non-empty turns the grant on; the grant itself covers every identity in the account, because a sandboxed SES checks the recipient's identity as well as the sender's. Empty = the app's credential cannot send mail, which is right for a stack with no domain: STRATUM_MAIL_TRANSPORT stays `null` there."
+  description = "SES identities the server sends as. Non-empty turns the grant on; the grant itself covers every identity in the account, because a sandboxed SES checks the recipient's identity as well as the sender's. Empty = the app's credential cannot send mail, which is right for a stack with no domain: STRATUM_MAIL_TRANSPORT stays `null` there."
   type        = list(string)
   default     = []
 }
@@ -237,15 +217,15 @@ data "aws_iam_policy_document" "store_user" {
     ]
   }
 
-  # Every identity in the account, not only the one the fleet sends
+  # Every identity in the account, not only the one the server sends
   # *as*. SES authorizes SendEmail against the recipient's identity too
   # while the account is in the sandbox — where every recipient must be a
-  # verified identity — so a grant on the sending domain alone answered
+  # verified identity — so a grant on the sending domain alone answers
   # `not authorized to perform ses:SendEmail on resource
-  # …identity/<recipient>` for every message the first fleet tried to
-  # send: sign-up verification, invitations, notifications, all of it,
-  # with nothing on screen to say so. The identities in this account are
-  # all this fleet's; there is nothing here to keep it from.
+  # …identity/<recipient>` for every message: sign-up verification,
+  # invitations, notifications, all of it, with nothing on screen to say
+  # so. If this account holds SES identities that belong to something
+  # else, narrow this to the ones the server should use.
   dynamic "statement" {
     for_each = length(var.ses_identity_arns) == 0 ? [] : [1]
     content {
@@ -266,13 +246,8 @@ resource "aws_iam_access_key" "store" {
 }
 
 resource "aws_secretsmanager_secret" "store_creds" {
-  name = "${var.project}/${var.env}/store-credentials"
-  # Prod keeps the recovery window; a test environment must not. A
-  # secret scheduled for deletion keeps its name for the window, and the
-  # next apply of the same environment fails on "already scheduled for
-  # deletion" — the person rebuilding a test stack is exactly who meets
-  # that. Seven of these outlived the first rehearsal's `destroy`.
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
+  name                    = "${var.project}/${var.env}/store-credentials"
+  recovery_window_in_days = local.secret_recovery_days
 }
 
 resource "aws_secretsmanager_secret_version" "store_creds" {
@@ -291,13 +266,8 @@ resource "random_password" "webhook" {
 }
 
 resource "aws_secretsmanager_secret" "webhook" {
-  name = "${var.project}/${var.env}/webhook-secret"
-  # Prod keeps the recovery window; a test environment must not. A
-  # secret scheduled for deletion keeps its name for the window, and the
-  # next apply of the same environment fails on "already scheduled for
-  # deletion" — the person rebuilding a test stack is exactly who meets
-  # that. Seven of these outlived the first rehearsal's `destroy`.
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
+  name                    = "${var.project}/${var.env}/webhook-secret"
+  recovery_window_in_days = local.secret_recovery_days
 }
 
 resource "aws_secretsmanager_secret_version" "webhook" {
@@ -305,21 +275,16 @@ resource "aws_secretsmanager_secret_version" "webhook" {
   secret_string = random_password.webhook.result
 }
 
-# One fleet-stable SSH host identity: every task presents this key, so
-# clients that pinned it on first connect keep trusting the fleet across
+# One stable SSH host identity: every task presents this key, so clients
+# that pinned it on first connect keep trusting the service across
 # deploys and scale events.
 resource "tls_private_key" "ssh_host" {
   algorithm = "ED25519"
 }
 
 resource "aws_secretsmanager_secret" "ssh_host_key" {
-  name = "${var.project}/${var.env}/ssh-host-key"
-  # Prod keeps the recovery window; a test environment must not. A
-  # secret scheduled for deletion keeps its name for the window, and the
-  # next apply of the same environment fails on "already scheduled for
-  # deletion" — the person rebuilding a test stack is exactly who meets
-  # that. Seven of these outlived the first rehearsal's `destroy`.
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
+  name                    = "${var.project}/${var.env}/ssh-host-key"
+  recovery_window_in_days = local.secret_recovery_days
 }
 
 resource "aws_secretsmanager_secret_version" "ssh_host_key" {
@@ -338,13 +303,8 @@ resource "tls_private_key" "cdn" {
 }
 
 resource "aws_secretsmanager_secret" "cdn_key" {
-  name = "${var.project}/${var.env}/cdn-key"
-  # Prod keeps the recovery window; a test environment must not. A
-  # secret scheduled for deletion keeps its name for the window, and the
-  # next apply of the same environment fails on "already scheduled for
-  # deletion" — the person rebuilding a test stack is exactly who meets
-  # that. Seven of these outlived the first rehearsal's `destroy`.
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
+  name                    = "${var.project}/${var.env}/cdn-key"
+  recovery_window_in_days = local.secret_recovery_days
 }
 
 resource "aws_secretsmanager_secret_version" "cdn_key" {
@@ -352,74 +312,27 @@ resource "aws_secretsmanager_secret_version" "cdn_key" {
   secret_string = tls_private_key.cdn.private_key_pem
 }
 
-# Billing. Three values from the Stripe dashboard in one JSON secret —
-# `key`, `webhook_secret`, `price` — created empty here and filled by a
-# person, because they are issued by Stripe rather than generated:
+# The GitHub App, for mirrors, imports and signing in with GitHub: one
+# JSON secret with the five things GitHub issues when the App is created —
+# `app_id`, `private_key` (the whole PEM; JSON carries the newlines),
+# `webhook_secret`, and the App's OAuth client, `client_id` and
+# `client_secret`. Created blank here, because GitHub issues them rather
+# than terraform generating them, and filled by a person:
 #
-#   aws secretsmanager put-secret-value --secret-id <arn> --secret-string \
-#     '{"key":"sk_live_…","webhook_secret":"whsec_…","price":"price_…",
-#       "price_minutes":"price_…","price_egress":"price_…","price_storage":"price_…",
-#       "price_packages":"price_…"}'
-#
-# The last four are the metered prices for use past the pool and are
-# optional as a set: all four present meters overage, none present
-# sells seats only. `scripts/manual-stripe.sh meters` creates them (and
-# the Billing Meters they attach to) in a sandbox and prints the ids;
-# the live account gets the same objects by hand, once.
-# A secret filled before the packages meter existed may leave out
-# `price_packages`; the root's `stripe_price_packages` variable then
-# supplies it (a price id is not secret), and the secret wins when both do.
-#
-# `ignore_changes` keeps a later `apply` from putting the placeholder back.
-# The app module injects these only when `billing_enabled` is set, and
-# refuses to plan a task definition that would boot with any of the three
-# blank — the server treats a key with no price or no webhook secret as a
-# boot error, so this catches it at `plan` rather than at the first deploy.
-resource "aws_secretsmanager_secret" "stripe" {
-  name = "${var.project}/${var.env}/stripe"
-  # Prod keeps the recovery window; a test environment must not. A
-  # secret scheduled for deletion keeps its name for the window, and the
-  # next apply of the same environment fails on "already scheduled for
-  # deletion" — the person rebuilding a test stack is exactly who meets
-  # that. Seven of these outlived the first rehearsal's `destroy`.
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
-}
-
-resource "aws_secretsmanager_secret_version" "stripe" {
-  secret_id     = aws_secretsmanager_secret.stripe.id
-  secret_string = jsonencode({ key = "", webhook_secret = "", price = "" })
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
-}
-
-# The GitHub App: `app_id`, `private_key` (the whole PEM — JSON carries
-# the newlines), `webhook_secret`. Issued by GitHub when the App is
-# created — `scripts/github-app-create.py` leaves them in `.secrets/` —
-# so, like Stripe's, created blank here and filled by a person:
-#
-#   aws secretsmanager put-secret-value --secret-id <arn> --secret-string \
-#     "$(jq -n --arg id 123456 --rawfile pem .secrets/<slug>.private-key.pem \
-#         --arg wh whsec… --arg cid Iv1… --arg cs ghcs… \
+#   aws secretsmanager put-secret-value --secret-id <project>/<env>/github-app \
+#     --secret-string "$(jq -n --arg id 123456 --rawfile pem app.private-key.pem \
+#         --arg wh <webhook-secret> --arg cid Iv1… --arg cs <client-secret> \
 #         '{app_id:$id,private_key:$pem,webhook_secret:$wh,client_id:$cid,client_secret:$cs}')"
 #
-# `client_id` and `client_secret` are the App's OAuth client — GitHub
-# shows the id on the App's settings page and issues the secret there.
-# The App must have "Request user authorization (OAuth) during
-# installation" on, with its callback URL set to `/v1/github/setup`:
-# that is how the install callback learns that the person arriving with
-# an installation id actually controls it.
-#
-# The app module injects these only when `github_app_slug` is set, and
-# refuses to plan a task definition with any of the three blank. A server
-# with an app id and no key refuses to boot; one with a blank webhook
+# `ignore_changes` keeps a later apply from putting the blanks back. The
+# app module injects these only when `github_app_slug` is set, and
+# refuses to plan a task definition with any of the five blank: a server
+# with an app id and no key refuses to boot, and one with a blank webhook
 # secret verifies every GitHub delivery against "" and drops it, which
 # looks like GitHub not calling rather than like a misconfiguration.
 resource "aws_secretsmanager_secret" "github_app" {
-  name = "${var.project}/${var.env}/github-app"
-  # Prod keeps the recovery window; a test environment must not — see the
-  # stripe secret above.
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
+  name                    = "${var.project}/${var.env}/github-app"
+  recovery_window_in_days = local.secret_recovery_days
 }
 
 resource "aws_secretsmanager_secret_version" "github_app" {
@@ -460,31 +373,12 @@ output "cdn_key_secret_arn" {
   value = aws_secretsmanager_secret.cdn_key.arn
 }
 
-output "stripe_secret_arn" {
-  value = aws_secretsmanager_secret.stripe.arn
-}
-
-# The Runners App, when the deployment has one: the same five keys, filled
-# the same way, from `scripts/github-app-create.py --kind runners`.
-resource "aws_secretsmanager_secret" "github_runners_app" {
-  name                    = "${var.project}/${var.env}/github-runners-app"
-  recovery_window_in_days = var.env == "prod" ? 30 : 0
-}
-
-resource "aws_secretsmanager_secret_version" "github_runners_app" {
-  secret_id     = aws_secretsmanager_secret.github_runners_app.id
-  secret_string = jsonencode({ app_id = "", private_key = "", webhook_secret = "", client_id = "", client_secret = "" })
-  lifecycle {
-    ignore_changes = [secret_string]
-  }
-}
-
-output "github_runners_app_secret_arn" {
-  value = aws_secretsmanager_secret.github_runners_app.arn
-}
-
 output "github_app_secret_arn" {
   value = aws_secretsmanager_secret.github_app.arn
+}
+
+output "github_app_secret_name" {
+  value = aws_secretsmanager_secret.github_app.name
 }
 
 output "cdn_public_key_pem" {

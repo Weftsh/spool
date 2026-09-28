@@ -17,14 +17,10 @@
 //!
 //! > **A chaos test may never be the sole cover for a product line.**
 //!
-//! It is enforced by construction rather than by review. Every test here
-//! is `#[ignore]`d, so `cargo test --workspace --release` and
-//! `cargo llvm-cov --workspace` both skip them: they contribute exactly
-//! zero lines to the lcov and therefore cannot move
-//! `coverage-ledger.toml` in either direction. If a product line were
-//! reachable only from here, the deterministic coverage run would report
-//! it uncovered and the gate would demand a deterministic sibling test —
-//! which is the outcome we want, arrived at for free.
+//! Every test here is `#[ignore]`d, so `cargo test --workspace
+//! --release` skips them and the `chaos` CI job runs them on their own
+//! with `-- --ignored`. A behaviour reachable only from here is one the
+//! ordinary suite never checks: give it a deterministic sibling test.
 //!
 //! A second reason the rule has to hold: a SIGKILLed child never writes
 //! its `LLVM_PROFILE_FILE` profraw, so a killed process contributes no
@@ -1213,6 +1209,44 @@ fn person(server: &Server, mail: &Mailbox, handle: &str) -> String {
     minted["token"].as_str().expect("token").to_string()
 }
 
+/// A signed-in session for `handle`, as its cookie. A fork reads one
+/// organisation and writes another, and a token is bound to one, so it
+/// is the person's session that forks.
+fn session(server: &Server, handle: &str) -> String {
+    Browser::signed_in(
+        server,
+        &format!("{handle}@example.com"),
+        "a long enough password",
+    )
+    .cookie
+    .expect("a session cookie")
+}
+
+/// A request as the session `cookie` names.
+fn as_session(
+    server: &Server,
+    cookie: &str,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (u16, serde_json::Value) {
+    let mut b = Browser::new(server);
+    b.cookie = Some(cookie.to_string());
+    b.req(method, path, body)
+}
+
+/// `owner` invites `guest` in as a viewer. Every repository is private
+/// to its organisation, so this is the only way `guest` can read — and
+/// so fork — one of `owner`'s.
+fn let_in(server: &Server, owner: &str, guest: &str) {
+    let mut b = Browser::signed_in(
+        server,
+        &format!("{owner}@example.com"),
+        "a long enough password",
+    );
+    b.invite_and_accept(owner, &format!("{guest}@example.com"), "viewer");
+}
+
 /// A fork is two writes in two systems that share no transaction: an
 /// `epoch_refs` row in Postgres, then a `locator.hdr` in the object
 /// store. The order is the correctness argument — reference first,
@@ -1254,9 +1288,11 @@ fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
         "POST",
         "/v1/orgs/ada/repos",
         &ada,
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
+    let_in(&server, "ada", "bob");
+    let bob_session = session(&server, "bob");
     let up_prefix = format!(
         "o/{}/r/{}/prod",
         body["org_id"].as_str().unwrap(),
@@ -1304,7 +1340,13 @@ fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
         Server::kill_pid(pid);
     });
 
-    let (st, body) = server.req("POST", "/v1/orgs/ada/repos/widget/forks", &bob, None);
+    let (st, body) = as_session(
+        &server,
+        &bob_session,
+        "POST",
+        "/v1/orgs/ada/repos/widget/forks",
+        None,
+    );
     assert_eq!(st, 202, "{body}");
     let fork_prefix = format!(
         "o/{}/r/{}/prod",
@@ -1414,9 +1456,11 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
         "POST",
         "/v1/orgs/ada/repos",
         &ada,
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
+    let_in(&server, "ada", "bob");
+    let bob_session = session(&server, "bob");
     let up_prefix = format!(
         "o/{}/r/{}/prod",
         body["org_id"].as_str().unwrap(),
@@ -1442,7 +1486,13 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
         "upstream's epoch is empty; nothing to protect"
     );
 
-    let (st, body) = server.req("POST", "/v1/orgs/ada/repos/widget/forks", &bob, None);
+    let (st, body) = as_session(
+        &server,
+        &bob_session,
+        "POST",
+        "/v1/orgs/ada/repos/widget/forks",
+        None,
+    );
     assert_eq!(st, 202, "{body}");
     let mut ready = false;
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -1586,9 +1636,11 @@ fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
         "POST",
         "/v1/orgs/ada/repos",
         &ada,
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
+    let_in(&server, "ada", "bob");
+    let bob_session = session(&server, "bob");
 
     for i in 0..9 {
         commit(&server, &ada, "/v1/orgs/ada/repos/widget", i);
@@ -1611,10 +1663,11 @@ fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
     let mut names = Vec::new();
     for n in 0..10 {
         let name = format!("fork-{n}");
-        let (st, body) = server.req(
+        let (st, body) = as_session(
+            &server,
+            &bob_session,
             "POST",
             "/v1/orgs/ada/repos/widget/forks",
-            &bob,
             Some(serde_json::json!({ "name": name })),
         );
         assert_eq!(st, 202, "fork {n}: {body}");

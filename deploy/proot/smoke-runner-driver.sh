@@ -1,8 +1,8 @@
 # The self-hosted smoke leg's "other machine" as a process under PRoot.
 #
 # Sourced by deploy/smoke.sh when SMOKE_RUNNER_DRIVER names this file. The
-# runner image is a root filesystem (SMOKE_RUNNER_IMAGE names the directory,
-# as fake-ecs's proot backend does), the process runs as uid 10002 with a
+# runner image is a root filesystem (SMOKE_RUNNER_IMAGE names the
+# directory build-image.sh left), the process runs as uid 10002 with a
 # scratch /work, and the four verbs the leg needs are a pid file, a log
 # file and a session to signal. The exit code is written by the wrapper
 # the moment the runner exits, which is what a container's State.ExitCode

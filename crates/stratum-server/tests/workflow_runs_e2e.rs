@@ -21,13 +21,7 @@ use std::time::{Duration, Instant};
 use stratum_control::auth::{self, Mint, Scope};
 use stratum_control::workflows::{self, NewJob, NewRun, WorkflowJob};
 use stratum_control::{registry, ControlDb};
-use stratum_testkit::fake_ecs::FakeEcs;
 use stratum_testkit::{gitcli::Scratch, Minio, Server};
-
-/// How long a dispatcher-driven expectation gets before it is a
-/// failure. Generous: the poll is a second and a loaded machine running
-/// the whole suite is slower than a quiet one.
-const DEADLINE: Duration = Duration::from_secs(30);
 
 const SHA: &str = "3333333333333333333333333333333333333333";
 const SPEC: &str = r#"{"image":"default","timeout_minutes":30,"env":{},"steps":[]}"#;
@@ -45,7 +39,7 @@ fn world(hint: &str, minio: &Minio, scratch: &Scratch) -> World {
     let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"))
-        // No dispatcher: this suite drives the queue by hand.
+        // No sweeper: this suite drives the queue by hand.
         .env("STRATUM_RUNNER_POLL_SECS", "0")
         .start();
     let admin = server.bootstrap_org("acme");
@@ -104,10 +98,19 @@ fn make_run(w: &World, repo_id: &str, sha: &str, keys: &[&str]) -> String {
     .id
 }
 
-/// Claim a named job and give it a real job token, as the dispatcher does.
+/// Claim a named job and give it a real job token, as the claim route
+/// does for a runner in the default group.
 fn launch(w: &World, key: &str) -> (WorkflowJob, String) {
+    let labels = vec!["self-hosted".to_string()];
+    let route = workflows::RunnerRoute {
+        runner_id: "e2e-runner",
+        org_id: &w.org_id,
+        group_id: "",
+        labels: &labels,
+        all_repos: true,
+    };
     let job = loop {
-        let c = workflows::claim(&w.db, 300_000)
+        let c = workflows::claim_self_hosted(&w.db, &route, 300_000)
             .unwrap()
             .unwrap_or_else(|| panic!("nothing claimable while looking for {key:?}"));
         if c.key == key {
@@ -923,18 +926,18 @@ fn the_stream_skips_a_chunk_that_is_gone_and_ends_when_the_repository_does() {
 // Deleting the repository CI is building
 // ---------------------------------------------------------------------
 
-/// The same world, but with a dispatcher and a fake ECS that accepts
-/// every `RunTask` and starts nothing. No runner binary is needed: what
-/// is under test is what the *product* does to a task it has launched,
-/// not what a runner does with it.
-fn dispatching_world(hint: &str, minio: &Minio, scratch: &Scratch) -> (World, FakeEcs) {
+/// The same world, but with the sweeper running and a short claim
+/// wait, for a case driven by a runner registered over the API — the
+/// calls `weft-runner` makes, with nothing of ours on the client side.
+fn claiming_world(hint: &str, minio: &Minio, scratch: &Scratch) -> World {
     let bucket = minio.bucket(hint);
-    let ecs = FakeEcs::start(None, scratch.path().join("runners"));
     let server = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), &bucket.base_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"))
-        .envs(&ecs.env())
         .env("STRATUM_RUNNER_POLL_SECS", "1")
+        // The claim's long poll, shortened so "nothing to do" is a fast
+        // 204 rather than twenty seconds of test.
+        .env("STRATUM_RUNNER_CLAIM_WAIT_MS", "300")
         .start();
     let admin = server.bootstrap_org("acme");
     for repo in ["app", "other"] {
@@ -950,92 +953,78 @@ fn dispatching_world(hint: &str, minio: &Minio, scratch: &Scratch) -> (World, Fa
     let repo = registry::repo_by_name(&db, &org.id, "app")
         .unwrap()
         .unwrap();
-    (
-        World {
-            server,
-            db,
-            org_id: org.id,
-            repo_id: repo.id,
-            admin,
-        },
-        ecs,
-    )
+    World {
+        server,
+        db,
+        org_id: org.id,
+        repo_id: repo.id,
+        admin,
+    }
 }
 
-/// Poll `f` until it is true, or fail saying what was still not.
-fn until(what: &str, within: Duration, mut f: impl FnMut() -> bool) {
-    let deadline = Instant::now() + within;
-    while Instant::now() < deadline {
-        if f() {
-            return;
-        }
-        std::thread::sleep(Duration::from_millis(100));
-    }
-    panic!("timed out after {within:?} waiting for {what}");
+/// A runner registered the way `weft-runner register` does it; its
+/// credential.
+fn register_runner(w: &World, name: &str) -> String {
+    let (st, minted) = w
+        .server
+        .post("/v1/orgs/acme/runners/registration-token", &w.admin, None);
+    assert_eq!(st, 201, "{minted}");
+    let (st, out) = w.server.post(
+        "/v1/runners/register",
+        minted["token"].as_str().unwrap(),
+        Some(serde_json::json!({
+            "name": name, "labels": [], "os": "linux", "arch": "x64",
+            "version": "0.1.0-test", "ephemeral": false,
+        })),
+    );
+    assert_eq!(st, 201, "{out}");
+    out["credential"].as_str().unwrap().to_string()
+}
+
+/// One claim, as the agent makes it: 200 with a job, 204 for nothing,
+/// 409 for a runner that already holds one.
+fn claim(w: &World, credential: &str) -> (u16, serde_json::Value) {
+    w.server.post("/v1/runners/claim", credential, None)
 }
 
 /// Deleting a repository stops the CI it was running, and lets go of
 /// what that CI was holding.
 ///
 /// The row is tombstoned rather than removed, so nothing about a run
-/// notices on its own: without this, the launched task keeps burning
-/// CPU, the queued job is *still claimed and launched* — a container
-/// started to clone a repository that answers 404 — and both hold a slot
-/// of the organisation's concurrency until the overdue sweep gets to
-/// them, which is a job's whole timeout away. That last part is why the
-/// concurrency limit here is 1: it makes the leak visible as another
-/// repository in the same organisation being unable to build at all.
+/// notices on its own: without this, the runner mid-step keeps building
+/// a repository that answers 404, the queued job is *still handed out*
+/// to the next machine that asks, and the machine that was building is
+/// held busy until the overdue sweep gets to it, which is a job's whole
+/// timeout away. That last part is why one machine does all the work
+/// here: it makes the leak visible as another repository in the same
+/// organisation being unable to build on it at all.
 #[test]
 fn deleting_a_repository_stops_its_builds_and_frees_what_they_held() {
     let minio = Minio::shared();
     let scratch = Scratch::new("wf-runs-delete");
-    let (w, ecs) = dispatching_world("wf-runs-delete", minio, &scratch);
+    let w = claiming_world("wf-runs-delete", minio, &scratch);
+    let machine = register_runner(&w, "box");
 
-    // One slot for the whole organisation: one job runs, the other
-    // waits, and nothing else in acme can start until one of them lets
-    // go.
-    workflows::set_concurrency(&w.db, &w.org_id, Some(1)).unwrap();
     let run = make_run(&w, &w.repo_id, SHA, &["build", "lint"]);
-
-    until("the dispatcher to launch the first job", DEADLINE, || {
-        ecs.run_tasks().len() == 1
-    });
-    // And to stay at one — the limit is doing its job, so the second is
-    // queued rather than merely slow.
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(ecs.run_tasks().len(), 1, "the concurrency limit holds");
+    let (st, took) = claim(&w, &machine);
+    assert_eq!(st, 200, "the machine takes the first job: {took}");
+    let job_id = took["job_id"].as_str().unwrap().to_string();
+    let job_token = took["token"].as_str().unwrap().to_string();
+    // And holds it: the other job waits rather than going to the same
+    // machine twice.
+    let (st, out) = claim(&w, &machine);
+    assert_eq!(st, 409, "a machine with a job is busy: {out}");
     let jobs = workflows::jobs_of(&w.db, &run).unwrap();
-    let running = jobs
-        .iter()
-        .find(|j| j.state == "running")
-        .expect("one job is running");
     let waiting = jobs
         .iter()
         .find(|j| j.state == "queued")
-        .expect("the other is queued");
-    assert!(running.task_ref.is_some(), "and it has a task behind it");
+        .expect("the other is queued")
+        .clone();
 
-    let launched_before = ecs.run_tasks().len();
     let (st, out) = w.server.delete("/v1/orgs/acme/repos/app", &w.admin);
     assert!(st == 200 || st == 204, "{st}: {out}");
 
-    // 1. The task that was up is stopped, by name and with a reason a
-    //    person reading a container log can act on.
-    until("the task to be stopped", DEADLINE, || {
-        !ecs.stop_tasks().is_empty()
-    });
-    let stop = &ecs.stop_tasks()[0];
-    assert_eq!(
-        stop.body["task"].as_str(),
-        running.task_ref.as_deref(),
-        "the StopTask names the task this job launched"
-    );
-    assert_eq!(
-        stop.body["reason"],
-        serde_json::json!("the repository was deleted")
-    );
-
-    // 2. The rows settle — both jobs, not only the one with a task —
+    // 1. The rows settle — both jobs, not only the one a machine held —
     //    and so do the checks that a land gate reads.
     let run_row = workflows::run_by_id(&w.db, &run).unwrap().unwrap();
     assert_eq!(run_row.state, "cancelled");
@@ -1062,45 +1051,39 @@ fn deleting_a_repository_stops_its_builds_and_frees_what_they_held() {
         );
     }
 
-    // 3. The queued job is never handed out. This is the assertion that
-    //    fails loudest against the unpatched delete: the dispatcher
-    //    would claim it on its next tick and start a container to clone
-    //    a repository that no longer exists.
-    std::thread::sleep(Duration::from_secs(4));
+    // 2. The queued job is never handed out. This is the assertion that
+    //    fails loudest against an unpatched delete: the next machine to
+    //    ask would be given it, and would clone a repository that no
+    //    longer exists.
+    let spare = register_runner(&w, "spare");
+    let (st, out) = claim(&w, &spare);
     assert_eq!(
-        ecs.run_tasks().len(),
-        launched_before,
-        "a job of a deleted repository was launched anyway (job {})",
+        st, 204,
+        "a job of a deleted repository ({}) was handed out: {out}",
         waiting.key
     );
 
-    // 4. The runner that was mid-step is told to stop on its next call,
+    // 3. The machine that was mid-step is told to stop on its next call,
     //    with the state on it. Its token was revoked by the same
     //    cancellation, so this is the case that used to answer 401 —
-    //    which a runner retries — and the container went on building a
-    //    repository that was not there any more.
-    let job_token = ecs.run_tasks()[0].env()["STRATUM_JOB_TOKEN"].clone();
-    let (st, body) = text_get(
-        &w.server,
-        &format!("/v1/runner/jobs/{}", running.id),
-        &job_token,
-    );
+    //    which a runner retries — and it went on building a repository
+    //    that was not there any more.
+    let (st, body) = text_get(&w.server, &format!("/v1/runner/jobs/{job_id}"), &job_token);
     assert_eq!(st, 410, "{body}");
     assert!(
         body.contains("\"state\":\"cancelled\""),
         "the runner has to be told why it is stopping: {body}"
     );
 
-    // 5. And the slot it was holding is free: another repository in the
-    //    same organisation builds, which under a limit of 1 it could not
-    //    do while anything of acme's was still `running`.
+    // 4. And the machine is free: another repository in the same
+    //    organisation builds on it, which it could not while anything of
+    //    the deleted one was still `running` there.
     let other = registry::repo_by_name(&w.db, &w.org_id, "other")
         .unwrap()
         .unwrap();
     make_run(&w, &other.id, &"5".repeat(40), &["build"]);
-    until("the other repository's build to start", DEADLINE, || {
-        ecs.run_tasks().len() == launched_before + 1
-    });
+    let (st, out) = claim(&w, &machine);
+    assert_eq!(st, 200, "the machine was left busy: {out}");
 
     assert!(w.server.healthy());
 }

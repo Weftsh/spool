@@ -1,6 +1,6 @@
 # The replaceable half: ECR, the ECS Fargate service, ALB (HTTP), NLB
-# (git-over-SSH), CloudFront, autoscaling, and the SSM parameters the CD
-# workflow reads so deploys never need terraform.
+# (git-over-SSH), CloudFront, autoscaling, and the SSM parameters the
+# operator scripts read so a deploy never needs terraform.
 
 variable "project" { type = string }
 variable "env" { type = string }
@@ -43,114 +43,19 @@ variable "cdn_url_ttl_secs" {
   default     = 3600
 }
 
-# Hosted CI runners. These come from modules/runner, which builds its own
-# isolated VPC; the app's only relationship with it is the ability to start
-# and stop tasks there. Nothing about the runner network is reachable from
-# here, and nothing here is reachable from a runner except the public URL.
-variable "runner_dispatch_secret_arn" { type = string }
-variable "runner_cluster" { type = string }
-variable "runner_task_definition" { type = string }
-variable "runner_github_task_definition" {
-  description = "The GitHub Actions runner family (STRATUM_RUNNER_ECS_GITHUB_TASK_DEFINITION). Same cluster, same dispatch key, a different image."
-  type        = string
-}
-variable "runner_subnets" { type = list(string) }
-variable "runner_security_group" { type = string }
-variable "runner_minutes_per_month" { type = number }
-variable "runner_max_timeout_minutes" { type = number }
-
-# Billing. Off, the app sells nothing and every organisation holds
-# private repositories for free — the self-hosted build. On, the three
-# Stripe values are injected from one secret and the plan refuses a
-# blank one.
-variable "billing_enabled" { type = bool }
-variable "stripe_secret_arn" { type = string }
-variable "free_ci_minutes" { type = number }
-variable "paid_ci_minutes_per_seat" { type = number }
-variable "paid_egress_gb_per_seat" { type = number }
-variable "paid_storage_gb_per_seat" { type = number }
-variable "paid_packages_gb_per_seat" { type = number }
-variable "price_per_seat_cents" { type = number }
-variable "overage_1000_minutes_cents" { type = number }
-variable "overage_egress_gb_cents" { type = number }
-variable "overage_storage_gb_month_cents" { type = number }
-variable "overage_packages_gb_month_cents" { type = number }
-variable "billing_rollup_secs" { type = number }
-variable "storage_sweep_secs" { type = number }
-variable "storage_inventory_secs" { type = number }
-variable "stripe_meter_minutes" { type = string }
-variable "stripe_meter_egress" { type = string }
-variable "stripe_meter_storage" { type = string }
-variable "stripe_meter_packages" { type = string }
-variable "stripe_price_packages" { type = string }
-
-data "aws_secretsmanager_secret_version" "stripe" {
-  count     = var.billing_enabled ? 1 : 0
-  secret_id = var.stripe_secret_arn
-}
-
-locals {
-  stripe = var.billing_enabled ? jsondecode(data.aws_secretsmanager_secret_version.stripe[0].secret_string) : { key = "", webhook_secret = "", price = "" }
-  stripe_secrets = concat(var.billing_enabled ? [
-    { name = "STRATUM_STRIPE_KEY", valueFrom = "${var.stripe_secret_arn}:key::" },
-    { name = "STRATUM_STRIPE_WEBHOOK_SECRET", valueFrom = "${var.stripe_secret_arn}:webhook_secret::" },
-    { name = "STRATUM_STRIPE_PRICE", valueFrom = "${var.stripe_secret_arn}:price::" },
-    ] : [], local.stripe_metered ? [
-    { name = "STRATUM_STRIPE_PRICE_MINUTES", valueFrom = "${var.stripe_secret_arn}:price_minutes::" },
-    { name = "STRATUM_STRIPE_PRICE_EGRESS", valueFrom = "${var.stripe_secret_arn}:price_egress::" },
-    { name = "STRATUM_STRIPE_PRICE_STORAGE", valueFrom = "${var.stripe_secret_arn}:price_storage::" },
-    ] : [], local.stripe_metered && local.price_packages_in_secret ? [
-    { name = "STRATUM_STRIPE_PRICE_PACKAGES", valueFrom = "${var.stripe_secret_arn}:price_packages::" },
-  ] : [])
-  # The packages price may come from the secret, like the other three,
-  # or from `stripe_price_packages` when the secret predates it. A
-  # price id is not a secret, and ECS refuses to start a task whose
-  # `valueFrom` names a JSON key the secret does not have — so a fleet
-  # whose secret was filled before the fourth meter existed would have
-  # stopped starting at all. The secret wins when it has one.
-  price_packages_in_secret = length(trimspace(lookup(local.stripe, "price_packages", ""))) > 0
-  metered_prices = {
-    price_minutes  = trimspace(lookup(local.stripe, "price_minutes", ""))
-    price_egress   = trimspace(lookup(local.stripe, "price_egress", ""))
-    price_storage  = trimspace(lookup(local.stripe, "price_storage", ""))
-    price_packages = local.price_packages_in_secret ? trimspace(local.stripe["price_packages"]) : trimspace(var.stripe_price_packages)
-  }
-  # Use past the pool is metered only when the secret names the
-  # metered prices. Without them the server sells seats alone, pins
-  # every spend limit at $0 and treats the pool as a hard cap — which is
-  # the honest state of a fleet whose Stripe account has no meters yet.
-  # The meter *names* are public (they are event names, not secrets) and
-  # ride as variables; the server refuses a partial set at boot, and the
-  # precondition below refuses one before that.
-  stripe_metered = var.billing_enabled && length(trimspace(lookup(local.stripe, "price_minutes", ""))) > 0
-  metered_env = concat(local.stripe_metered ? [
-    { name = "STRATUM_STRIPE_METER_MINUTES", value = var.stripe_meter_minutes },
-    { name = "STRATUM_STRIPE_METER_EGRESS", value = var.stripe_meter_egress },
-    { name = "STRATUM_STRIPE_METER_STORAGE", value = var.stripe_meter_storage },
-    { name = "STRATUM_STRIPE_METER_PACKAGES", value = var.stripe_meter_packages },
-    ] : [], local.stripe_metered && !local.price_packages_in_secret ? [
-    { name = "STRATUM_STRIPE_PRICE_PACKAGES", value = trimspace(var.stripe_price_packages) },
-  ] : [])
-}
-
-# The GitHub App, the same way: one secret, injected only when the App
-# is named, and the plan refuses a blank value. The slug is public — it
-# is in the install URL every dashboard visitor is sent to — so it is a
-# variable, and the three things GitHub issued live in the secret.
+# The GitHub App: one secret, injected only when the App is named, and
+# the plan refuses a blank value. The slug is public — it is in the
+# install URL every dashboard visitor is sent to — so it is a variable,
+# and the five things GitHub issued live in the secret.
 variable "github_app_slug" {
-  description = "Slug of the GitHub App this fleet is (`weft` for https://github.com/apps/weft). Empty = no GitHub provider: no mirrors, no imports, `/webhooks/github` unrouted, and the dashboard's Connect button answers 501. Set, the `<project>/<env>/github-app` secret must be filled — see modules/data."
+  description = "Slug of the GitHub App (`acme-spool` for https://github.com/apps/acme-spool). Empty = no GitHub provider: no mirrors, no imports, `/webhooks/github` unrouted, and the dashboard's Connect button answers 501. Set, the `<project>/<env>/github-app` secret must be filled — see modules/data."
   type        = string
   default     = ""
 }
 variable "github_app_secret_arn" { type = string }
-variable "github_runners_app_slug" {
-  type    = string
-  default = ""
-}
-variable "github_runners_app_secret_arn" { type = string }
 
 # Mail. Empty keeps the server's `null` transport (mail is dropped and
-# the dashboard says so where it matters); set, the fleet sends through
+# the dashboard says so where it matters); set, the server sends through
 # SES as this address, which must be under the domain the dns module
 # verified — that is the only identity the app's credential may send as.
 variable "mail_from" {
@@ -158,14 +63,26 @@ variable "mail_from" {
   default = ""
 }
 
+variable "deletion_protection" {
+  description = "Refuse to delete the ECR repository while it still holds images. See the root variable."
+  type        = bool
+}
+
+variable "extra_environment" {
+  description = "Further plain settings for the container, name → value."
+  type        = map(string)
+  default     = {}
+}
+
+variable "extra_secrets" {
+  description = "Further settings from Secrets Manager, name → secret ARN (optionally with a `:<json-key>::` suffix)."
+  type        = map(string)
+  default     = {}
+}
+
 data "aws_secretsmanager_secret_version" "github_app" {
   count     = var.github_app_slug == "" ? 0 : 1
   secret_id = var.github_app_secret_arn
-}
-
-data "aws_secretsmanager_secret_version" "github_runners_app" {
-  count     = var.github_runners_app_slug == "" ? 0 : 1
-  secret_id = var.github_runners_app_secret_arn
 }
 
 locals {
@@ -178,34 +95,24 @@ locals {
     { name = "STRATUM_GITHUB_WEBHOOK_SECRET", valueFrom = "${var.github_app_secret_arn}:webhook_secret::" },
     # The App's OAuth client. With it the install callback proves the
     # person arriving with an installation id controls that installation
-    # (GitHub's user authorization during install); without it the
-    # callback trusts the id, which on a public App is a cross-tenant
-    # read. Required on a fleet — see the precondition below.
+    # (GitHub's user authorization during install), and signing in with
+    # GitHub works; without it the callback would have to trust the id.
+    # Required here — see the precondition below.
     { name = "STRATUM_GITHUB_CLIENT_ID", valueFrom = "${var.github_app_secret_arn}:client_id::" },
     { name = "STRATUM_GITHUB_CLIENT_SECRET", valueFrom = "${var.github_app_secret_arn}:client_secret::" },
   ] : []
   github_env = local.github_enabled ? [
     { name = "STRATUM_GITHUB_INSTALL_URL", value = "https://github.com/apps/${var.github_app_slug}/installations/new" },
   ] : []
-  # The Runners App: the same five values from its own secret, under
-  # RUNNERS names, and its own install page. Without it the mirror App
-  # runs jobs as well, as every deployment did before.
-  runners_enabled = var.github_runners_app_slug != ""
-  runners         = local.runners_enabled ? jsondecode(data.aws_secretsmanager_secret_version.github_runners_app[0].secret_string) : { app_id = "", private_key = "", webhook_secret = "", client_id = "", client_secret = "" }
-  runners_secrets = local.runners_enabled ? [
-    { name = "STRATUM_GITHUB_RUNNERS_APP_ID", valueFrom = "${var.github_runners_app_secret_arn}:app_id::" },
-    { name = "STRATUM_GITHUB_RUNNERS_APP_KEY", valueFrom = "${var.github_runners_app_secret_arn}:private_key::" },
-    { name = "STRATUM_GITHUB_RUNNERS_WEBHOOK_SECRET", valueFrom = "${var.github_runners_app_secret_arn}:webhook_secret::" },
-    { name = "STRATUM_GITHUB_RUNNERS_CLIENT_ID", valueFrom = "${var.github_runners_app_secret_arn}:client_id::" },
-    { name = "STRATUM_GITHUB_RUNNERS_CLIENT_SECRET", valueFrom = "${var.github_runners_app_secret_arn}:client_secret::" },
-  ] : []
-  runners_env = local.runners_enabled ? [
-    { name = "STRATUM_GITHUB_RUNNERS_INSTALL_URL", value = "https://github.com/apps/${var.github_runners_app_slug}/installations/new" },
-  ] : []
   mail_env = var.mail_from == "" ? [] : [
     { name = "STRATUM_MAIL_TRANSPORT", value = "ses" },
     { name = "STRATUM_MAIL_FROM", value = var.mail_from },
   ]
+  extra_env     = [for k in sort(keys(var.extra_environment)) : { name = k, value = var.extra_environment[k] }]
+  extra_secrets = [for k in sort(keys(var.extra_secrets)) : { name = k, valueFrom = var.extra_secrets[k] }]
+  # IAM grants read on the secret itself, so a `:<json-key>::` suffix is
+  # cut back to the secret's own ARN (arn:aws:secretsmanager:region:account:secret:name).
+  extra_secret_arns = distinct([for v in values(var.extra_secrets) : join(":", slice(split(":", v), 0, 7))])
 }
 
 locals {
@@ -217,16 +124,15 @@ locals {
 # ---------------------------------------------------------------- ECR
 
 resource "aws_ecr_repository" "app" {
-  # Env-scoped like every other name: test and prod share one account,
-  # and this was the one resource whose name let them collide.
+  # Env-scoped like every other name, so two environments can share one
+  # account.
   name                 = "${local.prefix}-app"
   image_tag_mutability = "MUTABLE"
-  # A repository that still holds images refuses to be deleted, which is
-  # the right refusal in prod and the wrong one everywhere else: a test
-  # environment's `destroy` stalled on this, and terraform stops
-  # scheduling work at the first error, so the ALB and the distribution
-  # behind it never got their turn either.
-  force_delete = var.env != "prod"
+  # A repository that still holds images refuses to be deleted. That is
+  # the right refusal for a stack you mean to keep, and the wrong one for
+  # a stack you mean to tear down: `destroy` stalls on it, and terraform
+  # stops scheduling work at the first error.
+  force_delete = !var.deletion_protection
 
   image_scanning_configuration {
     scan_on_push = true
@@ -462,13 +368,16 @@ data "aws_iam_policy_document" "execution_secrets" {
       var.webhook_secret_arn,
       var.ssh_host_key_secret_arn,
       var.cdn_key_secret_arn,
-      # Read-only access to the runner dispatch key. The app never sees
-      # any OTHER runner credential: there is none.
-      var.runner_dispatch_secret_arn,
-      var.stripe_secret_arn,
       var.github_app_secret_arn,
-      var.github_runners_app_secret_arn,
     ]
+  }
+
+  dynamic "statement" {
+    for_each = length(local.extra_secret_arns) == 0 ? [] : [1]
+    content {
+      actions   = ["secretsmanager:GetSecretValue"]
+      resources = local.extra_secret_arns
+    }
   }
 }
 
@@ -486,6 +395,39 @@ resource "aws_iam_role" "task" {
   assume_role_policy = data.aws_iam_policy_document.ecs_assume.json
 }
 
+locals {
+  base_env = [
+    { name = "STRATUM_BIND", value = "0.0.0.0:8080" },
+    { name = "STRATUM_SSH_BIND", value = "0.0.0.0:2222" },
+    # Path-style URL: exactly what the sigv4 signer implements; the
+    # S3 gateway endpoint routes this hostname inside the VPC.
+    { name = "STRATUM_STORE_URL", value = "https://s3.${var.aws_region}.amazonaws.com/${var.store_bucket}" },
+    { name = "AWS_REGION", value = var.aws_region },
+    { name = "STRATUM_PUBLIC_URL", value = local.public_url },
+    { name = "STRATUM_SSH_PUBLIC_URL", value = local.ssh_url },
+    { name = "STRATUM_DATA_DIR", value = "/var/lib/stratum" },
+    { name = "STRATUM_CDN_BASE", value = local.public_url },
+    { name = "STRATUM_CDN_KEY_PAIR_ID", value = aws_cloudfront_public_key.cdn.id },
+    { name = "STRATUM_CDN_URL_TTL_SECS", value = tostring(var.cdn_url_ttl_secs) },
+  ]
+  base_secrets = [
+    { name = "STRATUM_DB_URL", valueFrom = var.db_url_secret_arn },
+    { name = "AWS_ACCESS_KEY_ID", valueFrom = "${var.store_creds_secret_arn}:AWS_ACCESS_KEY_ID::" },
+    { name = "AWS_SECRET_ACCESS_KEY", valueFrom = "${var.store_creds_secret_arn}:AWS_SECRET_ACCESS_KEY::" },
+    { name = "STRATUM_WEBHOOK_SECRET", valueFrom = var.webhook_secret_arn },
+    { name = "STRATUM_SSH_HOST_KEY", valueFrom = var.ssh_host_key_secret_arn },
+    { name = "STRATUM_CDN_PRIVATE_KEY", valueFrom = var.cdn_key_secret_arn },
+  ]
+  # Every name this apply sets itself. extra_environment/extra_secrets
+  # may add to these and may not repeat them.
+  owned_names = [for e in concat(local.base_env, local.github_env, local.mail_env, local.base_secrets, local.github_secrets) : e.name]
+  extra_names = concat(keys(var.extra_environment), keys(var.extra_secrets))
+  extra_clash = sort(tolist(setunion(
+    setintersection(local.extra_names, local.owned_names),
+    setintersection(keys(var.extra_environment), keys(var.extra_secrets)),
+  )))
+}
+
 resource "aws_ecs_task_definition" "app" {
   family                   = local.prefix
   requires_compatibilities = ["FARGATE"]
@@ -501,31 +443,19 @@ resource "aws_ecs_task_definition" "app" {
     size_in_gib = 100
   }
 
-  # A blank Stripe value is a fleet that boots refusing to start (key
-  # without price or webhook secret) or, worse, boots selling nothing
-  # while the operator believes billing is on (blank key). Caught here.
   lifecycle {
-    precondition {
-      condition     = !var.billing_enabled || alltrue([for k in ["key", "webhook_secret", "price"] : length(trimspace(lookup(local.stripe, k, ""))) > 0])
-      error_message = "billing_enabled is set but the Stripe secret still has a blank key, webhook_secret or price — fill it with `aws secretsmanager put-secret-value` first."
-    }
-    # The metered prices are all-or-nothing, like the server's own
-    # boot check: a fleet with a minutes price and no storage price
-    # would report minutes and silently give storage away.
-    precondition {
-      condition     = !var.billing_enabled || !anytrue([for v in values(local.metered_prices) : length(v) > 0]) || alltrue([for v in values(local.metered_prices) : length(v) > 0])
-      error_message = "the Stripe secret names some of price_minutes, price_egress, price_storage and price_packages (or stripe_price_packages) but not all of them — metering is all-or-nothing; fill the rest or blank them all."
-    }
-    # Same argument for the App: an id without a key is a boot error, and
-    # a blank webhook secret is a fleet that silently drops every push
-    # GitHub delivers.
-    precondition {
-      condition     = !local.runners_enabled || (local.github_enabled && alltrue([for k in ["app_id", "private_key", "webhook_secret", "client_id", "client_secret"] : length(trimspace(lookup(local.runners, k, ""))) > 0]))
-      error_message = "github_runners_app_slug is set but github_app_slug is not, or the github-runners-app secret still has a blank value — the Runners App is a second App beside the mirror App, and needs all five of app_id, private_key, webhook_secret, client_id and client_secret filled (modules/data says how)."
-    }
+    # An id without a key is a boot error, and a blank webhook secret is a
+    # server that silently drops every push GitHub delivers.
     precondition {
       condition     = !local.github_enabled || alltrue([for k in ["app_id", "private_key", "webhook_secret", "client_id", "client_secret"] : length(trimspace(lookup(local.github, k, ""))) > 0])
-      error_message = "github_app_slug is set but the github-app secret still has a blank app_id, private_key, webhook_secret, client_id or client_secret — fill it with `aws secretsmanager put-secret-value` first (modules/data says how). client_id/client_secret are the App's OAuth client: without them the install callback cannot prove an installation belongs to the person connecting it."
+      error_message = "github_app_slug is set but the github-app secret still has a blank app_id, private_key, webhook_secret, client_id or client_secret — fill it with `aws secretsmanager put-secret-value` first (docs/operations.md says how). client_id/client_secret are the App's OAuth client: without them the install callback cannot prove an installation belongs to the person connecting it."
+    }
+    # The stack's own settings are not overridable from extra_*: two
+    # entries for one name in a task definition is ambiguous, and the
+    # override belongs in the variable that owns it.
+    precondition {
+      condition     = length(local.extra_clash) == 0
+      error_message = "extra_environment/extra_secrets set ${join(", ", local.extra_clash)}, which the stack already sets (or which both maps name). Use the stack's own variable for it — or, for mail, set ses_mail = false to configure SMTP yourself."
     }
   }
 
@@ -541,71 +471,8 @@ resource "aws_ecs_task_definition" "app" {
       # Fargate's maximum. Ops longer than 120 s on a STOPPING task still
       # die at SIGKILL — documented in docs/deployment-aws.md.
       stopTimeout = 120
-      environment = concat([
-        { name = "STRATUM_BIND", value = "0.0.0.0:8080" },
-        { name = "STRATUM_SSH_BIND", value = "0.0.0.0:2222" },
-        # Path-style URL: exactly what the sigv4 signer implements; the
-        # S3 gateway endpoint routes this hostname inside the VPC.
-        { name = "STRATUM_STORE_URL", value = "https://s3.${var.aws_region}.amazonaws.com/${var.store_bucket}" },
-        { name = "AWS_REGION", value = var.aws_region },
-        { name = "STRATUM_PUBLIC_URL", value = local.public_url },
-        { name = "STRATUM_SSH_PUBLIC_URL", value = local.ssh_url },
-        { name = "STRATUM_DATA_DIR", value = "/var/lib/stratum" },
-        { name = "STRATUM_CDN_BASE", value = local.public_url },
-        { name = "STRATUM_CDN_KEY_PAIR_ID", value = aws_cloudfront_public_key.cdn.id },
-        { name = "STRATUM_CDN_URL_TTL_SECS", value = tostring(var.cdn_url_ttl_secs) },
-        # Where the dispatcher launches CI jobs. A family name, not a
-        # pinned revision, so re-registering the runner definition takes
-        # effect without rolling the app fleet.
-        { name = "STRATUM_RUNNER_ECS_CLUSTER", value = var.runner_cluster },
-        { name = "STRATUM_RUNNER_ECS_TASK_DEFINITION", value = var.runner_task_definition },
-        # The second family on the same cluster: the official GitHub
-        # Actions agent, for jobs GitHub sends this fleet. Absent, the
-        # app treats the feature as off and refuses those launches.
-        { name = "STRATUM_RUNNER_ECS_GITHUB_TASK_DEFINITION", value = var.runner_github_task_definition },
-        { name = "STRATUM_RUNNER_ECS_SUBNETS", value = join(",", var.runner_subnets) },
-        { name = "STRATUM_RUNNER_ECS_SECURITY_GROUP", value = var.runner_security_group },
-        # A number rather than nothing, deliberately. Unset means
-        # unlimited hosted minutes for every organisation, which on a
-        # fleet where signup is self-serve is an abuse control that is
-        # built and switched off; an organisation that needs more gets
-        # an override in `orgs.ci_minutes_per_month`.
-        { name = "STRATUM_RUNNER_MINUTES_PER_MONTH", value = tostring(var.runner_minutes_per_month) },
-        { name = "STRATUM_RUNNER_MAX_TIMEOUT_MINUTES", value = tostring(var.runner_max_timeout_minutes) },
-        # The deal, as numbers: what a free (public-only) organisation
-        # and a person get in hosted minutes, what each paid seat adds,
-        # and the price the dashboard prints. The price is display
-        # only — Stripe's price object is what is charged.
-        { name = "STRATUM_FREE_CI_MINUTES", value = tostring(var.free_ci_minutes) },
-        { name = "STRATUM_PAID_CI_MINUTES_PER_SEAT", value = tostring(var.paid_ci_minutes_per_seat) },
-        { name = "STRATUM_PAID_EGRESS_GB_PER_SEAT", value = tostring(var.paid_egress_gb_per_seat) },
-        { name = "STRATUM_PAID_STORAGE_GB_PER_SEAT", value = tostring(var.paid_storage_gb_per_seat) },
-        { name = "STRATUM_PAID_PACKAGES_GB_PER_SEAT", value = tostring(var.paid_packages_gb_per_seat) },
-        { name = "STRATUM_PRICE_PER_SEAT_CENTS", value = tostring(var.price_per_seat_cents) },
-        # What use past the pool is quoted at. Display and estimate
-        # only, like the seat price: Stripe's metered prices charge.
-        { name = "STRATUM_OVERAGE_1000_MINUTES_CENTS", value = tostring(var.overage_1000_minutes_cents) },
-        { name = "STRATUM_OVERAGE_EGRESS_GB_CENTS", value = tostring(var.overage_egress_gb_cents) },
-        { name = "STRATUM_OVERAGE_STORAGE_GB_MONTH_CENTS", value = tostring(var.overage_storage_gb_month_cents) },
-        { name = "STRATUM_OVERAGE_PACKAGES_GB_MONTH_CENTS", value = tostring(var.overage_packages_gb_month_cents) },
-        # Every fifteen minutes rather than the hour: the last hour of a
-        # billing period has to reach Stripe inside the meter's grace.
-        { name = "STRATUM_BILLING_ROLLUP_SECS", value = tostring(var.billing_rollup_secs) },
-        { name = "STRATUM_STORAGE_SWEEP_SECS", value = tostring(var.storage_sweep_secs) },
-        { name = "STRATUM_STORAGE_INVENTORY_SECS", value = tostring(var.storage_inventory_secs) },
-      ], local.metered_env, local.github_env, local.runners_env, local.mail_env)
-      secrets = concat([
-        { name = "STRATUM_DB_URL", valueFrom = var.db_url_secret_arn },
-        { name = "AWS_ACCESS_KEY_ID", valueFrom = "${var.store_creds_secret_arn}:AWS_ACCESS_KEY_ID::" },
-        { name = "AWS_SECRET_ACCESS_KEY", valueFrom = "${var.store_creds_secret_arn}:AWS_SECRET_ACCESS_KEY::" },
-        { name = "STRATUM_WEBHOOK_SECRET", valueFrom = var.webhook_secret_arn },
-        { name = "STRATUM_SSH_HOST_KEY", valueFrom = var.ssh_host_key_secret_arn },
-        { name = "STRATUM_CDN_PRIVATE_KEY", valueFrom = var.cdn_key_secret_arn },
-        # Deliberately NOT the store credentials above: this key can only
-        # RunTask/StopTask/DescribeTasks on the runner cluster.
-        { name = "STRATUM_RUNNER_AWS_ACCESS_KEY_ID", valueFrom = "${var.runner_dispatch_secret_arn}:AWS_ACCESS_KEY_ID::" },
-        { name = "STRATUM_RUNNER_AWS_SECRET_ACCESS_KEY", valueFrom = "${var.runner_dispatch_secret_arn}:AWS_SECRET_ACCESS_KEY::" },
-      ], local.stripe_secrets, local.github_secrets, local.runners_secrets)
+      environment = concat(local.base_env, local.github_env, local.mail_env, local.extra_env)
+      secrets     = concat(local.base_secrets, local.github_secrets, local.extra_secrets)
       logConfiguration = {
         logDriver = "awslogs"
         options = {
@@ -625,15 +492,13 @@ resource "aws_ecs_service" "app" {
   desired_count   = var.desired_count
   launch_type     = "FARGATE"
 
-  # Rolling deploys with headroom; boot-time migrations serialize under
-  # the app's own pg_advisory_lock, so overlap is safe.
-  # 50, not 100, while the account's Fargate vCPU quota is 6: a rollout
-  # at 100 needs a third 2-vCPU app task beside the two running, and a
-  # single fleet job holds the last two vCPUs — the deploy of 2026-09-08
-  # failed to place its task 160 times while the dispatcher re-took the
-  # slot every five seconds. At 50 the rollout replaces one task at a
-  # time inside the quota, at the cost of one task serving for a minute.
-  # Put it back to 100 when the quota increase (32 requested) lands.
+  # Rolling deploys; boot-time migrations serialize under the app's own
+  # pg_advisory_lock, so old and new tasks overlapping is safe.
+  # 50 rather than 100 so a rollout fits inside a new account's default
+  # Fargate vCPU quota: at 100, two running 2-vCPU tasks need a third
+  # beside them, and a quota of 6 vCPUs refuses to place it. At 50 one
+  # task is replaced at a time, at the cost of one task serving alone for
+  # a minute. Raise it once the quota has room for desired_count + 1.
   deployment_minimum_healthy_percent = 50
   deployment_maximum_percent         = 200
 
@@ -657,8 +522,9 @@ resource "aws_ecs_service" "app" {
 
   health_check_grace_period_seconds = 60
 
-  # CD registers task-definition revisions and autoscaling owns the count;
-  # terraform must not fight either.
+  # Deploys register task-definition revisions outside terraform (see
+  # docs/deployment-aws.md) and autoscaling owns the count; terraform
+  # must not fight either.
   lifecycle {
     ignore_changes = [task_definition, desired_count]
   }
@@ -792,7 +658,7 @@ data "aws_cloudfront_cache_policy" "cdn_packs" {
 resource "aws_cloudfront_distribution" "cdn" {
   enabled         = true
   is_ipv6_enabled = true
-  comment         = "${local.prefix} — site, dashboard, API, git smart HTTP"
+  comment         = "${local.prefix} — dashboard, API, git smart HTTP"
   aliases         = local.aliases
 
   origin {
@@ -800,10 +666,9 @@ resource "aws_cloudfront_distribution" "cdn" {
     origin_id   = "alb"
 
     custom_origin_config {
-      # TLS terminates at CloudFront (default cert, v1 no-domain posture);
-      # CloudFront→ALB rides AWS's network in plain HTTP. The ALB is not
-      # origin-locked in v1 — acceptable while it serves nothing CloudFront
-      # does not (documented limitation).
+      # TLS terminates at CloudFront; CloudFront→ALB rides AWS's network
+      # in plain HTTP. The ALB is not origin-locked — acceptable while it
+      # serves nothing CloudFront does not (documented limitation).
       http_port              = 80
       https_port             = 443
       origin_protocol_policy = "http-only"
@@ -816,8 +681,8 @@ resource "aws_cloudfront_distribution" "cdn" {
 
     # A regional cache tier in front of the ALB: edge-cache misses from many
     # PoPs collapse into ONE origin fetch (request collapsing), and a warm
-    # regional cache absorbs repeat misses — so cacheable traffic (immutable
-    # web bundles, public reads) scales without hammering the tasks. It only
+    # regional cache absorbs repeat misses — so cacheable traffic (the
+    # immutable web bundles) scales without hammering the tasks. It only
     # affects what is cacheable at all: git POST payloads and per-tenant
     # authenticated responses still pass straight through to origin, by
     # design (the app marks them no-cache and CloudFront never caches POST).
@@ -884,19 +749,17 @@ resource "aws_cloudfront_distribution" "cdn" {
 #
 # Every URL the product hands out — the one it tells a browser, the one
 # it signs CDN pack URLs against, the one runners call back on, the SSH
-# host in a clone command — comes from these three locals and nowhere
-# else. With a domain they are the domain; without one they are the
-# generated hostnames, which is what the first version shipped and what
-# a rehearsal with no delegated domain still gets.
+# host in a clone command — comes from these locals and nowhere else.
+# With a domain they are the domain; without one they are the generated
+# hostnames.
 
 locals {
   public_host = var.domain_name == "" ? aws_cloudfront_distribution.cdn.domain_name : var.domain_name
   public_url  = "https://${local.public_host}"
   ssh_host    = var.domain_name == "" ? aws_lb.ssh.dns_name : "ssh.${var.domain_name}"
   ssh_url     = "ssh://git@${local.ssh_host}"
-  # What CloudFront answers to besides its own name. The docs address the
-  # API as `api.`, and `www.` is where a typed URL ends up.
-  aliases = var.domain_name == "" ? [] : [var.domain_name, "api.${var.domain_name}", "www.${var.domain_name}"]
+  # What CloudFront answers to besides its own name.
+  aliases = var.domain_name == "" ? [] : [var.domain_name]
 }
 
 resource "aws_route53_record" "web" {
@@ -938,7 +801,11 @@ resource "aws_route53_record" "ssh" {
   }
 }
 
-# --------------------------------------------------- SSM (CD's interface)
+# ------------------------------------------ SSM (the operator scripts' interface)
+#
+# deploy/admin-ecs.sh reads these to run `stratum-server admin …` as a
+# one-off task, and a deploy script reads them to find what to roll —
+# so neither needs terraform state or credentials to read it.
 
 locals {
   params = {
@@ -972,7 +839,7 @@ output "base_url" {
 }
 
 output "cdn_domain_name" {
-  description = "CloudFront's own hostname, bare. Without a custom domain this is the host STRATUM_PUBLIC_URL names and so the one modules/runner allowlists; with one, the root stack allowlists the domain instead."
+  description = "CloudFront's own hostname, bare. Without a custom domain this is the host STRATUM_PUBLIC_URL names."
   value       = aws_cloudfront_distribution.cdn.domain_name
 }
 

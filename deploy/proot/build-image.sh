@@ -17,11 +17,12 @@
 #   PRoot binds in, so every binding is also an --ignore-path;
 # - the build context is bound read-only in spirit but kaniko writes
 #   into it (it snapshots there), so it gets a scratch copy;
-# - the kaniko image itself has to come from a registry on the fleet's
-#   allow-list: KANIKO_IMAGE defaults to the weftsh mirror on ghcr.io;
+# - the kaniko image itself comes from KANIKO_IMAGE, by default a copy
+#   on ghcr.io (upstream's gcr.io/kaniko-project/executor works too);
 # - Docker Hub's front door for daemon-less clients is index.docker.io,
-#   which the fleet's allow-list did not name (it names registry-1, the
-#   daemon's host); --registry-map sends kaniko to registry-1 directly.
+#   which an egress allow-list may not name (it usually names
+#   registry-1, the daemon's host); --registry-map sends kaniko to
+#   registry-1 directly.
 set -euo pipefail
 here="$(cd "$(dirname "$0")" && pwd)"
 ctx=${1:?context}; dockerfile=${2:?dockerfile}; out=${3:?out rootfs}; shift 3
@@ -69,8 +70,8 @@ for v in HTTPS_PROXY https_proxy HTTP_PROXY http_proxy NO_PROXY no_proxy; do
   [ -n "${!v:-}" ] && proxies+=(--build-arg "$v=${!v}")
 done
 # The platform arguments BuildKit defines for every build and kaniko does
-# not: Dockerfile.github-runner picks its actions/runner tarball by
-# TARGETARCH and refuses an empty one, by design.
+# not, so a Dockerfile that reads TARGETARCH builds the same way under
+# both.
 case "$(uname -m)" in x86_64|amd64) tarch=amd64 ;; aarch64|arm64) tarch=arm64 ;; *) tarch=$(uname -m) ;; esac
 proxies+=(--build-arg TARGETOS=linux --build-arg TARGETARCH="$tarch" --build-arg TARGETPLATFORM="linux/$tarch"
           --build-arg BUILDOS=linux --build-arg BUILDARCH="$tarch" --build-arg BUILDPLATFORM="linux/$tarch")

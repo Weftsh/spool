@@ -1,7 +1,7 @@
 //! REST validation edges: every 4xx the handlers define, exercised over
 //! the real server — commit operation validation, read type errors, undo
 //! preconditions, token scope parsing, mirror registration errors,
-//! public-repo anonymous reads, and asset serving corner cases.
+//! anonymous and foreign-org refusals, and asset serving corner cases.
 
 use stratum_testkit::browser::Browser;
 use stratum_testkit::gitcli::{self, Scratch};
@@ -502,32 +502,82 @@ fn mirror_registration_validation() {
     assert!(matches!(resp, Err(ureq::Error::Status(404, _))));
 }
 
+/// Every repository is private to its organisation: an anonymous caller
+/// may read nothing, and cannot tell a repository that exists from one
+/// that does not — the same 401, word for word, for both. Asking for a
+/// public repository is refused in words rather than quietly granted a
+/// private one nobody asked for.
+///
+/// What an anonymous caller *used* to be able to reach is still worth
+/// holding: the metrics were members-only even when the code was not,
+/// the git wire takes a token in either Basic-auth position, and an
+/// unknown service name is refused.
 #[test]
-fn public_repos_read_anonymously_and_basic_auth_variants() {
+fn a_repository_is_private_to_its_org_and_git_takes_every_basic_auth_form() {
     let minio = Minio::shared();
-    let bucket = minio.bucket("api-public");
-    let scratch = Scratch::new("api-public");
+    let bucket = minio.bucket("api-private");
+    let scratch = Scratch::new("api-private");
     let server = spawn_server(&bucket.base_url, &scratch, &[]);
     let admin = server.bootstrap_org("acme");
-    server.req(
+    let no_public = serde_json::json!(
+        "this server has no public repositories: every repository is private to its \
+         organization — omit \"public\" or set it to false"
+    );
+
+    // `"public": true` is refused by name and makes nothing; `false`,
+    // or no field at all, is what happens anyway and is accepted.
+    let (st, body) = server.req(
         "POST",
         "/v1/orgs/acme/repos",
         &admin,
         Some(serde_json::json!({ "name": "open", "public": true })),
     );
-    let rp = "/v1/orgs/acme/repos/open";
+    assert_eq!(st, 400, "{body}");
+    assert_eq!(body["error"], no_public, "{body}");
+    let (st, body) = server.req("GET", "/v1/orgs/acme/repos/open", &admin, None);
+    assert_eq!(st, 404, "a refused create made a repository: {body}");
+    let (st, body) = server.req(
+        "POST",
+        "/v1/orgs/acme/repos",
+        &admin,
+        Some(serde_json::json!({ "name": "app", "public": false })),
+    );
+    assert_eq!(st, 201, "{body}");
+    // The row no longer carries a visibility — there is only one.
+    assert!(body.get("public").is_none(), "{body}");
+    assert!(body.get("write_blocked").is_none(), "{body}");
+    let rp = "/v1/orgs/acme/repos/app";
+    let (st, body) = server.req(
+        "PATCH",
+        rp,
+        &admin,
+        Some(serde_json::json!({ "public": true })),
+    );
+    assert_eq!(st, 400, "{body}");
+    assert_eq!(body["error"], no_public, "{body}");
     commit_ops(
         &server,
         &admin,
         rp,
-        serde_json::json!([{"op": "put", "path": "readme", "content": "open\n"}]),
+        serde_json::json!([{"op": "put", "path": "readme", "content": "app\n"}]),
     );
 
-    // Anonymous REST reads of a public repo succeed; writes still 401.
-    let (st, body) = server.req("GET", &format!("{rp}/files/readme"), "", None);
-    assert_eq!(st, 200, "{body}");
-    let (st, _) = server.req("GET", rp, "", None);
-    assert_eq!(st, 200);
+    // Anonymous: one answer for every read, on the repository that
+    // exists and on one that does not — a status code is not an
+    // existence oracle, and neither is a body.
+    let (_, absent) = server.req("GET", "/v1/orgs/acme/repos/ghost", "", None);
+    for path in [
+        rp.to_string(),
+        format!("{rp}/files/readme"),
+        format!("{rp}/tree"),
+        format!("{rp}/branches"),
+        "/v1/orgs/acme/repos/ghost".to_string(),
+        "/v1/orgs/acme/repos/ghost/files/readme".to_string(),
+    ] {
+        let (st, body) = server.req("GET", &path, "", None);
+        assert_eq!(st, 401, "anonymous GET {path}: {body}");
+        assert_eq!(body, absent, "anonymous GET {path} told something apart");
+    }
     let (st, _) = server.req(
         "POST",
         &format!("{rp}/commits"),
@@ -536,8 +586,7 @@ fn public_repos_read_anonymously_and_basic_auth_variants() {
     );
     assert_eq!(st, 401);
 
-    // ...but not its metrics, which are members-only whatever the
-    // repository's visibility.
+    // Metrics are members-only, and always were.
     //
     // Publishing the code does not publish how the code is used: how
     // often it is cloned, how many bytes it serves, how far behind its
@@ -551,13 +600,16 @@ fn public_repos_read_anonymously_and_basic_auth_variants() {
     //
     // Both shapes, because the CSV is the same handler behind a query
     // parameter and would have been the way round a gate on the JSON.
+    let rival = server.bootstrap_org("rival");
     for path in [format!("{rp}/metrics"), format!("{rp}/metrics?format=csv")] {
-        let (st, body) = server.req("GET", &path, "", None);
-        assert_eq!(st, 401, "GET {path} answered anonymously: {body}");
-        assert!(
-            !body.to_string().contains("kinds"),
-            "GET {path} leaked metrics to an anonymous caller: {body}"
-        );
+        for (who, token, expect) in [("anonymous", "", 401), ("a rival org", rival.as_str(), 404)] {
+            let (st, body) = server.req("GET", &path, token, None);
+            assert_eq!(st, expect, "GET {path} as {who}: {body}");
+            assert!(
+                !body.to_string().contains("kinds"),
+                "GET {path} leaked metrics to {who}: {body}"
+            );
+        }
     }
     // The owner still gets them, so this is a gate and not an outage.
     let (st, body) = server.req("GET", &format!("{rp}/metrics"), &admin, None);
@@ -565,65 +617,123 @@ fn public_repos_read_anonymously_and_basic_auth_variants() {
 
     // And the row says so, in the field the repository page draws its
     // Insights tab from — one answer, so the tab and the route cannot
-    // disagree about who is a member.
+    // disagree about who is a member. The weakest role there is, a
+    // viewer who may not push, is a member.
     let (_, row) = server.req("GET", rp, &admin, None);
     assert_eq!(row["viewer_member"], true, "owner: {row}");
-    let (_, row) = server.req("GET", rp, "", None);
-    assert_eq!(
-        row["viewer_member"], false,
-        "an anonymous reader of a public repository is not a member: {row}"
-    );
+    server
+        .admin(&[
+            "admin",
+            "user-create",
+            "--org",
+            "acme",
+            "--email",
+            "vic@acme.test",
+            "--name",
+            "Vic",
+            "--password",
+            "a long enough password",
+            "--role",
+            "viewer",
+        ])
+        .expect("user-create vic");
+    let mut vic = Browser::signed_in(&server, "vic@acme.test", "a long enough password");
+    let (st, row) = vic.req("GET", rp, None);
+    assert_eq!(st, 200, "{row}");
+    assert_eq!(row["viewer_member"], true, "a viewer: {row}");
+    assert_eq!(row["viewer_write"], false, "a viewer: {row}");
+    let (st, body) = vic.req("GET", &format!("{rp}/metrics"), None);
+    assert_eq!(st, 200, "a viewer was refused the metrics: {body}");
 
-    // Anonymous git clone of the public repo.
+    // The git wire: anonymous is refused with the challenge that makes
+    // git ask for credentials, rather than cloning or hanging.
     let base = server.base.strip_prefix("http://").unwrap();
-    let anon_url = format!("http://{base}/acme/open.git");
-    gitcli::clone_and_fsck(&anon_url, &scratch.path().join("anon"));
+    let err = gitcli::git_expect_err(
+        scratch.path(),
+        &[
+            "clone",
+            "-q",
+            &format!("http://{base}/acme/app.git"),
+            scratch.path().join("anon").to_str().unwrap(),
+        ],
+    )
+    .expect("an anonymous clone of a private repository");
+    assert!(
+        err.contains("Authentication failed") || err.contains("could not read Username"),
+        "an anonymous clone failed for the wrong reason: {err}"
+    );
+    assert!(!scratch.path().join("anon").join(".git").exists());
 
-    // Basic auth with the token in the *username* position also works
-    // (some CI systems put it there).
-    let tok_user_url = format!("http://{admin}:@{base}/acme/open.git");
+    // The token in the password position is the ordinary form…
+    gitcli::clone_and_fsck(
+        &server.authed_url(&admin, "acme", "app"),
+        &scratch.path().join("tokpass"),
+    );
+    // …and in the *username* position it also works (some CI systems
+    // put it there).
+    let tok_user_url = format!("http://{admin}:@{base}/acme/app.git");
     gitcli::clone_and_fsck(&tok_user_url, &scratch.path().join("tokuser"));
+    // A token from another organisation is bound to it, in either
+    // position: no clone, and nothing on disk.
+    let err = gitcli::git_expect_err(
+        scratch.path(),
+        &[
+            "clone",
+            "-q",
+            &format!("http://{rival}:@{base}/acme/app.git"),
+            scratch.path().join("rival").to_str().unwrap(),
+        ],
+    )
+    .expect("a rival org's clone");
+    assert!(!err.is_empty());
+    assert!(!scratch.path().join("rival").join(".git").exists());
 
-    // Unknown git service names are refused.
-    let resp = ureq::get(&format!(
-        "{}/acme/open/info/refs?service=git-frobnicate",
-        server.base
-    ))
-    .call();
-    match resp {
-        Err(ureq::Error::Status(code, _)) => assert!(code >= 400),
-        Ok(r) => panic!("unknown service accepted: {}", r.status()),
-        Err(e) => panic!("transport: {e}"),
+    // Unknown git service names are refused, with credentials or
+    // without.
+    for token in ["", admin.as_str()] {
+        let mut r = ureq::get(&format!(
+            "{}/acme/app/info/refs?service=git-frobnicate",
+            server.base
+        ));
+        if !token.is_empty() {
+            r = r.set("Authorization", &format!("Bearer {token}"));
+        }
+        match r.call() {
+            Err(ureq::Error::Status(code, _)) => assert!(code >= 400),
+            Ok(r) => panic!("unknown service accepted: {}", r.status()),
+            Err(e) => panic!("transport: {e}"),
+        }
     }
+    assert!(server.healthy());
 }
 
-/// "Reads with **any** valid credential" is what the authentication page
-/// promises of a public repository, and the git wire has always kept it:
-/// a token minted in your own namespace clones somebody else's public
-/// repository, which is how a fork follows its upstream. REST did not
-/// keep it. A personal token from another namespace was masked as 404
-/// where an anonymous request got 200, and a signed-in person with no
-/// role in the org came back as *nobody* — so the outside contributor's
-/// change had no author, their comment was refused with "sign in", and
-/// their viewed marks with "not a service token".
+/// A token is bound to the organisation it was minted in; a person's
+/// session spans every organisation they belong to. So a person from
+/// another organisation reads nothing here by any credential — the
+/// masked 404 an absent repository gets, and no way to write or talk —
+/// until they are made a member, and then they act as *themselves*, by
+/// session and by a token minted here, while the token they minted at
+/// home still reaches nothing.
 ///
-/// Asserted through the front door, per credential: a stranger's session,
-/// a stranger's personal token, and a foreign service token all read; a
-/// person is attributed as themselves when they act; nothing writes; and
-/// a private repository stays masked from every one of them.
+/// This used to be "a public repository reads with any valid
+/// credential": a stranger's session, a stranger's personal token and a
+/// foreign service token all read it. There are no public repositories
+/// now, and the half of the rule that survives is the one about
+/// identity: a reader who acts is attributed as themselves, and a
+/// service token from elsewhere is nobody here.
 #[test]
-fn a_public_repository_reads_with_any_valid_credential_and_a_person_acts_as_themselves() {
+fn a_member_acts_as_themselves_and_a_foreign_credential_reaches_nothing() {
     let minio = Minio::shared();
     let bucket = minio.bucket("api-any-cred");
     let scratch = Scratch::new("api-any-cred");
     let server = spawn_server(&bucket.base_url, &scratch, &[]);
     let admin = server.bootstrap_org("acme");
-    for (name, public) in [("open", true), ("vault", false)] {
+    for name in ["app", "vault"] {
         let (st, body) = server.req(
             "POST",
             "/v1/orgs/acme/repos",
             &admin,
-            Some(serde_json::json!({ "name": name, "public": public })),
+            Some(serde_json::json!({ "name": name })),
         );
         assert_eq!(st, 201, "{body}");
         commit_ops(
@@ -633,17 +743,17 @@ fn a_public_repository_reads_with_any_valid_credential_and_a_person_acts_as_them
             serde_json::json!([{"op": "put", "path": "readme", "content": "hi\n"}]),
         );
     }
-    // A change on the public repository, for the stranger to talk about.
+    // A change, for the stranger to try to talk about.
     let (st, body) = server.req(
         "POST",
-        "/v1/orgs/acme/repos/open/branches",
+        "/v1/orgs/acme/repos/app/branches",
         &admin,
         Some(serde_json::json!({ "name": "feature", "from": "main" })),
     );
     assert_eq!(st, 201, "{body}");
     let (st, body) = server.req(
         "POST",
-        "/v1/orgs/acme/repos/open/commits",
+        "/v1/orgs/acme/repos/app/commits",
         &admin,
         Some(serde_json::json!({
             "branch": "feature",
@@ -654,7 +764,7 @@ fn a_public_repository_reads_with_any_valid_credential_and_a_person_acts_as_them
     assert_eq!(st, 201, "{body}");
     let (st, body) = server.req(
         "POST",
-        "/v1/orgs/acme/repos/open/changes",
+        "/v1/orgs/acme/repos/app/changes",
         &admin,
         Some(serde_json::json!({ "from": "feature" })),
     );
@@ -663,22 +773,26 @@ fn a_public_repository_reads_with_any_valid_credential_and_a_person_acts_as_them
     // The stranger: a person in another organisation entirely, with a
     // session and a personal token minted there.
     let rival = server.bootstrap_org("rival");
-    server
-        .admin(&[
-            "admin",
-            "user-create",
-            "--org",
-            "rival",
-            "--email",
-            "sam@rival.test",
-            "--name",
-            "Sam",
-            "--password",
-            "a long enough password",
-            "--role",
-            "member",
-        ])
-        .expect("user-create sam");
+    let user = |org: &str, email: &str, name: &str, role: &str| {
+        server
+            .admin(&[
+                "admin",
+                "user-create",
+                "--org",
+                org,
+                "--email",
+                email,
+                "--name",
+                name,
+                "--password",
+                "a long enough password",
+                "--role",
+                role,
+            ])
+            .unwrap_or_else(|e| panic!("user-create {email}: {e}"));
+    };
+    user("rival", "sam@rival.test", "Sam", "member");
+    user("acme", "olive@acme.test", "Olive", "owner");
     let mut sam = Browser::signed_in(&server, "sam@rival.test", "a long enough password");
     let (st, me) = sam.req("GET", "/v1/auth/me", None);
     assert_eq!(st, 200, "{me}");
@@ -689,71 +803,98 @@ fn a_public_repository_reads_with_any_valid_credential_and_a_person_acts_as_them
         Some(serde_json::json!({ "scopes": ["repo:write"], "label": "laptop" })),
     );
     assert_eq!(st, 201, "{minted}");
-    let sam_token = minted["token"].as_str().expect("a token").to_string();
+    let home_token = minted["token"].as_str().expect("a token").to_string();
 
-    // Every credential reads the public repository the way anonymous
-    // does. `tree` and `changes` are the routes that answered 404 to a
-    // foreign token; the repo row already answered 200 to everyone, so a
-    // client saw the repository exist and then fail to open.
-    for path in [
-        "/v1/orgs/acme/repos/open",
-        "/v1/orgs/acme/repos/open/tree",
-        "/v1/orgs/acme/repos/open/files/readme",
-        "/v1/orgs/acme/repos/open/changes",
-        "/v1/orgs/acme/repos/open/changes/I0a11c0de",
-    ] {
+    // Every foreign credential meets the answer an absent repository
+    // gets — the same status and the same body — on every read. `tree`
+    // and `changes` are the routes that once disagreed with the repo
+    // row about this.
+    let reads = [
+        "/v1/orgs/acme/repos/app",
+        "/v1/orgs/acme/repos/app/tree",
+        "/v1/orgs/acme/repos/app/files/readme",
+        "/v1/orgs/acme/repos/app/changes",
+        "/v1/orgs/acme/repos/app/changes/I0a11c0de",
+        "/v1/orgs/acme/repos/vault",
+        "/v1/orgs/acme/repos/vault/tree",
+    ];
+    let (_, absent) = server.req("GET", "/v1/orgs/acme/repos/ghost", &rival, None);
+    for path in reads {
+        let (st, body) = server.req("GET", path, "", None);
+        assert_eq!(st, 401, "anonymous reads {path}: {body}");
         for (who, token) in [
-            ("anonymous", ""),
-            ("a foreign personal token", sam_token.as_str()),
+            ("a foreign personal token", home_token.as_str()),
             ("a foreign service token", rival.as_str()),
         ] {
             let (st, body) = server.req("GET", path, token, None);
-            assert_eq!(st, 200, "{who} reads {path}: {body}");
+            assert_eq!(st, 404, "{who} reads {path}: {body}");
+            assert_eq!(body, absent, "{who} could tell {path} from an absent repo");
         }
         let (st, body) = sam.req("GET", path, None);
-        assert_eq!(st, 200, "a foreign session reads {path}: {body}");
+        assert_eq!(st, 404, "a foreign session reads {path}: {body}");
+        assert_eq!(body, absent, "a foreign session told {path} apart");
     }
 
-    // Reading is not writing. A public repository the stranger may read
-    // is one they may not commit to, whatever they hold.
+    // Nor write, nor talk.
     let write = serde_json::json!({
         "message": "x",
         "operations": [{"op": "put", "path": "x", "content": "x"}],
     });
-    for (who, token, expect) in [
-        ("anonymous", "", 401),
-        ("a foreign personal token", sam_token.as_str(), 404),
-        ("a foreign service token", rival.as_str(), 404),
+    let comments = "/v1/orgs/acme/repos/app/changes/I0a11c0de/comments";
+    for (path, body) in [
+        ("/v1/orgs/acme/repos/app/commits", write.clone()),
+        (comments, serde_json::json!({ "body": "hello" })),
     ] {
-        let (st, body) = server.req(
-            "POST",
-            "/v1/orgs/acme/repos/open/commits",
-            token,
-            Some(write.clone()),
-        );
-        assert_eq!(st, expect, "{who} writes to a public repo: {body}");
-    }
-    let (st, body) = sam.req("POST", "/v1/orgs/acme/repos/open/commits", Some(write));
-    assert_eq!(st, 404, "a foreign session writes to a public repo: {body}");
-
-    // And the private repository does not exist for any of them.
-    for path in [
-        "/v1/orgs/acme/repos/vault",
-        "/v1/orgs/acme/repos/vault/tree",
-    ] {
-        for (token, expect) in [("", 401), (sam_token.as_str(), 404), (rival.as_str(), 404)] {
-            let (st, body) = server.req("GET", path, token, None);
-            assert_eq!(st, expect, "{path} with {token:?}: {body}");
+        for (who, token, expect) in [
+            ("anonymous", "", 401),
+            ("a foreign personal token", home_token.as_str(), 404),
+            ("a foreign service token", rival.as_str(), 404),
+        ] {
+            let (st, out) = server.req("POST", path, token, Some(body.clone()));
+            assert_eq!(st, expect, "{who} POST {path}: {out}");
         }
-        let (st, body) = sam.req("GET", path, None);
-        assert_eq!(st, 404, "a foreign session reads a private repo: {body}");
+        let (st, out) = sam.req("POST", path, Some(body));
+        assert_eq!(st, 404, "a foreign session POST {path}: {out}");
     }
 
-    // When the person acts, it is as themselves — by session and by
-    // token alike — and a service token from elsewhere is nobody: it may
-    // read, and the conversation is for people and the org's own
-    // machines.
-    let comments = "/v1/orgs/acme/repos/open/changes/I0a11c0de/comments";
+    // Olive makes Sam a viewer of acme. The session he already holds
+    // now reaches it — a session spans the orgs its person belongs to —
+    // and the token he minted at home still does not: it is rival's.
+    let mut olive = Browser::signed_in(&server, "olive@acme.test", "a long enough password");
+    olive.invite_and_accept("acme", "sam@rival.test", "viewer");
+    for path in reads {
+        let (st, body) = sam.req("GET", path, None);
+        assert_eq!(st, 200, "a member's session reads {path}: {body}");
+        let (st, body) = server.req("GET", path, &home_token, None);
+        assert_eq!(st, 404, "a rival-bound token reads {path}: {body}");
+    }
+    let (st, minted) = sam.req(
+        "POST",
+        "/v1/orgs/acme/tokens",
+        Some(serde_json::json!({ "scopes": ["repo:read"], "label": "acme laptop" })),
+    );
+    assert_eq!(st, 201, "{minted}");
+    let acme_token = minted["token"].as_str().expect("a token").to_string();
+    let (st, body) = server.req("GET", "/v1/orgs/acme/repos/app/tree", &acme_token, None);
+    assert_eq!(st, 200, "{body}");
+
+    // Reading is not writing: a viewer may commit by neither credential,
+    // and meets the masked answer, not a hint.
+    let (st, body) = sam.req(
+        "POST",
+        "/v1/orgs/acme/repos/app/commits",
+        Some(write.clone()),
+    );
+    assert_eq!(st, 404, "a viewer's session wrote: {body}");
+    let (st, body) = server.req(
+        "POST",
+        "/v1/orgs/acme/repos/app/commits",
+        &acme_token,
+        Some(write),
+    );
+    assert_eq!(st, 404, "a viewer's token wrote: {body}");
+
+    // When he talks, it is as himself — by session and by token alike.
     let (st, body) = sam.req(
         "POST",
         comments,
@@ -768,7 +909,7 @@ fn a_public_repository_reads_with_any_valid_credential_and_a_person_acts_as_them
     let (st, body) = server.req(
         "POST",
         comments,
-        &sam_token,
+        &acme_token,
         Some(serde_json::json!({ "body": "from a laptop" })),
     );
     assert_eq!(st, 201, "{body}");
@@ -777,64 +918,78 @@ fn a_public_repository_reads_with_any_valid_credential_and_a_person_acts_as_them
         serde_json::json!(format!("user:{sam_id}")),
         "{body}"
     );
+    // The foreign service token is still nobody here.
     let (st, body) = server.req(
         "POST",
         comments,
         &rival,
         Some(serde_json::json!({ "body": "from a machine" })),
     );
-    assert_eq!(st, 401, "{body}");
-    assert!(
-        body["error"]
-            .as_str()
-            .unwrap_or("")
-            .contains("sign in to comment"),
-        "{body}"
+    assert_eq!(st, 404, "{body}");
+    let (st, body) = server.req("GET", comments, &admin, None);
+    assert_eq!(st, 200, "{body}");
+    assert_eq!(
+        body.to_string().matches("from a machine").count(),
+        0,
+        "a refused comment was stored: {body}"
     );
 
     assert!(server.healthy());
 }
 
+/// The dashboard build is the one directory of static assets a server
+/// serves, and every MIME family a bundle can carry is labelled as what
+/// it is — a `.wasm` served as `application/octet-stream` is one a
+/// browser refuses to instantiate. A server with no dashboard directory
+/// is API-only, and every surface the directory would have answered is
+/// a 404 rather than a guess.
 #[test]
 fn asset_mime_types_and_dirless_servers() {
     let minio = Minio::shared();
     let bucket = minio.bucket("api-assets");
     let scratch = Scratch::new("api-assets");
 
-    // Site dir with every remaining MIME family.
-    let site = scratch.path().join("site");
-    std::fs::create_dir_all(&site).unwrap();
+    // A dashboard dir with every MIME family a bundle can carry.
+    let dash = scratch.path().join("dashboard");
+    std::fs::create_dir_all(&dash).unwrap();
     for (name, content) in [
+        ("index.html", "<div id=\"root\">SPA SHELL</div>"),
         ("feed.xml", "<x/>"),
         ("font.woff2", "wf2"),
         ("app.webmanifest", "{}"),
         ("mod.wasm", "\0asm"),
         ("blob.dat", "raw"),
     ] {
-        std::fs::write(site.join(name), content).unwrap();
+        std::fs::write(dash.join(name), content).unwrap();
     }
     let server = spawn_server(
         &bucket.base_url,
         &scratch,
-        &[("STRATUM_SITE_DIR", site.display().to_string())],
+        &[("STRATUM_DASHBOARD_DIR", dash.display().to_string())],
     );
     for (path, want_ct) in [
-        ("/feed.xml", "application/xml"),
-        ("/font.woff2", "font/woff2"),
-        ("/app.webmanifest", "application/manifest+json"),
-        ("/mod.wasm", "application/wasm"),
-        ("/blob.dat", "application/octet-stream"),
+        ("/dashboard/feed.xml", "application/xml"),
+        ("/dashboard/font.woff2", "font/woff2"),
+        ("/dashboard/app.webmanifest", "application/manifest+json"),
+        ("/dashboard/mod.wasm", "application/wasm"),
+        ("/dashboard/blob.dat", "application/octet-stream"),
+        ("/dashboard/", "text/html; charset=utf-8"),
     ] {
         let resp = ureq::get(&format!("{}{path}", server.base)).call().unwrap();
         assert_eq!(resp.header("Content-Type").unwrap_or(""), want_ct, "{path}");
     }
-    // Literal dot-dot traversal answers 404 straight from the sanitizer.
-    let err = ureq::get(&format!("{}/../../etc/passwd", server.base))
-        .call()
-        .unwrap_err();
-    assert!(matches!(err, ureq::Error::Status(404, _)));
+    // Dot-dot traversal never reaches a file outside the build: the
+    // client collapses it to a path that is not a namespace, and the
+    // server answers 404 rather than the SPA shell or the file.
+    for path in ["/../../etc/passwd", "/dashboard/../../etc/passwd"] {
+        let err = ureq::get(&format!("{}{path}", server.base))
+            .call()
+            .unwrap_err();
+        assert!(matches!(err, ureq::Error::Status(404, _)), "{path}: {err}");
+    }
 
-    // A server with no asset dirs 404s both surfaces.
+    // A server with no asset dirs 404s every surface the dashboard
+    // would have answered.
     let scratch2 = Scratch::new("api-assets-none");
     let bare = spawn_server(&bucket.base_url, &scratch2, &[]);
     for path in ["/", "/dashboard", "/dashboard/deep/link", "/llms.txt"] {
@@ -844,6 +999,8 @@ fn asset_mime_types_and_dirless_servers() {
             "{path} on a dir-less server"
         );
     }
+    assert!(server.healthy());
+    assert!(bare.healthy());
 }
 
 /// Commit-path corners on real layouts: first-commit-with-null-parent,

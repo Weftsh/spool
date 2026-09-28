@@ -20,12 +20,12 @@ fn spawn(store_url: &str, scratch: &Scratch, hint: &str) -> Server {
 }
 
 /// A repo with a nested tree, a binary file and two branches.
-fn seed(server: &Server, token: &str, repo: &str, public: bool) {
+fn seed(server: &Server, token: &str, repo: &str) {
     let (st, out) = server.req(
         "POST",
         "/v1/orgs/acme/repos",
         token,
-        Some(serde_json::json!({ "name": repo, "public": public })),
+        Some(serde_json::json!({ "name": repo })),
     );
     assert_eq!(st, 201, "{out}");
     let base = format!("/v1/orgs/acme/repos/{repo}");
@@ -98,7 +98,7 @@ fn history_stops_on_its_budget_and_says_so() {
         .env("STRATUM_READ_CACHE_MB", "0")
         .start();
     let token = server.bootstrap_org("acme");
-    seed(&server, &token, "widget", true);
+    seed(&server, &token, "widget");
     let base = "/v1/orgs/acme/repos/widget";
     let (st, out) = server.req(
         "POST",
@@ -194,7 +194,7 @@ fn a_tree_can_carry_the_last_commit_that_touched_each_entry() {
     let scratch = Scratch::new("browse-history");
     let server = spawn(&bucket.base_url, &scratch, "browse-history");
     let token = server.bootstrap_org("acme");
-    seed(&server, &token, "widget", true);
+    seed(&server, &token, "widget");
     let base = "/v1/orgs/acme/repos/widget";
 
     // A second commit touching only the nested file, so the two entries
@@ -338,7 +338,7 @@ fn a_recursive_listing_names_every_path_and_marks_directories() {
     let scratch = Scratch::new("browse-recursive");
     let server = spawn(&bucket.base_url, &scratch, "browse-recursive");
     let token = server.bootstrap_org("acme");
-    seed(&server, &token, "widget", true);
+    seed(&server, &token, "widget");
     let base = "/v1/orgs/acme/repos/widget";
 
     let (st, root) = server.req("GET", &format!("{base}/tree?recursive=1"), &token, None);
@@ -423,7 +423,7 @@ fn a_recursive_listing_stops_at_its_cap_and_says_so() {
             .env("STRATUM_TREE_RECURSIVE_CAP", cap.to_string())
             .start();
         let token = server.bootstrap_org("acme");
-        seed(&server, &token, "widget", true);
+        seed(&server, &token, "widget");
         let base = "/v1/orgs/acme/repos/widget";
 
         let (st, out) = server.req("GET", &format!("{base}/tree?recursive=1"), &token, None);
@@ -658,7 +658,7 @@ fn browsing_gives_a_tree_with_sizes_a_file_with_a_type_and_the_refs() {
     let scratch = Scratch::new("browse-happy");
     let server = spawn(&bucket.base_url, &scratch, "browse-happy");
     let token = server.bootstrap_org("acme");
-    seed(&server, &token, "app", false);
+    seed(&server, &token, "app");
     let base = "/v1/orgs/acme/repos/app";
 
     // The root listing: directories first-class, blobs measured when
@@ -767,7 +767,7 @@ fn an_unchanged_file_answers_304_and_the_read_is_not_done_twice() {
     let scratch = Scratch::new("browse-etag");
     let server = spawn(&bucket.base_url, &scratch, "browse-etag");
     let token = server.bootstrap_org("acme");
-    seed(&server, &token, "app", false);
+    seed(&server, &token, "app");
     let path = "/v1/orgs/acme/repos/app/files/README.md";
 
     let (st, body, headers) = server.req_full("GET", path, &token, None);
@@ -811,9 +811,8 @@ fn reading_refuses_traversal_strangers_and_nonsense_revisions() {
     let server = spawn(&bucket.base_url, &scratch, "browse-neg");
     let token = server.bootstrap_org("acme");
     let other = server.bootstrap_org("bravo");
-    seed(&server, &token, "private-app", false);
-    seed(&server, &token, "open-app", true);
-    let base = "/v1/orgs/acme/repos/private-app";
+    seed(&server, &token, "app");
+    let base = "/v1/orgs/acme/repos/app";
 
     // Path traversal, in the shapes a URL can carry it. Nothing may
     // escape the repository, and nothing may 500.
@@ -832,18 +831,38 @@ fn reading_refuses_traversal_strangers_and_nonsense_revisions() {
         }
     }
 
-    // A private repo: invisible without credentials and to another org,
-    // and answered the same way either time so neither can be used to
-    // discover the other.
-    for tok in ["", other.as_str()] {
-        for path in ["/tree", "/files/README.md", "/branches", "/tags", "/log"] {
-            let st = server.status_get(&format!("{base}{path}"), Some(tok));
-            assert!(st == 401 || st == 404, "{path} leaked to a stranger: {st}");
+    // Every repository is private to its organisation: without
+    // credentials it is a 401 and to another org a 404, and each answer
+    // is exactly what a repository that does not exist gets, so neither
+    // can be used to discover the other.
+    for path in ["/tree", "/files/README.md", "/branches", "/tags", "/log"] {
+        for (who, tok, expect) in [("anonymous", "", 401), ("another org", other.as_str(), 404)] {
+            let (st, out) = server.req("GET", &format!("{base}{path}"), tok, None);
+            assert_eq!(st, expect, "{path} as {who}: {out}");
+            let (st_absent, absent) = server.req(
+                "GET",
+                &format!("/v1/orgs/acme/repos/ghost{path}"),
+                tok,
+                None,
+            );
+            assert_eq!(
+                (st, &out),
+                (st_absent, &absent),
+                "{path} as {who} told a real repo from an absent one"
+            );
         }
     }
-    // …while the public one is readable by anybody.
-    let st = server.status_get("/v1/orgs/acme/repos/open-app/tree", None);
-    assert_eq!(st, 200, "a public repo was not public");
+    // …while the organisation's own credentials read it, down to the
+    // weakest: a read-only token minted in the org reads the tree.
+    let (st, out) = server.post(
+        "/v1/orgs/acme/tokens",
+        &token,
+        Some(serde_json::json!({"scopes": ["repo:read"], "label": "reader"})),
+    );
+    assert_eq!(st, 201, "{out}");
+    let reader = out["token"].as_str().unwrap().to_string();
+    let (st, out) = server.req("GET", &format!("{base}/tree"), &reader, None);
+    assert_eq!(st, 200, "a reader of the org was refused: {out}");
 
     // Revisions that are not revisions. A 40-hex string that is not an
     // object used to pass `resolve_rev` and fail later somewhere less
@@ -895,12 +914,9 @@ fn reading_refuses_traversal_strangers_and_nonsense_revisions() {
     );
     // And it is behind the same door as the plain listing: a stranger
     // cannot enumerate a private repository's paths.
-    for tok in ["", other.as_str()] {
+    for (tok, expect) in [("", 401), (other.as_str(), 404)] {
         let st = server.status_get(&format!("{base}/tree?recursive=1"), Some(tok));
-        assert!(
-            st == 401 || st == 404,
-            "recursive tree leaked to a stranger: {st}"
-        );
+        assert_eq!(st, expect, "recursive tree leaked to a stranger: {st}");
     }
 
     // The injection corpus through the path segment a user types.
@@ -953,7 +969,7 @@ fn the_commit_count_is_every_reachable_commit_taken_after_a_write() {
         .env("STRATUM_COMPACT_POLL_SECS", "0")
         .start();
     let token = server.bootstrap_org("acme");
-    seed(&server, &token, "app", false);
+    seed(&server, &token, "app");
     let base = "/v1/orgs/acme/repos/app";
 
     // Before any fold: no number, and the flag has one honest value.
@@ -1062,7 +1078,7 @@ fn the_commit_count_is_every_reachable_commit_taken_after_a_write() {
         "POST",
         "/v1/orgs/acme/repos",
         &token,
-        Some(serde_json::json!({ "name": "blank", "public": false })),
+        Some(serde_json::json!({ "name": "blank" })),
     );
     assert_eq!(st, 201, "{out}");
     let (st, out) = server.req("POST", "/v1/orgs/acme/repos/blank/compact", &token, None);
@@ -1086,7 +1102,7 @@ fn a_commit_count_past_the_cap_is_stored_as_a_floor() {
         .env("STRATUM_COMMIT_COUNT_CAP", "2")
         .start();
     let token = server.bootstrap_org("acme");
-    seed(&server, &token, "app", false);
+    seed(&server, &token, "app");
     let base = "/v1/orgs/acme/repos/app";
     for i in 0..3 {
         let (st, out) = server.req(

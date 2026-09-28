@@ -72,7 +72,7 @@ fn public_forge_urls_render_the_spa_and_typos_still_404() {
         "POST",
         "/v1/orgs/acme/repos",
         &admin,
-        Some(serde_json::json!({ "name": "widget", "public": true })),
+        Some(serde_json::json!({ "name": "widget" })),
     );
     server.req(
         "POST",
@@ -268,7 +268,7 @@ fn a_stranger_finds_only_the_public_repositories_of_a_namespace() {
             "POST",
             "/v1/orgs/acme/repos",
             &admin,
-            Some(serde_json::json!({ "name": name, "public": public })),
+            Some(serde_json::json!({ "name": name })),
         );
     }
 

@@ -1,20 +1,25 @@
 #!/usr/bin/env bash
 # Run one `stratum-server admin …` command as a one-off ECS task on the
-# live cluster — same image, same secrets, same network as the service —
-# and print its JSON line. `deploy/smoke-bootstrap-ecs.sh` is this with
-# `bootstrap` in front.
+# AWS reference deployment (deploy/terraform) — same image, same secrets,
+# same network as the service — and print its JSON line.
+# `deploy/smoke-bootstrap-ecs.sh` is this with `bootstrap` in front.
 #
-# Reads cluster/subnets/SG from the SSM parameters terraform wrote.
-# Requires: aws cli with the stratum-cd role's permissions.
+# Reads cluster/subnets/SG/log group from the SSM parameters terraform
+# wrote under /<project>/<env>/. STRATUM_PROJECT and STRATUM_ENV pick
+# them (defaults: spool, prod — the terraform defaults).
+# Requires: the aws CLI, with the bootstrap's <project>-cd role or any
+# credential allowed ecs:RunTask/DescribeTasks, iam:PassRole on the
+# task's roles, ssm:GetParameter and logs:GetLogEvents.
 #
 # Usage: admin-ecs.sh <subcommand> [flags…]
-#   admin-ecs.sh bootstrap --org yourco --plan paid
+#   admin-ecs.sh bootstrap --org acme
+#   admin-ecs.sh user-create --org acme --email you@example.com --password '…'
 #   admin-ecs.sh verify-link --email person@example.com
 set -euo pipefail
 
 [ $# -ge 1 ] || { >&2 echo "usage: admin-ecs.sh <admin subcommand> [flags…]"; exit 2; }
 
-PROJECT="${STRATUM_PROJECT:-stratum}"
+PROJECT="${STRATUM_PROJECT:-spool}"
 ENV_NAME="${STRATUM_ENV:-prod}"
 
 param() { aws ssm get-parameter --name "/$PROJECT/$ENV_NAME/$1" --query Parameter.Value --output text; }
@@ -38,16 +43,15 @@ PY
 
 # RunTask answers 200 with an empty `tasks` and the refusal under
 # `failures` — capacity, a task definition the cluster cannot place, a
-# subnet with no route. Reading only `tasks[0].taskArn` turned every one
-# of those into the word "None", and the waiter then failed on the
-# length of the string "None" — which is what the deploy's smoke
-# reported on 2026-09-07 while the real reason never reached the log.
-# The reason, from CloudTrail: "You've reached the limit on the number
-# of vCPUs you can run concurrently". The smoke runs the moment the
-# rollover finishes, while the old tasks are still draining beside the
-# new ones, and the account's Fargate vCPU quota had no room for one
-# more. That clears by itself within minutes, so a capacity refusal is
-# retried for a while; any other refusal is printed and fatal.
+# subnet with no route. Reading only `tasks[0].taskArn` turns every one
+# of those into the word "None", and the waiter then fails on the
+# length of the string "None" while the real reason never reaches the
+# log. The common one is "You've reached the limit on the number of
+# vCPUs you can run concurrently": run straight after a deploy, while the
+# old tasks are still draining beside the new ones, a new account's
+# Fargate vCPU quota has no room for one more. That clears by itself
+# within minutes, so a capacity refusal is retried for a while; any other
+# refusal is printed and fatal.
 run_task() {
   aws ecs run-task \
     --cluster "$CLUSTER" \

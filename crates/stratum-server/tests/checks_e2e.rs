@@ -113,13 +113,27 @@ fn signup<'a>(server: &'a Server, mail: &Mailbox, handle: &str, email: &str) -> 
     b
 }
 
-fn make_repo(b: &mut Browser, org: &str, name: &str, public: bool) {
+fn make_repo(b: &mut Browser, org: &str, name: &str) {
     let (st, body) = b.req(
         "POST",
         &format!("/v1/orgs/{org}/repos"),
-        Some(serde_json::json!({ "name": name, "public": public })),
+        Some(serde_json::json!({ "name": name })),
     );
     assert_eq!(st, 201, "create {org}/{name}: {body}");
+}
+
+/// A personal `repo:read` token minted from `b`'s session in `org` —
+/// the credential a reader of the repository scripts with. Every
+/// repository is private to its organisation, so a read test needs a
+/// reader, and one holding no more than read is the honest one.
+fn reader_token(b: &mut Browser, org: &str) -> String {
+    let (st, body) = b.req(
+        "POST",
+        &format!("/v1/orgs/{org}/tokens"),
+        Some(serde_json::json!({ "scopes": ["repo:read"], "label": "reader" })),
+    );
+    assert_eq!(st, 201, "mint a reader token in {org}: {body}");
+    body["token"].as_str().expect("a token").to_string()
 }
 
 /// A second session on the server's own control database — the seam
@@ -214,11 +228,19 @@ fn ids(body: &serde_json::Value) -> Vec<String> {
         .collect()
 }
 
-/// A stranger reads a public repository's history, newest first, with
-/// the rail alongside it — and a repository nobody has reported a run
-/// for is an empty page rather than a 404.
+/// A member of the organisation — a viewer, the weakest role there is —
+/// reads a repository's history newest first, with the rail alongside
+/// it; a repository nobody has reported a run for is an empty page
+/// rather than a 404. Somebody outside the organisation cannot learn
+/// that the repository or any of its runs exist: signed in, they get
+/// exactly what a missing repository gets, and anonymous gets the same
+/// 401 for both.
+///
+/// This used to be "a stranger reads a public repository's runs". There
+/// are no public repositories now, so the reader is a viewer who is not
+/// the owner, and the stranger gained the private-only negative.
 #[test]
-fn a_stranger_reads_a_public_repositorys_runs_newest_first() {
+fn a_member_reads_the_runs_newest_first_and_a_stranger_learns_nothing() {
     let minio = Minio::shared();
     let bucket = minio.bucket("checks-e2e-read");
     let scratch = Scratch::new("checks-read");
@@ -226,16 +248,27 @@ fn a_stranger_reads_a_public_repositorys_runs_newest_first() {
     let server = spawn(&bucket.base_url, &scratch, "checks_read", &mail);
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    make_repo(&mut ada, "ada", "widget", true);
-    make_repo(&mut ada, "ada", "quiet", true);
+    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let mut cam = signup(&server, &mail, "cam", "cam@example.com");
+    // A personal namespace has no members, so a repository somebody
+    // else can read lives in an organisation.
+    let (st, body) = ada.req(
+        "POST",
+        "/v1/orgs",
+        Some(serde_json::json!({ "name": "acme" })),
+    );
+    assert_eq!(st, 201, "{body}");
+    make_repo(&mut ada, "acme", "widget");
+    make_repo(&mut ada, "acme", "quiet");
+    ada.invite_and_accept("acme", "bob@example.com", "viewer");
 
     let db = ctl(&server);
-    let repo = repo_id(&db, "ada", "widget");
+    let repo = repo_id(&db, "acme", "widget");
 
     // A repository that exists and has never been reported on. Empty is
     // a fact about it; a 404 would be the false claim that it is not
     // there, and a client would draw that as a broken page.
-    let (st, body) = server.req("GET", "/v1/orgs/ada/repos/quiet/checks/runs", "", None);
+    let (st, body) = bob.req("GET", "/v1/orgs/acme/repos/quiet/checks/runs", None);
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["runs"], serde_json::json!([]), "{body}");
     assert_eq!(body["workflows"], serde_json::json!([]), "{body}");
@@ -266,7 +299,7 @@ fn a_stranger_reads_a_public_repositorys_runs_newest_first() {
         },
     );
 
-    let (st, body) = server.req("GET", "/v1/orgs/ada/repos/widget/checks/runs", "", None);
+    let (st, body) = bob.req("GET", "/v1/orgs/acme/repos/widget/checks/runs", None);
     assert_eq!(st, 200, "{body}");
     assert_eq!(
         ids(&body),
@@ -295,16 +328,65 @@ fn a_stranger_reads_a_public_repositorys_runs_newest_first() {
     );
 
     // And one of them by id.
-    let (st, body) = server.req(
-        "GET",
-        &format!("/v1/orgs/ada/repos/widget/checks/runs/{first}"),
-        "",
-        None,
-    );
+    let one = format!("/v1/orgs/acme/repos/widget/checks/runs/{first}");
+    let (st, body) = bob.req("GET", &one, None);
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["id"], first, "{body}");
     assert_eq!(body["name"], "ci", "{body}");
     assert_eq!(body["state"], "passing", "{body}");
+
+    // Cam is signed in and belongs to nothing here; his session and a
+    // token minted in his own namespace are each answered exactly as a
+    // repository that does not exist, on the list and on the run.
+    // Anonymous is one 401 for all of it. Nothing about a run reaches
+    // the wire under any name.
+    let cam_token = reader_token(&mut cam, "cam");
+    for (real, absent) in [
+        (
+            "/v1/orgs/acme/repos/widget/checks/runs".to_string(),
+            "/v1/orgs/acme/repos/no-such-repo/checks/runs".to_string(),
+        ),
+        (
+            one.clone(),
+            format!("/v1/orgs/acme/repos/no-such-repo/checks/runs/{first}"),
+        ),
+        (
+            "/v1/orgs/acme/repos/quiet/checks/runs".to_string(),
+            "/v1/orgs/acme/repos/no-such-repo/checks/runs".to_string(),
+        ),
+    ] {
+        let answers = [
+            (
+                "anonymous",
+                server.req("GET", &real, "", None),
+                server.req("GET", &absent, "", None),
+                401,
+            ),
+            (
+                "cam's token",
+                server.req("GET", &real, &cam_token, None),
+                server.req("GET", &absent, &cam_token, None),
+                404,
+            ),
+            (
+                "cam's session",
+                cam.req("GET", &real, None),
+                cam.req("GET", &absent, None),
+                404,
+            ),
+        ];
+        for (who, got, missing, expect) in answers {
+            assert_eq!(got.0, expect, "{who} reading {real}: {}", got.1);
+            assert_eq!(
+                got, missing,
+                "{who} can tell {real} from a missing repository"
+            );
+            let text = got.1.to_string();
+            for leak in ["deploy", "\"ci\"", first.as_str(), second.as_str()] {
+                assert!(!text.contains(leak), "{who} was told {leak:?}: {text}");
+            }
+        }
+    }
 
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
@@ -320,7 +402,7 @@ fn a_private_repositorys_runs_answer_a_stranger_as_a_missing_one_does() {
     let server = spawn(&bucket.base_url, &scratch, "checks_mask", &mail);
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    make_repo(&mut ada, "ada", "ledger", false);
+    make_repo(&mut ada, "ada", "ledger");
 
     let db = ctl(&server);
     let repo = repo_id(&db, "ada", "ledger");
@@ -341,53 +423,52 @@ fn a_private_repositorys_runs_answer_a_stranger_as_a_missing_one_does() {
     // answers are the same one. Pinning the comparison rather than the
     // number keeps a deliberate change to the masking answer green while
     // an accidental divergence goes red.
-    let private = server.req("GET", "/v1/orgs/ada/repos/ledger/checks/runs", "", None);
-    let absent = server.req(
-        "GET",
-        "/v1/orgs/ada/repos/no-such-repo/checks/runs",
-        "",
-        None,
-    );
-    assert_eq!(
-        private, absent,
-        "a stranger can tell a private repository from a missing one"
-    );
-    // The other half: two matching 200s would satisfy the comparison
-    // above and leak the entire history.
-    assert!(
-        private.0 >= 400,
-        "a private repository answered a stranger {}: {}",
-        private.0,
-        private.1
-    );
-    // Nothing about the run reached the wire under any name. A leak is
-    // the field nobody thought to parse, so this asserts on the raw text.
-    let text = private.1.to_string();
-    for leak in ["secret-build", "release", run.as_str()] {
-        assert!(
-            !text.contains(leak),
-            "a stranger was told {leak:?}: {}",
-            private.1
-        );
+    // Two strangers: anonymous, and Bob — signed in, with a token of his
+    // own, and no role in Ada's namespace. Anonymous is refused before
+    // anything is looked up, so it is Bob who actually tests the mask.
+    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let bob_token = reader_token(&mut bob, "bob");
+    for (path, missing) in [
+        (
+            "/v1/orgs/ada/repos/ledger/checks/runs".to_string(),
+            "/v1/orgs/ada/repos/no-such-repo/checks/runs".to_string(),
+        ),
+        (
+            format!("/v1/orgs/ada/repos/ledger/checks/runs/{run}"),
+            format!("/v1/orgs/ada/repos/no-such-repo/checks/runs/{run}"),
+        ),
+    ] {
+        for (who, token, expect) in [("anonymous", "", 401), ("bob", bob_token.as_str(), 404)] {
+            let private = server.req("GET", &path, token, None);
+            let absent = server.req("GET", &missing, token, None);
+            assert_eq!(
+                private, absent,
+                "{who} can tell a private repository from a missing one at {path}"
+            );
+            // The other half: two matching 200s would satisfy the
+            // comparison above and leak the entire history.
+            assert_eq!(
+                private.0, expect,
+                "a private repository answered {who} {}: {}",
+                private.0, private.1
+            );
+            // Nothing about the run reached the wire under any name. A
+            // leak is the field nobody thought to parse, so this asserts
+            // on the raw text.
+            let text = private.1.to_string();
+            for leak in ["secret-build", "release", run.as_str()] {
+                assert!(
+                    !text.contains(leak),
+                    "{who} was told {leak:?}: {}",
+                    private.1
+                );
+            }
+        }
+        let private = bob.req("GET", &path, None);
+        let absent = bob.req("GET", &missing, None);
+        assert_eq!(private.0, 404, "bob's session read {path}: {}", private.1);
+        assert_eq!(private, absent, "bob's session can tell {path} apart");
     }
-
-    // The same, for the single-run path.
-    let private_one = server.req(
-        "GET",
-        &format!("/v1/orgs/ada/repos/ledger/checks/runs/{run}"),
-        "",
-        None,
-    );
-    let absent_one = server.req(
-        "GET",
-        &format!("/v1/orgs/ada/repos/no-such-repo/checks/runs/{run}"),
-        "",
-        None,
-    );
-    assert_eq!(
-        private_one, absent_one,
-        "a stranger can tell a private run from a missing repository"
-    );
 
     // The member who owns it reads it perfectly well — otherwise the
     // masking above would be indistinguishable from the endpoint simply
@@ -422,7 +503,8 @@ fn every_filter_narrows_and_the_cursor_pages_without_skipping_or_repeating() {
     let server = spawn(&bucket.base_url, &scratch, "checks_filter", &mail);
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    make_repo(&mut ada, "ada", "widget", true);
+    make_repo(&mut ada, "ada", "widget");
+    let reader = reader_token(&mut ada, "ada");
 
     let db = ctl(&server);
     let repo = repo_id(&db, "ada", "widget");
@@ -478,7 +560,7 @@ fn every_filter_narrows_and_the_cursor_pages_without_skipping_or_repeating() {
         let (st, body) = server.req(
             "GET",
             &format!("/v1/orgs/ada/repos/widget/checks/runs{q}"),
-            "",
+            &reader,
             None,
         );
         assert_eq!(st, 200, "GET {q}: {body}");
@@ -566,7 +648,8 @@ fn a_filter_value_nobody_meant_is_refused_by_name() {
     let server = spawn(&bucket.base_url, &scratch, "checks_bad", &mail);
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    make_repo(&mut ada, "ada", "widget", true);
+    make_repo(&mut ada, "ada", "widget");
+    let reader = reader_token(&mut ada, "ada");
 
     // `success` is the specific mistake worth pinning: it is what a
     // provider's own vocabulary calls `passing`, so it is the wrong
@@ -581,7 +664,7 @@ fn a_filter_value_nobody_meant_is_refused_by_name() {
         let (st, body) = server.req(
             "GET",
             &format!("/v1/orgs/ada/repos/widget/checks/runs{q}"),
-            "",
+            &reader,
             None,
         );
         assert_eq!(st, 400, "GET {q}: {body}");
@@ -612,7 +695,7 @@ fn a_filter_value_nobody_meant_is_refused_by_name() {
         let (st, body) = server.req(
             "GET",
             &format!("/v1/orgs/ada/repos/widget/checks/runs?state={good}"),
-            "",
+            &reader,
             None,
         );
         assert_eq!(st, 200, "state={good}: {body}");
@@ -625,7 +708,7 @@ fn a_filter_value_nobody_meant_is_refused_by_name() {
     let (st, body) = server.req(
         "GET",
         "/v1/orgs/ada/repos/widget/checks/runs?branch=&state=&workflow=&limit=&before=",
-        "",
+        &reader,
         None,
     );
     assert_eq!(st, 200, "a cleared filter was read as a value: {body}");
@@ -644,8 +727,9 @@ fn a_run_in_another_repository_is_not_readable_through_this_ones_path() {
     let server = spawn(&bucket.base_url, &scratch, "checks_cross", &mail);
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    make_repo(&mut ada, "ada", "widget", true);
-    make_repo(&mut ada, "ada", "other", true);
+    make_repo(&mut ada, "ada", "widget");
+    make_repo(&mut ada, "ada", "other");
+    let reader = reader_token(&mut ada, "ada");
 
     let db = ctl(&server);
     let other = repo_id(&db, "ada", "other");
@@ -666,26 +750,26 @@ fn a_run_in_another_repository_is_not_readable_through_this_ones_path() {
     let (st, body) = server.req(
         "GET",
         &format!("/v1/orgs/ada/repos/other/checks/runs/{elsewhere}"),
-        "",
+        &reader,
         None,
     );
     assert_eq!(st, 200, "{body}");
 
     // ...and through the neighbouring repository it is answered exactly
-    // as an id that was never issued. Both repositories are public here
-    // deliberately: with nothing else masking the request, this asserts
-    // the *scoping of the row lookup* rather than the visibility check
-    // that would have hidden it anyway.
+    // as an id that was never issued. The reader may read both
+    // repositories deliberately: with nothing else masking the request,
+    // this asserts the *scoping of the row lookup* rather than the
+    // visibility check that would have hidden it anyway.
     let cross = server.req(
         "GET",
         &format!("/v1/orgs/ada/repos/widget/checks/runs/{elsewhere}"),
-        "",
+        &reader,
         None,
     );
     let never = server.req(
         "GET",
         "/v1/orgs/ada/repos/widget/checks/runs/01ZZZZZZZZZZZZZZZZZZZZZZZZ",
-        "",
+        &reader,
         None,
     );
     assert_eq!(
@@ -696,7 +780,12 @@ fn a_run_in_another_repository_is_not_readable_through_this_ones_path() {
 
     // ...and it is not in the neighbour's list either, which is the
     // other place a repo_id scope can be forgotten.
-    let (st, body) = server.req("GET", "/v1/orgs/ada/repos/widget/checks/runs", "", None);
+    let (st, body) = server.req(
+        "GET",
+        "/v1/orgs/ada/repos/widget/checks/runs",
+        &reader,
+        None,
+    );
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["runs"], serde_json::json!([]), "{body}");
     assert_eq!(body["workflows"], serde_json::json!([]), "{body}");
@@ -723,8 +812,9 @@ fn the_commit_view_shows_the_newest_verdict_per_workflow_not_every_run() {
     let server = spawn(&bucket.base_url, &scratch, "checks_commit", &mail);
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    make_repo(&mut ada, "ada", "widget", true);
-    make_repo(&mut ada, "ada", "other", true);
+    make_repo(&mut ada, "ada", "widget");
+    make_repo(&mut ada, "ada", "other");
+    let reader = reader_token(&mut ada, "ada");
 
     let db = ctl(&server);
     let repo = repo_id(&db, "ada", "widget");
@@ -775,7 +865,7 @@ fn the_commit_view_shows_the_newest_verdict_per_workflow_not_every_run() {
     let (st, body) = server.req(
         "GET",
         &format!("/v1/orgs/ada/repos/widget/commits/{sha}/checks"),
-        "",
+        &reader,
         None,
     );
     assert_eq!(st, 200, "{body}");
@@ -814,7 +904,12 @@ fn the_commit_view_shows_the_newest_verdict_per_workflow_not_every_run() {
     // would be indistinguishable from the seeding having silently
     // folded two reports into one row, and this test would be proving
     // nothing about the handler at all.
-    let (st, all) = server.req("GET", "/v1/orgs/ada/repos/widget/checks/runs", "", None);
+    let (st, all) = server.req(
+        "GET",
+        "/v1/orgs/ada/repos/widget/checks/runs",
+        &reader,
+        None,
+    );
     assert_eq!(st, 200, "{all}");
     assert_eq!(
         ids(&all).len(),
@@ -831,7 +926,7 @@ fn the_commit_view_shows_the_newest_verdict_per_workflow_not_every_run() {
             "/v1/orgs/ada/repos/widget/commits/{}/checks",
             "d".repeat(40)
         ),
-        "",
+        &reader,
         None,
     );
     assert_eq!(st, 200, "{body}");
@@ -845,7 +940,7 @@ fn the_commit_view_shows_the_newest_verdict_per_workflow_not_every_run() {
         let (st, body) = server.req(
             "GET",
             &format!("/v1/orgs/ada/repos/widget/commits/{bad}/checks"),
-            "",
+            &reader,
             None,
         );
         assert!(
@@ -860,14 +955,14 @@ fn the_commit_view_shows_the_newest_verdict_per_workflow_not_every_run() {
         );
     }
 
-    // The same sha in a neighbouring repository shows nothing. Both
-    // repositories are public on purpose, so this pins the repo_id
-    // scoping of the lookup rather than a visibility check that would
-    // have hidden the rows anyway.
+    // The same sha in a neighbouring repository shows nothing. The
+    // reader may read both repositories on purpose, so this pins the
+    // repo_id scoping of the lookup rather than a visibility check that
+    // would have hidden the rows anyway.
     let (st, body) = server.req(
         "GET",
         &format!("/v1/orgs/ada/repos/other/commits/{sha}/checks"),
-        "",
+        &reader,
         None,
     );
     assert_eq!(st, 200, "{body}");
@@ -891,7 +986,7 @@ fn a_private_repositorys_commit_checks_answer_a_stranger_as_a_missing_one_does()
     let server = spawn(&bucket.base_url, &scratch, "checks_commit_mask", &mail);
 
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
-    make_repo(&mut ada, "ada", "ledger", false);
+    make_repo(&mut ada, "ada", "ledger");
 
     let db = ctl(&server);
     let repo = repo_id(&db, "ada", "ledger");
@@ -910,38 +1005,42 @@ fn a_private_repositorys_commit_checks_answer_a_stranger_as_a_missing_one_does()
         },
     );
 
-    let private = server.req(
-        "GET",
-        &format!("/v1/orgs/ada/repos/ledger/commits/{sha}/checks"),
-        "",
-        None,
-    );
-    let absent = server.req(
-        "GET",
-        &format!("/v1/orgs/ada/repos/no-such-repo/commits/{sha}/checks"),
-        "",
-        None,
-    );
+    // Anonymous, and Bob — signed in, with a token of his own, and no
+    // role in Ada's namespace.
+    let mut bob = signup(&server, &mail, "bob", "bob@example.com");
+    let bob_token = reader_token(&mut bob, "bob");
+    let path = format!("/v1/orgs/ada/repos/ledger/commits/{sha}/checks");
+    let missing = format!("/v1/orgs/ada/repos/no-such-repo/commits/{sha}/checks");
+    for (who, token, expect) in [("anonymous", "", 401), ("bob", bob_token.as_str(), 404)] {
+        let private = server.req("GET", &path, token, None);
+        let absent = server.req("GET", &missing, token, None);
+        assert_eq!(
+            private, absent,
+            "{who} can tell a private repository from a missing one"
+        );
+        assert_eq!(
+            private.0, expect,
+            "a private repository answered {who} {}: {}",
+            private.0, private.1
+        );
+        // A leak is the field nobody thought to parse, so this reads the
+        // raw text rather than named fields.
+        let text = private.1.to_string();
+        for leak in ["secret-build", "release", run.as_str()] {
+            assert!(
+                !text.contains(leak),
+                "{who} was told {leak:?}: {}",
+                private.1
+            );
+        }
+    }
+    let private = bob.req("GET", &path, None);
     assert_eq!(
-        private, absent,
-        "a stranger can tell a private repository from a missing one"
-    );
-    assert!(
-        private.0 >= 400,
-        "a private repository answered a stranger {}: {}",
-        private.0,
+        private.0, 404,
+        "bob's session read the checks: {}",
         private.1
     );
-    // A leak is the field nobody thought to parse, so this reads the raw
-    // text rather than named fields.
-    let text = private.1.to_string();
-    for leak in ["secret-build", "release", run.as_str()] {
-        assert!(
-            !text.contains(leak),
-            "a stranger was told {leak:?}: {}",
-            private.1
-        );
-    }
+    assert_eq!(private, bob.req("GET", &missing, None));
 
     // The owner reads it perfectly well. This assertion is what stops
     // the comparison above from being satisfiable by two 404s from a

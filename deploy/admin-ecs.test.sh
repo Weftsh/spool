@@ -3,7 +3,7 @@
 # RunTask gives, and what the script has to do with each.
 #
 #   - a capacity refusal, then a task: the script waits and retries,
-#     then follows the task to its log line (the 2026-09-07 smoke case)
+#     then follows the task to its log line
 #   - a refusal that is not capacity: printed, fatal, no retry
 #   - an empty answer with no failure: fatal, named
 #

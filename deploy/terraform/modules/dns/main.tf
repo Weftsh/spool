@@ -1,12 +1,13 @@
 # The name the product answers to: a Route 53 hosted zone for
-# `domain_name` and a certificate covering it and one level below.
+# `domain_name`, a certificate for it, and an SES identity to send mail as.
 #
 # This module exists only when a domain is configured, and it is the
 # one part of the stack that cannot finish on its own: the certificate
-# is DNS-validated, so nothing here is ISSUED until the registrar
-# delegates `domain_name` to the zone's name servers. The first apply is
-# therefore two steps — `-target` the zone, hand `name_servers` to the
-# registrar, then apply the rest — and `docs/deployment-aws.md` says so.
+# is DNS-validated, so nothing here is ISSUED until the parent zone
+# delegates `domain_name` to this zone's name servers. Unless the parent
+# zone is in this account (`parent_domain_name`), the first apply is
+# therefore two steps — `-target` the zone, delegate `name_servers` from
+# the parent, then apply the rest — and `docs/deployment-aws.md` says so.
 #
 # Records live in `modules/app`, next to the things they point at; this
 # module only knows the zone, the certificate and the mail identity, so
@@ -26,12 +27,12 @@ variable "project" { type = string }
 variable "env" { type = string }
 variable "aws_region" { type = string }
 variable "domain_name" {
-  description = "The zone's apex: `weft.sh` in production, or a delegated subdomain such as `test.weft.sh` for a rehearsal. The product is served at this name, `api.` and `www.` below it, and SSH at `ssh.` below it."
+  description = "The zone's apex, e.g. `git.example.com`. The product is served at this name, SSH at `ssh.` below it, and mail leaves from it."
   type        = string
 }
 
 variable "parent_domain_name" {
-  description = "The zone `domain_name` is delegated from, when that zone is ours too: `weft.sh` for a `test.weft.sh` rehearsal. The NS record goes into the parent's zone from here, so the rehearsal's first apply needs no registrar and its certificate validates in the same run. Empty when `domain_name` is the apex the registrar points at."
+  description = "The Route 53 zone `domain_name` is delegated from, when that zone is in this account too: `example.com` for `git.example.com`. The NS record goes into the parent's zone from here, so the first apply needs no manual DNS step and the certificate validates in the same run. Empty when the parent zone is managed elsewhere."
   type        = string
   default     = ""
 }
@@ -41,10 +42,9 @@ resource "aws_route53_zone" "this" {
   comment = "${var.project}-${var.env}"
 }
 
-# A rehearsal lives one label under production's name, and production's
-# zone is in this account — so the delegation the registrar does for the
-# apex, this does for the subdomain: the parent zone is looked up by
-# name (the record is ours, the zone is the other environment's state's)
+# When the parent zone is in this account, the delegation a person would
+# otherwise do by hand is done here: the parent zone is looked up by name
+# (the record is ours, the zone belongs to whoever manages the parent)
 # and given our name servers.
 data "aws_route53_zone" "parent" {
   count = var.parent_domain_name == "" ? 0 : 1
@@ -63,18 +63,17 @@ resource "aws_route53_record" "delegation" {
 # CloudFront reads certificates from us-east-1 and nowhere else, whatever
 # region the rest of the stack is in — hence the aliased provider.
 resource "aws_acm_certificate" "this" {
-  provider                  = aws.us_east_1
-  domain_name               = var.domain_name
-  subject_alternative_names = ["*.${var.domain_name}"]
-  validation_method         = "DNS"
+  provider          = aws.us_east_1
+  domain_name       = var.domain_name
+  validation_method = "DNS"
 
   lifecycle {
     create_before_destroy = true
   }
 }
 
-# The apex and the wildcard validate through the same CNAME; `for_each`
-# over the set collapses the duplicate instead of fighting over it.
+# One validation CNAME per name on the certificate; keyed by name so a
+# name added later gets its own record rather than a replacement.
 resource "aws_route53_record" "validation" {
   for_each = {
     for o in aws_acm_certificate.this.domain_validation_options :
@@ -93,12 +92,12 @@ resource "aws_route53_record" "validation" {
   allow_overwrite = true
 }
 
-# Blocks until ACM sees the records — which it cannot until the registrar
-# points at this zone. A fresh apply with no delegation waits here, which
+# Blocks until ACM sees the records — which it cannot until the parent
+# zone delegates to this one. A fresh apply with no delegation waits here, which
 # is the right place to wait: nothing downstream can use an unissued cert.
 resource "aws_acm_certificate_validation" "this" {
-  # Under a parent of ours, the delegation is what makes the validation
-  # record resolvable; without it this waits out its timeout.
+  # With the parent in this account, the delegation is what makes the
+  # validation record resolvable; without it this waits out its timeout.
   depends_on = [aws_route53_record.delegation]
 
   provider                = aws.us_east_1
@@ -122,6 +121,10 @@ resource "aws_acm_certificate_validation" "this" {
 # What terraform cannot do: a new account sends only to verified
 # addresses until SES production access is requested by a person, in the
 # console. docs/deployment-aws.md says so.
+#
+# The identity is created whether or not the stack sends through SES
+# (the root's `ses_mail`): verifying a domain costs nothing and grants
+# nothing by itself.
 resource "aws_sesv2_email_identity" "this" {
   email_identity = var.domain_name
 
@@ -161,9 +164,9 @@ resource "aws_route53_record" "mail_from_spf" {
   records = ["v=spf1 include:amazonses.com -all"]
 }
 
-# Quarantine, not reject: everything we send is DKIM-signed, so a
-# legitimate message never fails alignment — but a stray forwarder should
-# land in spam, not vanish, while the domain is new.
+# Quarantine, not reject: everything SES sends for this name is
+# DKIM-signed, so a legitimate message never fails alignment — but a stray
+# forwarder should land in spam, not vanish, while the domain is new.
 resource "aws_route53_record" "dmarc" {
   zone_id = aws_route53_zone.this.zone_id
   name    = "_dmarc.${var.domain_name}"
@@ -177,7 +180,7 @@ output "zone_id" {
 }
 
 output "name_servers" {
-  description = "What the registrar has to be told. Until it is, the certificate never issues and the apply waits."
+  description = "What the parent zone has to delegate to. Until it does, the certificate never issues and the apply waits."
   value       = aws_route53_zone.this.name_servers
 }
 

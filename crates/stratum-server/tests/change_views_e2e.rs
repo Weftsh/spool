@@ -587,7 +587,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     let (st, body) = ada.req(
         "POST",
         "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "app", "public": true })),
+        Some(serde_json::json!({ "name": "app" })),
     );
     assert_eq!(st, 201, "{body}");
     let (st, body) = ada.req(

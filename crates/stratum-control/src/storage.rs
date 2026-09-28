@@ -153,10 +153,7 @@ mod tests {
         // id is a different row. (`package` is the one other kind the
         // table's CHECK admits — the hosted edition's registry.)
         set_logical(&db, "package", "r1", &acme, 3, 21).unwrap();
-        assert_eq!(
-            owner_bytes(&db, "package", "r1").unwrap(),
-            Some((3, None))
-        );
+        assert_eq!(owner_bytes(&db, "package", "r1").unwrap(), Some((3, None)));
 
         remove(&db, OWNER_REPO, "r1").unwrap();
         assert_eq!(owner_bytes(&db, OWNER_REPO, "r1").unwrap(), None);
@@ -193,10 +190,7 @@ mod tests {
             owner_bytes(&db, OWNER_REPO, &live.id).unwrap(),
             Some((9, None))
         );
-        assert_eq!(
-            owner_bytes(&db, "package", "r1").unwrap(),
-            Some((3, None))
-        );
+        assert_eq!(owner_bytes(&db, "package", "r1").unwrap(), Some((3, None)));
         assert!(registry::delete_repo(&db, &acme, &live.id).unwrap());
         assert_eq!(prune_missing_repos(&db).unwrap(), 1);
         assert_eq!(owner_bytes(&db, OWNER_REPO, &live.id).unwrap(), None);

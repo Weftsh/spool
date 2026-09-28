@@ -602,8 +602,6 @@ impl GithubApp {
                         .unwrap_or_default()
                         .to_string(),
                     target_type: v["target_type"].as_str().unwrap_or_default().to_string(),
-                    administration_write: perm("administration"),
-                    actions_write: perm("actions"),
                     contents_write: perm("contents"),
                     events: v["events"]
                         .as_array()
@@ -762,11 +760,6 @@ pub struct InstallationDetail {
     pub account: String,
     /// `Organization` or `User`.
     pub target_type: String,
-    /// `administration: write` — what registering a just-in-time
-    /// runner on a repository needs.
-    pub administration_write: bool,
-    /// `actions: write` — what cancelling a run we refused needs.
-    pub actions_write: bool,
     /// `contents: write` — what forwarding a push to the origin needs.
     /// Installations made while the App asked only for `read` lack it
     /// until their owner approves the change.
@@ -2086,9 +2079,8 @@ mod app_tests {
     }
 
     /// An installation's permissions are read as facts, not discovered
-    /// by failing: an organisation and a person that hold both, one
-    /// that predates the feature and holds neither, and one that is
-    /// gone.
+    /// by failing: an organisation and a person that may push, two that
+    /// predate `Contents: write`, and one that is gone.
     #[test]
     fn an_installation_says_what_it_may_do_and_whose_it_is() {
         let (_gh, app) = app();
@@ -2097,23 +2089,20 @@ mod app_tests {
             (org.account.as_str(), org.target_type.as_str()),
             ("acme-inc", "Organization")
         );
-        assert!(org.administration_write && org.actions_write && org.contents_write);
-        assert!(org.events.contains(&"workflow_job".to_string()));
+        assert!(org.contents_write);
+        assert!(org.events.contains(&"push".to_string()));
         assert!(!org.suspended);
         let person = app.installation("4002").unwrap().unwrap();
         assert_eq!(
             (person.account.as_str(), person.target_type.as_str()),
             ("ada", "User")
         );
-        assert!(person.administration_write && person.actions_write);
-        let old = app.installation("4003").unwrap().unwrap();
-        assert!(!old.administration_write && !old.actions_write && !old.contents_write);
-        // Approved once, and not since: pushes are the permission it
-        // lacks, and it must not read as lacking the others too.
-        let prepush = app.installation("4007").unwrap().unwrap();
-        assert!(prepush.administration_write && prepush.actions_write);
-        assert!(!prepush.contents_write);
-        assert!(!old.events.contains(&"workflow_job".to_string()));
+        assert!(person.contents_write);
+        for old in ["4003", "4007"] {
+            let old = app.installation(old).unwrap().unwrap();
+            assert!(!old.contents_write);
+            assert!(old.events.contains(&"push".to_string()));
+        }
         assert!(app.installation("4999").unwrap().is_none());
         // The two refusals that are not "gone": a read the App is not
         // allowed, and a rate limit — each an error naming which.

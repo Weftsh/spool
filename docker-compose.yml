@@ -1,50 +1,159 @@
-# Local development stack: PostgreSQL (control plane) + MinIO (object
-# store). The server itself runs on the host (`cargo run -p stratum-server`)
-# against these, or add it here once you have a binary image.
+# spool on one machine: the server image built from this repository,
+# PostgreSQL for the control plane, and MinIO as the S3-compatible object
+# store every repository lives in.
 #
-#   docker compose up -d
-#   export STRATUM_DB_URL=postgres://stratum:stratum@127.0.0.1:5432/stratum
-#   export STRATUM_STORE_URL=http://127.0.0.1:9000/stratum
-#   export AWS_ACCESS_KEY_ID=stratum AWS_SECRET_ACCESS_KEY=stratum-dev-only AWS_REGION=us-east-1
-#   mc alias set local http://127.0.0.1:9000 stratum stratum-dev-only && mc mb local/stratum
+#   ./deploy/dev-host-key.sh        # once: the SSH host key (see below)
+#   docker compose up -d --build --wait
+#   docker compose exec spool stratum-server admin bootstrap --org acme
+#   docker compose exec spool stratum-server admin user-create \
+#     --org acme --email you@example.com --password '…'
+#   open http://127.0.0.1:8080/
 #
-# The test suite does NOT use this file — it spawns its own hermetic
-# PostgreSQL and MinIO per test process (see crates/stratum-testkit).
+# Only the server's two ports are published — HTTP on 8080, git over SSH
+# on 2222 — and only on loopback. Postgres and MinIO sit on an internal
+# network nothing else can reach. To serve other machines, put a TLS
+# terminator in front of 8080, publish 2222, and set SPOOL_PUBLIC_URL and
+# SPOOL_SSH_PUBLIC_URL to the addresses people will use (a `.env` file
+# beside this one is the easy place). docs/operations.md is the
+# configuration reference; every STRATUM_* variable it lists can be added
+# under `spool.environment` below.
+#
+# The SSH host key is the server's identity to every git client, so it
+# must survive restarts and upgrades: `deploy/dev-host-key.sh` writes one
+# to deploy/.dev-ssh-host-key (gitignored). To use a key of your own, set
+# SPOOL_SSH_HOST_KEY_FILE to its path; the container reads it as uid
+# 10001, so it must be readable by that uid.
+#
+# Change the database and object-store passwords (SPOOL_DB_PASSWORD,
+# SPOOL_S3_SECRET_KEY) before this holds anything you care about, and
+# back up the three volumes: docs/operations.md, "Backup and restore".
+#
+# For development against a server run from source (`cargo run -p
+# stratum-server`), start only the dependencies — `docker compose up -d
+# postgres minio minio-init` — and publish their ports with an override
+# file; the test suite needs neither (it starts its own).
+
+name: spool
 
 services:
+  spool:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ${SPOOL_IMAGE:-spool:local}
+    restart: unless-stopped
+    ports:
+      - "${SPOOL_HTTP_PUBLISH:-127.0.0.1:8080}:8080"
+      - "${SPOOL_SSH_PUBLISH:-127.0.0.1:2222}:2222"
+    environment:
+      STRATUM_DB_URL: postgres://spool:${SPOOL_DB_PASSWORD:-spool-change-me}@postgres:5432/spool
+      # Path-style bucket URL: the store signs requests with SigV4 against
+      # exactly this shape.
+      STRATUM_STORE_URL: http://minio:9000/spool
+      AWS_ACCESS_KEY_ID: spool
+      AWS_SECRET_ACCESS_KEY: ${SPOOL_S3_SECRET_KEY:-spool-change-me}
+      AWS_REGION: us-east-1
+      # The address people and git clients use. Clone URLs, links in
+      # mail and the GitHub App's callbacks are all built from it.
+      STRATUM_PUBLIC_URL: ${SPOOL_PUBLIC_URL:-http://127.0.0.1:8080}
+      STRATUM_SSH_BIND: 0.0.0.0:2222
+      STRATUM_SSH_PUBLIC_URL: ${SPOOL_SSH_PUBLIC_URL:-ssh://git@127.0.0.1:2222}
+      # Mirror seed clones, export staging. Losable; kept on a volume so a
+      # restart does not re-clone every mirror.
+      STRATUM_DATA_DIR: /var/lib/stratum
+      # HMAC for the generic inbound webhook receiver.
+      STRATUM_WEBHOOK_SECRET: ${SPOOL_WEBHOOK_SECRET:-spool-change-me}
+      # Mail. `null` drops it (the dashboard says so where it matters);
+      # see docs/operations.md, "Mail", for smtp and ses.
+      STRATUM_MAIL_TRANSPORT: ${SPOOL_MAIL_TRANSPORT:-null}
+    # The image's entrypoint is tini + the binary; this reads the host key
+    # file into the variable the server expects ($$ keeps the
+    # substitution away from compose).
+    entrypoint:
+      - /usr/bin/tini
+      - --
+      - sh
+      - -c
+      - STRATUM_SSH_HOST_KEY="$$(cat /run/secrets/ssh_host_key)" exec stratum-server "$$@"
+      - stratum-server
+    secrets:
+      - ssh_host_key
+    volumes:
+      - spool-data:/var/lib/stratum
+    networks:
+      - default
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+      minio-init:
+        condition: service_completed_successfully
+
   postgres:
     image: postgres:16
+    restart: unless-stopped
     environment:
-      POSTGRES_USER: stratum
-      POSTGRES_PASSWORD: stratum
-      POSTGRES_DB: stratum
-    ports:
-      - "127.0.0.1:5432:5432"
+      POSTGRES_USER: spool
+      POSTGRES_PASSWORD: ${SPOOL_DB_PASSWORD:-spool-change-me}
+      POSTGRES_DB: spool
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U stratum"]
+      test: ["CMD-SHELL", "pg_isready -U spool"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # MinIO no longer publishes images on Docker Hub or quay.io; this is a
+  # byte-for-byte copy of the release the test suite runs against
+  # (.minio-version). Any S3-compatible store with conditional writes
+  # (If-Match / If-None-Match on PUT) will do in its place — point
+  # STRATUM_STORE_URL and the AWS_* credentials at it and drop these two
+  # services.
   minio:
-    image: quay.io/minio/minio
+    image: ${SPOOL_MINIO_IMAGE:-ghcr.io/weftsh/minio:RELEASE.2025-09-07T16-13-09Z}
+    restart: unless-stopped
     command: server /data --address :9000
     environment:
-      MINIO_ROOT_USER: stratum
-      MINIO_ROOT_PASSWORD: stratum-dev-only
+      MINIO_ROOT_USER: spool
+      MINIO_ROOT_PASSWORD: ${SPOOL_S3_SECRET_KEY:-spool-change-me}
       MINIO_BROWSER: "off"
-    ports:
-      - "127.0.0.1:9000:9000"
     volumes:
       - miniodata:/data
+    networks:
+      - backend
     healthcheck:
       test: ["CMD", "curl", "-f", "http://127.0.0.1:9000/minio/health/ready"]
       interval: 5s
       timeout: 3s
       retries: 10
 
+  # Creates the bucket, once; a no-op on every later start.
+  minio-init:
+    image: ${SPOOL_MINIO_IMAGE:-ghcr.io/weftsh/minio:RELEASE.2025-09-07T16-13-09Z}
+    depends_on:
+      minio:
+        condition: service_healthy
+    environment:
+      MC_HOST_local: http://spool:${SPOOL_S3_SECRET_KEY:-spool-change-me}@minio:9000
+    entrypoint: ["mc", "mb", "-p", "local/spool"]
+    networks:
+      - backend
+    restart: "no"
+
+networks:
+  # Postgres and MinIO: reachable from the server and nothing else, and
+  # with no route out.
+  backend:
+    internal: true
+
+secrets:
+  ssh_host_key:
+    file: ${SPOOL_SSH_HOST_KEY_FILE:-./deploy/.dev-ssh-host-key}
+
 volumes:
+  spool-data:
   pgdata:
   miniodata:

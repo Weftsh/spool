@@ -4,11 +4,11 @@
 # at `init` (`-backend-config=key=<project>/<env>.tfstate`) and the
 # environment at `plan` (`-var-file=envs/<env>.tfvars`), and nothing ties
 # the two flags together — a directory whose `.terraform/` was initialised
-# for prod happily plans `envs/test.tfvars` against prod's state. That plan
-# is not a rehearsal: it renames every `stratum-prod-*` resource to
-# `stratum-test-*`, which for most of them is destroy-and-create, and the
-# protections that key on `var.env` — deletion protection, `force_delete`,
-# the secrets' recovery window — all read "test" by then and stand aside.
+# for prod happily plans `envs/staging.tfvars` against prod's state. That
+# plan is not a rehearsal: it renames every `<project>-prod-*` resource to
+# `<project>-staging-*`, which for most of them is destroy-and-create —
+# and if the staging tfvars turn `deletion_protection` off, the
+# protections that would have stopped it stand aside too.
 #
 # So the first apply writes the environment into the state, and every
 # later plan refuses a `var.env` that disagrees, before a single resource

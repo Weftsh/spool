@@ -1,8 +1,11 @@
 # syntax=docker/dockerfile:1
-# The deployable Stratum image: one binary (server + admin CLI) plus the
-# built marketing site and dashboard. Multi-stage; the runtime stage is
-# debian-slim + git (the engine shells out to it) + tini (reaps orphaned
-# git children, forwards SIGTERM to the server's graceful shutdown).
+# The spool server image: one binary (`stratum-server`: git over HTTP and
+# SSH, the REST API, every background worker, and the `admin` CLI) plus
+# the built dashboard. Multi-stage; the runtime stage is debian-slim + git
+# (the engine shells out to it) + tini (reaps orphaned git children,
+# forwards SIGTERM to the server's graceful shutdown).
+#
+#   docker build -t spool:local .
 #
 # Corporate/CI proxies: pass a CA via `--secret id=extra_ca,src=…` and the
 # predefined HTTP_PROXY/HTTPS_PROXY build args; absent, the steps no-op.
@@ -22,19 +25,9 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry \
     && cp target/release/stratum-server /stratum-server \
     && strip /stratum-server
 
-FROM node:22-bookworm-slim AS site
-WORKDIR /web/site
-# node-slim has no update-ca-certificates; node reads extra roots itself.
-RUN --mount=type=secret,id=extra_ca,required=false \
-    mkdir -p /usr/local/share \
-    && ([ -s /run/secrets/extra_ca ] && cp /run/secrets/extra_ca /usr/local/share/extra-ca.crt || touch /usr/local/share/extra-ca.crt)
-ENV NODE_EXTRA_CA_CERTS=/usr/local/share/extra-ca.crt
-COPY web/shared /web/shared
-COPY web/site /web/site
-RUN npm ci && npm run build
-
 FROM node:22-bookworm-slim AS dashboard
 WORKDIR /web/dashboard
+# node-slim has no update-ca-certificates; node reads extra roots itself.
 RUN --mount=type=secret,id=extra_ca,required=false \
     mkdir -p /usr/local/share \
     && ([ -s /run/secrets/extra_ca ] && cp /run/secrets/extra_ca /usr/local/share/extra-ca.crt || touch /usr/local/share/extra-ca.crt)
@@ -45,11 +38,10 @@ RUN npm ci && npx vite build
 
 FROM debian:bookworm-slim AS runtime
 # `ca-certificates` is a Recommends of git and curl, and
-# `--no-install-recommends` leaves it out: the first image shipped
-# without a CA store, so every `git` over HTTPS from the server —
-# the origin probe, mirror syncs, imports — failed certificate
-# verification while the Rust client, which bundles its own roots,
-# reached Stripe fine. The smoke's origin probe now pins it.
+# `--no-install-recommends` leaves it out: an image without it has no CA
+# store, so every `git` over HTTPS from the server — the origin probe,
+# mirror syncs, imports — fails certificate verification. deploy/smoke.sh
+# probes a public HTTPS origin from inside the container for that reason.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends git curl tini ca-certificates \
     && rm -rf /var/lib/apt/lists/* \
@@ -57,10 +49,8 @@ RUN apt-get update \
     && mkdir -p /var/lib/stratum \
     && chown stratum:stratum /var/lib/stratum
 COPY --from=build /stratum-server /usr/local/bin/stratum-server
-COPY --from=site /web/site/dist /app/site
 COPY --from=dashboard /web/dashboard/dist /app/dashboard
 ENV STRATUM_BIND=0.0.0.0:8080 \
-    STRATUM_SITE_DIR=/app/site \
     STRATUM_DASHBOARD_DIR=/app/dashboard \
     STRATUM_DATA_DIR=/var/lib/stratum
 USER stratum

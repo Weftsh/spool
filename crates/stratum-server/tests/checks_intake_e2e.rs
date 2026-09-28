@@ -211,7 +211,7 @@ fn world(server: Server) -> World {
         let (st, out) = server.post(
             "/v1/orgs/acme/repos",
             &admin,
-            Some(serde_json::json!({ "name": name, "public": public })),
+            Some(serde_json::json!({ "name": name })),
         );
         assert_eq!(st, 201, "{out}");
     }
@@ -835,7 +835,7 @@ fn the_intake_refuses_every_attack_and_keeps_serving() {
     let (st, out) = server.post(
         "/v1/orgs/acme/repos",
         admin,
-        Some(serde_json::json!({"name": "unconfigured", "public": true})),
+        Some(serde_json::json!({"name": "unconfigured"})),
     );
     assert_eq!(st, 201, "{out}");
     let (st_nosecret, nosecret) = post_signed(
@@ -1708,7 +1708,7 @@ fn the_poll_route_reports_state_and_refuses_a_repository_with_no_origin() {
     let (st, out) = w.server.post(
         "/v1/orgs/acme/repos",
         &w.admin,
-        Some(serde_json::json!({"name": "native", "public": true})),
+        Some(serde_json::json!({"name": "native"})),
     );
     assert_eq!(st, 201, "{out}");
 
@@ -2720,7 +2720,7 @@ fn the_poller_refuses_a_job_it_cannot_run_and_says_which_way() {
     let (st, out) = w.server.post(
         "/v1/orgs/acme/repos",
         &w.admin,
-        Some(serde_json::json!({ "name": "native", "public": true })),
+        Some(serde_json::json!({ "name": "native" })),
     );
     assert_eq!(st, 201, "{out}");
     let j = run(Some(&repo_id(&w, "native")));

@@ -783,11 +783,14 @@ fn the_pack_route_is_closed_when_the_deployment_does_not_use_it() {
     );
 }
 
-/// What the edge is allowed to keep. A public repo's pack is immutable
-/// and shareable; a private one's is authorized by an expiring token and
-/// must never sit in a shared cache after it expires.
+/// What the edge is allowed to keep: nothing. Every repository is
+/// private to its organisation, so every pack is authorized by an
+/// expiring token and must never sit in a shared cache after it expires
+/// — there is no public repository whose pack could be immutable and
+/// shareable any more, and a `public` cache header here would be one a
+/// shared edge was entitled to serve to anybody.
 #[test]
-fn pack_cacheability_follows_repo_visibility() {
+fn a_pack_is_never_publicly_cacheable() {
     let minio = Minio::shared();
     let bucket = minio.bucket("cdn-cache");
     let scratch = Scratch::new("cdn-cache");
@@ -802,60 +805,51 @@ fn pack_cacheability_follows_repo_visibility() {
     );
     cdn.front(&server.base);
     let admin = admin_bootstrap(&bucket.base_url, &db, "acme");
-    for (name, public) in [("pub", true), ("priv", false)] {
-        server.post(
-            "/v1/orgs/acme/repos",
+    let name = "app";
+    let (st, out) = server.post(
+        "/v1/orgs/acme/repos",
+        &admin,
+        Some(serde_json::json!({"name": name})),
+    );
+    assert_eq!(st, 201, "{out}");
+    seed_repo(&server, &admin, &scratch, "acme", name);
+    assert!(server
+        .post(
+            &format!("/v1/orgs/acme/repos/{name}/cdn-pack"),
             &admin,
-            Some(serde_json::json!({"name": name, "public": public})),
-        );
-        seed_repo(&server, &admin, &scratch, "acme", name);
-        assert!(server
-            .post(
-                &format!("/v1/orgs/acme/repos/{name}/cdn-pack"),
-                &admin,
-                None
-            )
-            .1
-            .contains("Built"));
-        cdn.drain();
-        clone_opted_in(
-            scratch.path(),
-            &server.authed_url(&admin, "acme", name),
-            &scratch.path().join(format!("clone-{name}")),
-        );
-        let signed = cdn
-            .pack_hits()
-            .into_iter()
-            .next()
-            .expect("no CDN URL advertised");
-        let resp = ureq::get(&format!("{}{signed}", server.base))
-            .call()
-            .unwrap();
-        let cache = resp.header("cache-control").unwrap_or_default().to_string();
-        if public {
-            assert!(
-                cache.contains("public") && cache.contains("immutable"),
-                "{cache}"
-            );
-        } else {
-            assert!(
-                cache.contains("private") && cache.contains("no-store"),
-                "{cache}"
-            );
-        }
+            None
+        )
+        .1
+        .contains("Built"));
+    cdn.drain();
+    clone_opted_in(
+        scratch.path(),
+        &server.authed_url(&admin, "acme", name),
+        &scratch.path().join(format!("clone-{name}")),
+    );
+    let signed = cdn
+        .pack_hits()
+        .into_iter()
+        .next()
+        .expect("no CDN URL advertised");
+    let resp = ureq::get(&format!("{}{signed}", server.base))
+        .call()
+        .unwrap();
+    let cache = resp.header("cache-control").unwrap_or_default().to_string();
+    assert_eq!(cache, "private, no-store", "{cache}");
 
-        // A token that outlives its object: the pack is gone, so the route
-        // answers 404 rather than 500 — the descriptor may legitimately be
-        // superseded between advertisement and fetch.
-        let store =
-            stratum_store::ObjectStore::new(&bucket.base_url, stratum_store::LatencyModel::None);
-        let prefix = repo_prefix(&server, &admin, "acme", name);
-        let desc: serde_json::Value =
-            serde_json::from_slice(&store.get(&format!("{prefix}/cdn/current.json")).unwrap())
-                .unwrap();
-        store.delete(desc["pack_key"].as_str().unwrap()).unwrap();
-        assert_eq!(server.get_status(&signed), 404, "a vanished pack must 404");
-    }
+    // A token that outlives its object: the pack is gone, so the route
+    // answers 404 rather than 500 — the descriptor may legitimately be
+    // superseded between advertisement and fetch.
+    let store =
+        stratum_store::ObjectStore::new(&bucket.base_url, stratum_store::LatencyModel::None);
+    let prefix = repo_prefix(&server, &admin, "acme", name);
+    let desc: serde_json::Value =
+        serde_json::from_slice(&store.get(&format!("{prefix}/cdn/current.json")).unwrap())
+            .unwrap();
+    store.delete(desc["pack_key"].as_str().unwrap()).unwrap();
+    assert_eq!(server.get_status(&signed), 404, "a vanished pack must 404");
+    assert_eq!(server.get_status("/healthz"), 200);
 }
 
 /// A signing key that is valid-looking at boot but unusable at signing

@@ -154,6 +154,25 @@ pub fn masked(db: &ControlDb, headers: &HeaderMap) -> Response {
     }
 }
 
+/// Refuse a caller whose credential does not authenticate, before
+/// anything is looked up.
+///
+/// Every repository is private to its organisation, so there is nothing
+/// an anonymous caller may read. A route that masks what a caller may
+/// not see as "not found" has to ask this *first*: masking an anonymous
+/// caller's 401 into the 404 an absent record gets would tell them to
+/// look harder rather than to sign in, and answering 401 only for a
+/// record that exists would be the existence oracle [`masked`] is there
+/// to close. One answer — the same one `masked` gives — for every name.
+pub fn require_authenticated(db: &ControlDb, headers: &HeaderMap) -> Result<(), Response> {
+    let answer = masked(db, headers);
+    if answer.status() == StatusCode::NOT_FOUND {
+        Ok(())
+    } else {
+        Err(answer)
+    }
+}
+
 pub fn forbidden(msg: &str) -> Response {
     (StatusCode::FORBIDDEN, format!("{msg}\n")).into_response()
 }

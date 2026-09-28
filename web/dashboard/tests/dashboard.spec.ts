@@ -1474,6 +1474,11 @@ test("signing up says what will happen without saying whether it did", async ({
   await expect(status).toContainText(
     "Another confirmation link is on its way to ada@example.test",
   );
+  // The only address the note may name is the one typed. The sender is
+  // the deployment's own STRATUM_MAIL_FROM, which the page cannot know;
+  // naming one sends a person hunting for mail from somebody else.
+  const named = (await status.textContent())?.match(/[\w.+-]+@[\w-]+(\.[\w-]+)+/g);
+  expect(named).toEqual(["ada@example.test"]);
   expect(resent).toEqual({ email: "ada@example.test" });
   await page.getByRole("button", { name: "Sign in instead" }).click();
   await expect(

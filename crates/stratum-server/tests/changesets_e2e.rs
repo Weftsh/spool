@@ -6,7 +6,6 @@
 //! reading tables.
 
 use stratum_testkit::adversarial::{percent_encode, INJECTIONS};
-use stratum_testkit::fake_stripe::FakeStripe;
 use stratum_testkit::faultproxy::{Fault, FaultPlan, FaultRule};
 use stratum_testkit::{gitcli::Scratch, FaultProxy, Minio, Server};
 
@@ -17,20 +16,6 @@ fn spawn_server(store_url: &str, scratch: &Scratch) -> Server {
         .data_dir(scratch.path().join("data"))
         .db_hint("changesets-e2e")
         .start()
-}
-
-/// A server with billing switched on, so the plan gate has teeth: with
-/// no `STRATUM_STRIPE_KEY` the server is self-hosted and every org may
-/// write, which is the right default and the wrong fixture for a test
-/// of the read-only refusal.
-fn spawn_billed(store_url: &str, scratch: &Scratch, stripe: &FakeStripe) -> Server {
-    let mut b = Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
-        .data_dir(scratch.path().join("data"))
-        .db_hint("changesets-e2e");
-    for (k, v) in stripe.env() {
-        b = b.env(k, v);
-    }
-    b.start()
 }
 
 fn make_user(server: &Server, email: &str, name: &str, role: &str) {
@@ -92,11 +77,11 @@ fn as_person(
     )
 }
 
-fn create_repo(server: &Server, admin: &str, name: &str, public: bool) {
+fn create_repo(server: &Server, admin: &str, name: &str) {
     let (st, out) = server.post(
         "/v1/orgs/acme/repos",
         admin,
-        Some(serde_json::json!({"name": name, "public": public})),
+        Some(serde_json::json!({"name": name})),
     );
     assert_eq!(st, 201, "create repo {name}: {out}");
 }
@@ -117,8 +102,8 @@ fn commit(server: &Server, token: &str, repo: &str, branch: &str, message: &str,
 
 /// A repository with trunk, a feature branch based on it, and one open
 /// change `key` registered from that branch.
-fn repo_with_change(server: &Server, admin: &str, repo: &str, public: bool, key: &str) {
-    create_repo(server, admin, repo, public);
+fn repo_with_change(server: &Server, admin: &str, repo: &str, key: &str) {
+    create_repo(server, admin, repo);
     commit(server, admin, repo, "main", "base", "README.md");
     let (st, out) = server.post(
         &format!("/v1/orgs/acme/repos/{repo}/branches"),
@@ -197,7 +182,7 @@ fn a_changeset_composes_changes_across_repositories_and_orders_them() {
         ("cli", "Icc000003"),
         ("docs", "Idd000004"),
     ] {
-        repo_with_change(&server, &admin, repo, false, key);
+        repo_with_change(&server, &admin, repo, key);
     }
 
     // Refusals that need no repository at all are decided before any
@@ -635,19 +620,13 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
     let minio = Minio::shared();
     let bucket = minio.bucket("changesets-visible");
     let scratch = Scratch::new("changesets-visible");
-    let stripe = FakeStripe::start("whsec_test");
-    let server = spawn_billed(&bucket.base_url, &scratch, &stripe);
+    let server = spawn_server(&bucket.base_url, &scratch);
     let admin = server.bootstrap_org("acme");
-    // A bootstrapped org is free; it is paid here so that it may hold
-    // a private repository, and loses its plan again further down.
-    server
-        .admin(&["admin", "set-plan", "--org", "acme", "--plan", "paid"])
-        .expect("set-plan paid");
     make_user(&server, "vic@acme.test", "Vic", "viewer");
     make_user(&server, "dev@acme.test", "Dev", "member");
-    repo_with_change(&server, &admin, "openbook", true, "I0b000001");
-    repo_with_change(&server, &admin, "openapi", true, "I0a000002");
-    repo_with_change(&server, &admin, "vault", false, "Iee000003");
+    repo_with_change(&server, &admin, "openbook", "I0b000001");
+    repo_with_change(&server, &admin, "openapi", "I0a000002");
+    repo_with_change(&server, &admin, "vault", "Iee000003");
 
     // Composing needs write on every member; a viewer's attempt is masked
     // the way any write to a repository they cannot write is.
@@ -658,7 +637,7 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
         "POST",
         CS,
         Some(serde_json::json!({
-            "key": "Ic5000001", "title": "public pair",
+            "key": "Ic5000001", "title": "the pair",
             "members": [member("openbook", "I0b000001"), member("openapi", "I0a000002")],
         })),
     );
@@ -672,7 +651,7 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
         "POST",
         CS,
         Some(serde_json::json!({
-            "key": "Ic5000001", "title": "public pair",
+            "key": "Ic5000001", "title": "the pair",
             "members": [member("openbook", "I0b000001"), member("openapi", "I0a000002")],
         })),
     );
@@ -689,14 +668,10 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
     );
     assert_eq!(st, 201, "{out}");
 
-    // A changeset over public repositories reads anonymously; one that
-    // touches a private repository does not exist for a stranger, and a
-    // list shows only what its reader may see in full. A service token
-    // from another org reads exactly what anonymous does — a public
-    // repository reads with any valid credential, and its changesets go
-    // with it — and may write nothing, the same as on the repositories
-    // themselves.
-    let rival = server.bootstrap_org("rival");
+    // Every repository is private to its organisation, so a changeset
+    // is too. No credential is a 401 whether or not the key exists; a
+    // token from another organisation meets the same 404 an unknown key
+    // does, on reads and writes alike.
     let keys_of = |out: &serde_json::Value| -> Vec<String> {
         out["changesets"]
             .as_array()
@@ -705,38 +680,43 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
             .map(|c| c["key"].as_str().unwrap().to_string())
             .collect()
     };
-    for (who, token) in [("anonymous", ""), ("a rival org", rival.as_str())] {
-        let (st, out) = server.get(&format!("{CS}/Ic5000001"), token);
-        assert_eq!(st, 200, "{who} reading the public changeset: {out}");
-        assert_eq!(
-            out["viewer_write"],
-            serde_json::json!(false),
-            "{who}: {out}"
-        );
-        let (st, out) = server.get(&format!("{CS}/Ic5000002"), token);
-        assert_eq!(st, 404, "{who} reading the private changeset: {out}");
-        assert_eq!(
-            out["error"],
-            serde_json::json!("no changeset \"Ic5000002\"")
-        );
-        let (st, out) = server.get(CS, token);
-        assert_eq!(st, 200, "{who} listing: {out}");
-        assert_eq!(
-            keys_of(&out),
-            ["Ic5000001"],
-            "{who} sees only what they may read"
-        );
-        // Nor may they shape either.
-        let (st, _) = server.req(
-            "PUT",
-            &format!("{CS}/Ic5000001/edges"),
-            token,
-            Some(serde_json::json!({"edges": []})),
-        );
-        assert!(st == 401 || st == 404, "{who} setting edges answered {st}");
-        let (st, _) = server.post(&format!("{CS}/Ic5000002/abandon"), token, None);
-        assert_eq!(st, 404, "{who} abandoning the private changeset");
+    for key in ["Ic5000001", "Ic5000002", "Ic5999999"] {
+        let (st, out) = server.get(&format!("{CS}/{key}"), "");
+        assert_eq!(st, 401, "anonymous reading {key}: {out}");
     }
+    let (st, out) = server.get(CS, "");
+    assert_eq!(st, 401, "anonymous listing: {out}");
+    let rival = server.bootstrap_org("rival");
+    for key in ["Ic5000001", "Ic5000002"] {
+        let (st, _) = server.get(&format!("{CS}/{key}"), &rival);
+        assert_eq!(st, 404, "a rival org reading {key}");
+        let (st, _) = server.post(&format!("{CS}/{key}/abandon"), &rival, None);
+        assert_eq!(st, 404, "a rival org abandoning {key}");
+    }
+    let (st, _) = server.req(
+        "PUT",
+        &format!("{CS}/Ic5000001/edges"),
+        &rival,
+        Some(serde_json::json!({"edges": []})),
+    );
+    assert_eq!(st, 404, "a rival org setting edges");
+
+    // Inside the organisation, a credential that can read only *one*
+    // member does not see the combination: a token bound to `openbook`
+    // reads the changeset over the vault as absent, and the pair as
+    // absent too, because the pair names a repository it cannot read.
+    let (st, minted) = server.post(
+        "/v1/orgs/acme/tokens",
+        &admin,
+        Some(serde_json::json!({"scopes": ["repo:read"], "repo": "openbook", "label": "one"})),
+    );
+    assert_eq!(st, 201, "{minted}");
+    let one = minted["token"].as_str().unwrap().to_string();
+    for key in ["Ic5000001", "Ic5000002"] {
+        let (st, out) = server.get(&format!("{CS}/{key}"), &one);
+        assert_eq!(st, 404, "a one-repository token reading {key}: {out}");
+    }
+
     // The viewer, inside the org, sees both — newest first.
     let (st, out) = as_person(&server, &vic, "GET", CS, None);
     assert_eq!(st, 200, "{out}");
@@ -745,8 +725,7 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
     // Every changeset says whether *this* reader may land, revert,
     // abandon or edit it — write on every member — so a page never
     // offers a button the write routes will answer with a masked 404.
-    // The viewer sees both and may act on neither; the composer may;
-    // a stranger reading the public one may not.
+    // The viewer sees both and may act on neither; the composer may.
     let writes = |out: &serde_json::Value| -> Vec<bool> {
         out["changesets"]
             .as_array()
@@ -760,12 +739,6 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
     assert_eq!(out["viewer_write"], serde_json::json!(false), "{out}");
     let (_, out) = as_person(&server, &dev, "GET", &format!("{CS}/Ic5000001"), None);
     assert_eq!(out["viewer_write"], serde_json::json!(true), "{out}");
-    let (_, out) = server.get(&format!("{CS}/Ic5000001"), "");
-    assert_eq!(
-        out["viewer_write"],
-        serde_json::json!(false),
-        "anonymous: {out}"
-    );
     // It is the repository's answer, not the org role's: a per-repo grant
     // that raises the viewer to a writer on *one* member is not enough,
     // and on both it is — at which point the route the field speaks for
@@ -818,48 +791,19 @@ fn a_changeset_is_visible_only_to_someone_who_can_read_every_member() {
         Some(serde_json::json!({"edges": []})),
     );
     assert_eq!(st, 200, "and the write route agrees: {out}");
-    // Still nothing on the private one, which the grants did not touch.
+    // Still nothing on the vault's, which the grants did not touch.
     let (_, out) = as_person(&server, &vic, "GET", &format!("{CS}/Ic5000002"), None);
     assert_eq!(out["viewer_write"], serde_json::json!(false), "{out}");
     // Unknown org: masked like every other org surface.
     let (st, _) = server.get("/v1/orgs/nobody/changesets", &admin);
     assert_eq!(st, 404);
-
-    // An org whose subscription has ended is read-only on its private
-    // repositories: composing over one is refused with the sentence
-    // that says what to do, and the public pair is untouched.
-    server
-        .admin(&["admin", "set-plan", "--org", "acme", "--plan", "free"])
-        .expect("set-plan");
-    let (st, out) = server.post(
-        &format!("{CS}/Ic5000002/members"),
-        &admin,
-        Some(member("openbook", "I0b000001")),
-    );
-    assert_eq!(st, 402, "{out}");
-    assert!(
-        out["error"]
-            .as_str()
-            .unwrap()
-            .contains("subscription has ended"),
-        "{out}"
-    );
-    let (st, out) = server.req(
-        "PUT",
-        &format!("{CS}/Ic5000001/edges"),
-        &admin,
-        Some(serde_json::json!({"edges": [
-            edge(("openbook", "I0b000001"), ("openapi", "I0a000002")),
-        ]})),
-    );
-    assert_eq!(st, 200, "public repositories stay writable: {out}");
     assert!(server.healthy());
 }
 
 /// Like `repo_with_change`, but trunk carries a root OWNERS file naming
 /// `owner`, so the change needs that person's approval to land.
 fn owned_repo_with_change(server: &Server, admin: &str, repo: &str, owner: &str, key: &str) {
-    create_repo(server, admin, repo, false);
+    create_repo(server, admin, repo);
     commit(server, admin, repo, "main", &format!("{owner}\n"), "OWNERS");
     let (st, out) = server.post(
         &format!("/v1/orgs/acme/repos/{repo}/branches"),
@@ -1068,14 +1012,22 @@ fn a_changeset_verdict_is_every_member_review_at_once() {
         "{v}"
     );
 
-    // Who may read it: the same rule as the changeset itself. Both
-    // repositories are private, so anonymous and a stranger see nothing;
-    // a viewer of the org sees everything.
-    let (st, out) = server.get(&format!("{CS}/Ic5000001/verdict"), "");
-    assert_eq!(st, 404, "{out}");
+    // Who may read it: the same rule as the changeset itself. Anonymous
+    // is told to sign in, for this key and for one that does not exist;
+    // a stranger meets the sentence an unknown key gets; a viewer of the
+    // org sees everything.
+    for key in ["Ic5000001", "Ic5009999"] {
+        let (st, out) = server.get(&format!("{CS}/{key}/verdict"), "");
+        assert_eq!(st, 401, "anonymous reading {key}'s verdict: {out}");
+    }
     let rival = server.bootstrap_org("rival");
     let (st, out) = server.get(&format!("{CS}/Ic5000001/verdict"), &rival);
     assert_eq!(st, 404, "{out}");
+    assert_eq!(
+        out["error"],
+        serde_json::json!("no changeset \"Ic5000001\""),
+        "a stranger was told the changeset exists: {out}"
+    );
     let vic = sign_in(&server, "vic@acme.test");
     let (st, out) = as_person(
         &server,
@@ -1115,7 +1067,6 @@ fn repo_with_edit(
     server: &Server,
     admin: &str,
     repo: &str,
-    public: bool,
     key: &str,
     // One tuple rather than three neighbouring `&str` arguments: `path`,
     // `before` and `after` are the same type, and two of them swapped
@@ -1124,7 +1075,7 @@ fn repo_with_edit(
     edit: (&str, &str, &str),
 ) {
     let (path, before, after) = edit;
-    create_repo(server, admin, repo, public);
+    create_repo(server, admin, repo);
     let (st, out) = server.post(
         &format!("/v1/orgs/acme/repos/{repo}/commits"),
         admin,
@@ -1183,7 +1134,6 @@ fn a_changeset_says_how_big_it_is_and_admits_what_it_did_not_count() {
         &server,
         &admin,
         "api",
-        true,
         "Iaa000001",
         ("core.rs", "a\nb\nc\n", "a\nB\nc\nd\n"),
     );
@@ -1201,7 +1151,6 @@ fn a_changeset_says_how_big_it_is_and_admits_what_it_did_not_count() {
         &server,
         &admin,
         "web",
-        false,
         "Ibb000002",
         ("generated.txt", "small\n", &one_huge_line),
     );
@@ -1213,7 +1162,6 @@ fn a_changeset_says_how_big_it_is_and_admits_what_it_did_not_count() {
         &server,
         &admin,
         "churn",
-        true,
         "Icc000003",
         ("churn.txt", &before, &after),
     );
@@ -1277,14 +1225,18 @@ fn a_changeset_says_how_big_it_is_and_admits_what_it_did_not_count() {
     // the size of a review over a private repository is a fact about
     // that repository.
     let rival = server.bootstrap_org("rival");
-    for (who, token) in [("anonymous", ""), ("a rival org", rival.as_str())] {
-        let (st, out) = server.get(&path, token);
-        assert_eq!(st, 404, "{who} read the private member's size: {out}");
-        assert_eq!(
-            out["error"],
-            serde_json::json!("no changeset \"Ic5000001\""),
-            "{who} was told the changeset exists: {out}"
-        );
+    let (st, out) = server.get(&path, &rival);
+    assert_eq!(st, 404, "a rival org read the member's size: {out}");
+    assert_eq!(
+        out["error"],
+        serde_json::json!("no changeset \"Ic5000001\""),
+        "a rival org was told the changeset exists: {out}"
+    );
+    // Anonymous is told to sign in before anything is looked up, so the
+    // answer is the same for a key that does not exist.
+    for key in ["Ic5000001", "Ic5009999"] {
+        let (st, out) = server.get(&format!("{CS}/{key}/diffstat"), "");
+        assert_eq!(st, 401, "anonymous reading {key}'s size: {out}");
     }
     // A key that is not a changeset is the same sentence, so neither
     // answer tells the other apart.
@@ -1350,7 +1302,6 @@ fn a_store_that_will_not_answer_makes_the_diffstat_a_server_error_not_a_number()
         &server,
         &admin,
         "api",
-        true,
         "Iaa000001",
         ("core.rs", "a\nb\nc\n", "a\nB\nc\nd\n"),
     );
@@ -1427,7 +1378,7 @@ fn a_diffstat_counts_a_file_that_arrived_or_left_and_declines_a_submodule() {
     // One member through the API: `added.txt` arrives, `gone.txt`
     // leaves, and `keep.txt` is untouched so the file count cannot come
     // from the tree's size.
-    create_repo(&server, &admin, "api", true);
+    create_repo(&server, &admin, "api");
     let (st, out) = server.post(
         "/v1/orgs/acme/repos/api/commits",
         &admin,
@@ -1471,7 +1422,7 @@ fn a_diffstat_counts_a_file_that_arrived_or_left_and_declines_a_submodule() {
     // test. Written straight into the index: `git submodule add` would
     // need a second repository on disk and a fetch, and the entry is
     // what matters, not the porcelain.
-    create_repo(&server, &admin, "vend", true);
+    create_repo(&server, &admin, "vend");
     let (st, out) = server.post(
         "/v1/orgs/acme/repos/vend/commits",
         &admin,

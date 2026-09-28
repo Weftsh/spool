@@ -1,12 +1,15 @@
 # One-time bootstrap, applied by an operator with local state BEFORE the
-# root stack or any CI deploy can run. It creates the things the pipeline
-# itself depends on: remote state storage, and the GitHub-OIDC roles CI
-# assumes (no long-lived AWS keys anywhere).
+# root stack. It creates what the root stack's own state depends on — the
+# S3 bucket that holds it — and, optionally, two roles a GitHub Actions
+# workflow in YOUR repository can assume through OIDC to deploy, so no
+# long-lived AWS key has to live in GitHub.
 #
 #   cd deploy/terraform/bootstrap
-#   terraform init && terraform apply -var github_repo=OWNER/REPO
+#   terraform init && terraform apply                              # state bucket only
+#   terraform init && terraform apply -var github_repo=OWNER/REPO  # + the CI roles
 #
-# Outputs feed GitHub repository variables (see docs/deployment-aws.md).
+# Keep this directory's local state (terraform.tfstate) somewhere safe;
+# see docs/deployment-aws.md.
 
 terraform {
   required_version = ">= 1.10"
@@ -28,13 +31,26 @@ variable "aws_region" {
 }
 
 variable "project" {
-  type    = string
-  default = "stratum"
+  description = "Must match the root stack's `project`: the CD role's grants are scoped to `<project>-*` names."
+  type        = string
+  default     = "spool"
 }
 
 variable "github_repo" {
-  description = "GitHub repository (owner/name) allowed to assume the CI roles."
+  description = "GitHub repository (owner/name) whose workflows may assume the CI roles — a push to its `main` branch for the deploy role, a job in its `infra` environment for the terraform role. Empty = no GitHub OIDC provider and no roles: the state bucket only."
   type        = string
+  default     = ""
+
+  validation {
+    condition     = var.github_repo == "" || can(regex("^[^/@]+/[^/@]+$", var.github_repo))
+    error_message = "github_repo is owner/name, e.g. acme/spool-deploy."
+  }
+}
+
+variable "github_oidc_provider_arn" {
+  description = "An account holds one OIDC provider per issuer URL. If this account already has one for token.actions.githubusercontent.com (another project made it), pass its ARN here and it is reused instead of created — creating a second fails with EntityAlreadyExists."
+  type        = string
+  default     = ""
 }
 
 # GitHub is migrating the OIDC `sub` claim to immutable identifiers: the
@@ -51,8 +67,9 @@ variable "github_repo" {
 # broken bootstrap; the `sub` actually presented is in CloudTrail — see
 # docs/deployment-aws.md.
 locals {
-  github_owner = split("/", var.github_repo)[0]
-  github_name  = split("/", var.github_repo)[1]
+  github_enabled = var.github_repo != ""
+  github_owner   = local.github_enabled ? split("/", var.github_repo)[0] : ""
+  github_name    = local.github_enabled ? split("/", var.github_repo)[1] : ""
 
   # Both spellings, per claim suffix.
   cd_subs = [
@@ -97,6 +114,7 @@ resource "aws_s3_bucket_public_access_block" "tf_state" {
 # ------------------------------------------------------------- GitHub OIDC
 
 resource "aws_iam_openid_connect_provider" "github" {
+  count          = local.github_enabled && var.github_oidc_provider_arn == "" ? 1 : 0
   url            = "https://token.actions.githubusercontent.com"
   client_id_list = ["sts.amazonaws.com"]
   # GitHub's OIDC root CA thumbprint; AWS now verifies against its own
@@ -104,15 +122,20 @@ resource "aws_iam_openid_connect_provider" "github" {
   thumbprint_list = ["6938fd4d98bab03faadb97b34396831e3780aea1"]
 }
 
-# stratum-cd: the narrow role every main-branch deploy assumes — push an
-# image, roll the service, run the smoke bootstrap task. Deliberately NO
+locals {
+  github_oidc_provider_arn = var.github_oidc_provider_arn != "" ? var.github_oidc_provider_arn : one(aws_iam_openid_connect_provider.github[*].arn)
+}
+
+# <project>-cd: the narrow role a main-branch deploy assumes — push an
+# image, roll the service, run a one-off admin task. Deliberately NO
 # secretsmanager access: secrets flow to tasks via the execution role.
 data "aws_iam_policy_document" "cd_trust" {
+  count = local.github_enabled ? 1 : 0
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.github_oidc_provider_arn]
     }
     condition {
       test     = "StringEquals"
@@ -128,11 +151,13 @@ data "aws_iam_policy_document" "cd_trust" {
 }
 
 resource "aws_iam_role" "cd" {
+  count              = local.github_enabled ? 1 : 0
   name               = "${var.project}-cd"
-  assume_role_policy = data.aws_iam_policy_document.cd_trust.json
+  assume_role_policy = data.aws_iam_policy_document.cd_trust[0].json
 }
 
 data "aws_iam_policy_document" "cd" {
+  count = local.github_enabled ? 1 : 0
   statement {
     sid       = "EcrAuth"
     actions   = ["ecr:GetAuthorizationToken"]
@@ -191,20 +216,22 @@ data "aws_iam_policy_document" "cd" {
 }
 
 resource "aws_iam_role_policy" "cd" {
+  count  = local.github_enabled ? 1 : 0
   name   = "deploy"
-  role   = aws_iam_role.cd.id
-  policy = data.aws_iam_policy_document.cd.json
+  role   = aws_iam_role.cd[0].id
+  policy = data.aws_iam_policy_document.cd[0].json
 }
 
-# stratum-infra: the broad role terraform applies run under. Its trust
+# <project>-infra: the broad role terraform applies run under. Its trust
 # additionally requires the GitHub environment "infra" — put required
 # reviewers on that environment and every infra change gets a human gate.
 data "aws_iam_policy_document" "infra_trust" {
+  count = local.github_enabled ? 1 : 0
   statement {
     actions = ["sts:AssumeRoleWithWebIdentity"]
     principals {
       type        = "Federated"
-      identifiers = [aws_iam_openid_connect_provider.github.arn]
+      identifiers = [local.github_oidc_provider_arn]
     }
     condition {
       test     = "StringEquals"
@@ -224,12 +251,14 @@ data "aws_iam_policy_document" "infra_trust" {
 }
 
 resource "aws_iam_role" "infra" {
+  count              = local.github_enabled ? 1 : 0
   name               = "${var.project}-infra"
-  assume_role_policy = data.aws_iam_policy_document.infra_trust.json
+  assume_role_policy = data.aws_iam_policy_document.infra_trust[0].json
 }
 
 resource "aws_iam_role_policy_attachment" "infra_admin" {
-  role       = aws_iam_role.infra.name
+  count      = local.github_enabled ? 1 : 0
+  role       = aws_iam_role.infra[0].name
   policy_arn = "arn:aws:iam::aws:policy/AdministratorAccess"
 }
 
@@ -240,9 +269,11 @@ output "state_bucket" {
 }
 
 output "cd_role_arn" {
-  value = aws_iam_role.cd.arn
+  description = "Empty without github_repo."
+  value       = one(aws_iam_role.cd[*].arn)
 }
 
 output "infra_role_arn" {
-  value = aws_iam_role.infra.arn
+  description = "Empty without github_repo."
+  value       = one(aws_iam_role.infra[*].arn)
 }

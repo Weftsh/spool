@@ -47,37 +47,9 @@ hzL3YngJRPeiYDcE6U05aiLrmcHQnFKZeM0WHvV+erp+UlLpDO9B
 -----END RSA PRIVATE KEY-----
 ";
 
-/// What the self-hosted-runner routes have been asked, for a test to
-/// read back: the `generate-jitconfig` bodies, the runner deletions, the
-/// run cancellations, and the "is this job still going?" reads.
-/// Instrumentation only — nothing the fake answers depends on it.
-#[derive(Default)]
-pub struct RunnerCalls {
-    pub jit_requests: Mutex<Vec<serde_json::Value>>,
-    /// `owner/repo#runner_id`, in order.
-    pub runner_deletes: Mutex<Vec<String>>,
-    /// `owner/repo#run_id`, in order.
-    pub cancels: Mutex<Vec<String>>,
-    /// `owner/repo#job_id` for every job-state read, in order. A test
-    /// counts these: the dispatcher reconciles running jobs against
-    /// GitHub, and doing that on every poll would spend an
-    /// installation's hourly budget on one ordinary build.
-    pub job_reads: Mutex<Vec<String>>,
-    /// Answers to job-state reads by job id, ahead of the repository-name
-    /// rule below: `(status, conclusion)` with the conclusion as the JSON
-    /// GitHub sends (`"success"` quoted, `null` bare). A test needs this
-    /// when two jobs on one repository must answer differently — the job
-    /// a runner was launched for is over, the one it took is not.
-    pub job_states: Mutex<HashMap<i64, (String, String)>>,
-    /// The next runner id to hand out.
-    seq: AtomicU64,
-}
-
 pub struct FakeGithub {
     pub base_url: String,
     pub tokens_issued: Arc<AtomicU64>,
-    /// The runner routes' record of what was asked of them.
-    pub runners: Arc<RunnerCalls>,
     /// Requests this instance has served to the Actions run list, across
     /// every repository and including the refused ones.
     ///
@@ -111,12 +83,10 @@ pub fn spawn() -> FakeGithub {
     let tokens_issued = Arc::new(AtomicU64::new(0));
     let actions_calls = Arc::new(AtomicU64::new(0));
     let run_calls: RunCalls = Arc::new(Mutex::new(HashMap::new()));
-    let runners = Arc::new(RunnerCalls::default());
     let shutdown = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let counter = tokens_issued.clone();
     let actions = actions_calls.clone();
     let per_repo = run_calls.clone();
-    let runner_calls = runners.clone();
     let stop = shutdown.clone();
     std::thread::spawn(move || {
         for stream in listener.incoming() {
@@ -127,24 +97,15 @@ pub fn spawn() -> FakeGithub {
             let counter = counter.clone();
             let actions = actions.clone();
             let per_repo = per_repo.clone();
-            let runner_calls = runner_calls.clone();
             let base = format!("http://{addr}");
             std::thread::spawn(move || {
-                let _ = handle(
-                    &mut stream,
-                    &counter,
-                    &actions,
-                    &per_repo,
-                    &runner_calls,
-                    &base,
-                );
+                let _ = handle(&mut stream, &counter, &actions, &per_repo, &base);
             });
         }
     });
     FakeGithub {
         base_url: format!("http://{addr}"),
         tokens_issued,
-        runners,
         actions_calls,
         shutdown,
     }
@@ -163,7 +124,6 @@ fn handle(
     counter: &AtomicU64,
     actions_calls: &AtomicU64,
     run_calls: &RunCalls,
-    runners: &RunnerCalls,
     base: &str,
 ) -> std::io::Result<()> {
     let mut buf = Vec::new();
@@ -240,20 +200,9 @@ fn handle(
 
     let body_text = String::from_utf8_lossy(&buf[header_end + 4..]).to_string();
 
-    // The self-hosted-runner routes first: they share the `/repos/`
-    // prefix with the metadata route below, and that one matches
-    // anything after it.
-    if let Some((status, headers, body)) = runners_route(
-        &request_line,
-        has_installation_token,
-        &body_text,
-        runners,
-        run_calls,
-    ) {
-        return write_response(stream, &status, &headers, &body);
-    }
-
-    // The issue-import routes, for the same reason.
+    // The issue-import routes first: they share the `/repos/` prefix
+    // with the metadata route below, and that one matches anything
+    // after it.
     if let Some((status, headers, body)) =
         issue_route(&request_line, has_installation_token, counter, base)
     {
@@ -486,10 +435,10 @@ fn handle(
         // One installation, as the App sees it: who it is installed on,
         // whether that is a person or an organisation, and what it may
         // do. `4001` is an organisation and `4002` a person, both holding
-        // what the runner feature needs; `4003` is an organisation that
-        // installed the App before the feature existed and has not
-        // approved the new permissions, which is how a real installation
-        // that predates a manifest change looks.
+        // `Contents: write`; `4003` and `4007` are organisations that
+        // installed the App before it asked for that and have not
+        // approved the change, which is how a real installation that
+        // predates a manifest change looks.
         if !has_bearer {
             ("401 Unauthorized", "{\"message\":\"bad jwt\"}".to_string())
         } else {
@@ -504,13 +453,13 @@ fn handle(
                 ),
                 "4003" => (
                     "200 OK",
-                    installation_json(4003, "noadmin-inc", "Organization", Approved::Original),
+                    installation_json(4003, "noadmin-inc", "Organization", Approved::ReadOnly),
                 ),
-                // Approved for runners, never for pushing: the shape an
+                // Approved, but never for pushing: the shape an
                 // installation made before write-through mirrors has.
                 "4007" => (
                     "200 OK",
-                    installation_json(4007, "prepush-inc", "Organization", Approved::Runners),
+                    installation_json(4007, "prepush-inc", "Organization", Approved::ReadOnly),
                 ),
                 // One the App may not read (a suspended App, say), and
                 // one GitHub is rate-limiting: the two non-404 refusals
@@ -696,37 +645,24 @@ fn fake_user(who: &str) -> FakeUser {
     }
 }
 
-/// One installation's detail, as `GET /app/installations/{id}` answers
-/// it. `full` is an installation holding everything the GitHub-runner
-/// feature needs — `administration: write` for the just-in-time runner
-/// registration and `actions: write` for cancelling a run we refused —
-/// and `!full` is one that has only what the App asked for before that
-/// feature existed.
 /// Which generation of the App's manifest an installation approved.
 ///
-/// `Full` holds everything the App asks for today. `Runners` approved
-/// `Administration: write` and `Actions: write` but predates
-/// `Contents: write` — the shape every installation made between the
-/// runner feature and write-through mirrors has, until its owner
-/// approves again. `Original` predates both.
+/// `Full` holds everything the App asks for today. `ReadOnly` predates
+/// `Contents: write` — the shape every installation made before
+/// write-through mirrors has, until its owner approves again.
 #[derive(Clone, Copy)]
 enum Approved {
     Full,
-    Runners,
-    Original,
+    ReadOnly,
 }
 
 fn installation_json(id: u64, login: &str, target_type: &str, approved: Approved) -> String {
     let (perms, events) = match approved {
         Approved::Full => (
-            r#"{"actions":"write","administration":"write","contents":"write","issues":"read","metadata":"read"}"#,
-            r#"["push","workflow_job"]"#,
+            r#"{"actions":"read","contents":"write","issues":"read","metadata":"read"}"#,
+            r#"["push"]"#,
         ),
-        Approved::Runners => (
-            r#"{"actions":"write","administration":"write","contents":"read","issues":"read","metadata":"read"}"#,
-            r#"["push","workflow_job"]"#,
-        ),
-        Approved::Original => (
+        Approved::ReadOnly => (
             r#"{"actions":"read","contents":"read","issues":"read","metadata":"read"}"#,
             r#"["push"]"#,
         ),
@@ -736,355 +672,6 @@ fn installation_json(id: u64, login: &str, target_type: &str, approved: Approved
            \"target_type\":\"{target_type}\",\"permissions\":{perms},\"events\":{events},\
            \"suspended_at\":null}}"
     )
-}
-
-/// The self-hosted-runner routes: register a just-in-time runner,
-/// remove one, cancel a run. Answered before the general dispatch.
-///
-/// Returns `None` for a request this does not handle.
-///
-/// What the fake answers here was checked against the real API by
-/// `scripts/manual-github-runners.sh` on 2026-09-07, and two of its
-/// beliefs did not survive: a just-in-time runner carries **only** the
-/// labels it was asked for (lowercased) — no default `self-hosted`,
-/// `linux` or `x64` — and a 422 is a `message` with no `errors` list,
-/// while a label with a space is accepted. Cancelling an already
-/// finished run answering **409** did hold. What is here now is what
-/// was observed.
-fn runners_route(
-    request_line: &str,
-    has_installation_token: bool,
-    body_text: &str,
-    runners: &RunnerCalls,
-    refusals: &RunCalls,
-) -> Option<Answer> {
-    let mut parts = request_line.split_whitespace();
-    let method = parts.next()?;
-    let path = parts.next()?;
-    let rest = path.strip_prefix("/repos/")?;
-    let mut seg = rest.split('/');
-    let owner = seg.next()?;
-    let repo = seg.next()?;
-    if seg.next()? != "actions" {
-        return None;
-    }
-    let kind = seg.next()?;
-    let tail: Vec<&str> = seg.collect();
-    let call = match (method, kind, tail.as_slice()) {
-        ("POST", "runners", ["generate-jitconfig"]) => "jit",
-        ("DELETE", "runners", [_id]) => "delete",
-        ("POST", "runs", [_id, "cancel"]) => "cancel",
-        // What GitHub says one job is doing. The dispatcher asks this
-        // about jobs its own row still calls `running`, because a
-        // `workflow_job` completion can be missed and a row that keeps
-        // saying `running` keeps a task alive and holds a slot in the
-        // organisation's concurrency cap.
-        ("GET", "jobs", [_id]) => "job",
-        _ => return None,
-    };
-
-    if !has_installation_token {
-        return Some((
-            "401 Unauthorized".into(),
-            vec![],
-            r#"{"message":"requires installation token"}"#.into(),
-        ));
-    }
-
-    // The two rate limits, alternating per repository so one test sees
-    // both the refusal and the recovery — the same schedule and the
-    // same argument as `actions_route`, on a counter of its own so the
-    // two routes' schedules cannot shift each other.
-    let n = refusals
-        .lock()
-        .unwrap()
-        .entry(format!("runners:{owner}/{repo}"))
-        .and_modify(|c| *c += 1)
-        .or_insert(1)
-        .to_owned();
-    if !n.is_multiple_of(2) {
-        if owner == "ratelimited" {
-            return Some((
-                "403 Forbidden".into(),
-                vec![
-                    ("Retry-After".into(), "2".into()),
-                    ("X-RateLimit-Remaining".into(), "0".into()),
-                ],
-                r#"{"message":"API rate limit exceeded"}"#.into(),
-            ));
-        }
-        if owner == "budgetspent" {
-            let reset = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0)
-                + 120;
-            return Some((
-                "403 Forbidden".into(),
-                vec![
-                    ("X-RateLimit-Limit".into(), "5000".into()),
-                    ("X-RateLimit-Remaining".into(), "0".into()),
-                    ("X-RateLimit-Reset".into(), reset.to_string()),
-                ],
-                r#"{"message":"API rate limit exceeded for installation ID 777."}"#.into(),
-            ));
-        }
-    }
-
-    // A job's state, keyed off the repository name so a test can choose
-    // the answer it needs:
-    //
-    //   `finished/*`  — completed/success: the ordinary case where our
-    //                   completion delivery went missing;
-    //   `cancelled/*` — completed/cancelled: a run superseded by the
-    //                   next push, whose runner must be stopped;
-    //   `gone/*`      — 404, a job deleted with its run;
-    //   `garbled/*`   — 200 with a body that is not JSON: an answer the
-    //                   dispatcher cannot read, which must leave the job
-    //                   alone and be asked again next pass;
-    //   `waiting/*`, `nodelete/*` — queued: no runner has taken it;
-    //   anything else — still in_progress, which must be left alone.
-    //
-    // `conclusion` is null while a job is in progress, which is how
-    // GitHub sends it and why the caller reads the two fields
-    // separately rather than trusting one.
-    if call == "job" {
-        let id: i64 = tail.first().and_then(|t| t.parse().ok()).unwrap_or(0);
-        runners
-            .job_reads
-            .lock()
-            .unwrap()
-            .push(format!("{owner}/{repo}#{id}"));
-        let pinned = runners.job_states.lock().unwrap().get(&id).cloned();
-        let (status, conclusion) = match (pinned.as_ref(), owner) {
-            (Some((s, c)), _) => (s.as_str(), c.as_str()),
-            (None, "finished") => ("completed", "\"success\""),
-            (None, "cancelled") => ("completed", "\"cancelled\""),
-            // A job no runner has taken. This is what an idle runner's
-            // job looks like from GitHub's side, and `nodelete/*` is
-            // the idle sweep's own repository: a runner that never got
-            // a job and cannot be removed, so both answers belong to it.
-            (None, "waiting" | "nodelete") => ("queued", "null"),
-            (None, "gone") => {
-                return Some((
-                    "404 Not Found".into(),
-                    vec![],
-                    r#"{"message":"Not Found"}"#.into(),
-                ))
-            }
-            (None, "garbled") => {
-                return Some(("200 OK".into(), vec![], "<html>not json</html>".into()))
-            }
-            // A secondary rate limit: 403 carrying `Retry-After`, which
-            // is the shape that tells it from a permission refusal.
-            // Unconditional, unlike `ratelimited/*` above, which
-            // alternates on a call counter the dispatcher also bumps —
-            // a caller asking about one job needs an answer that does
-            // not depend on how many other calls got there first.
-            (None, "jobbusy") => {
-                return Some((
-                    "403 Forbidden".into(),
-                    vec![
-                        ("Retry-After".into(), "2".into()),
-                        ("X-RateLimit-Remaining".into(), "0".into()),
-                    ],
-                    r#"{"message":"You have exceeded a secondary rate limit"}"#.into(),
-                ))
-            }
-            // A plain refusal: 403 with no rate-limit headers at all,
-            // which is what an installation that has lost `Actions:
-            // read` is answered with.
-            (None, "jobdenied") => {
-                return Some((
-                    "403 Forbidden".into(),
-                    vec![],
-                    r#"{"message":"Resource not accessible by integration"}"#.into(),
-                ))
-            }
-            _ => ("in_progress", "null"),
-        };
-        return Some((
-            "200 OK".into(),
-            vec![],
-            format!(
-                r#"{{"id":{id},"status":"{status}","conclusion":{conclusion},"name":"build"}}"#
-            ),
-        ));
-    }
-
-    // A permission the installation does not hold. A 403 **with a
-    // budget still on it**, which is what tells it from the primary rate
-    // limit above; `noadmin/*` lacks `administration: write` and
-    // `noactionswrite/*` lacks `actions: write`, which are different
-    // permissions refused by different routes.
-    let denied = |what: &str| {
-        Some((
-            "403 Forbidden".into(),
-            vec![
-                ("X-RateLimit-Limit".into(), "5000".into()),
-                ("X-RateLimit-Remaining".into(), "4999".into()),
-            ],
-            format!(r#"{{"message":"Resource not accessible by integration ({what})"}}"#),
-        ))
-    };
-    let not_found = || {
-        Some((
-            "404 Not Found".into(),
-            vec![],
-            r#"{"message":"Not Found"}"#.into(),
-        ))
-    };
-
-    match call {
-        "jit" => {
-            if owner == "noadmin" {
-                return denied("administration: write");
-            }
-            if owner == "private" {
-                return not_found();
-            }
-            let body: serde_json::Value = serde_json::from_str(body_text).unwrap_or_default();
-            runners.jit_requests.lock().unwrap().push(body.clone());
-            let name = body["name"].as_str().unwrap_or_default().to_string();
-            let asked: Vec<String> = body["labels"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|l| l.as_str().map(String::from))
-                        .collect()
-                })
-                .unwrap_or_default();
-            // GitHub's 422s, as observed by the manual gate on
-            // 2026-09-07: a `message` and nothing else — no `errors`
-            // list — and a label with a space in it is *accepted*. Only
-            // an empty list and an over-long label are refused.
-            if asked.is_empty() {
-                return Some((
-                    "422 Unprocessable Entity".into(),
-                    vec![],
-                    r#"{"message":"Invalid request.\n\nInvalid property /labels: 1 item required; only 0 were supplied.","status":"422"}"#.into(),
-                ));
-            }
-            if name.is_empty() || body["runner_group_id"].as_i64().is_none() {
-                return Some((
-                    "422 Unprocessable Entity".into(),
-                    vec![],
-                    r#"{"message":"Invalid request.\n\nInvalid property /name: required.","status":"422"}"#.into(),
-                ));
-            }
-            if let Some(long) = asked.iter().find(|l| l.len() >= 256) {
-                return Some((
-                    "422 Unprocessable Entity".into(),
-                    vec![],
-                    format!(
-                        r#"{{"message":"Invalid Argument - Label '{long}' is not valid. Labels must be less than 256 characters in length","status":"422"}}"#
-                    ),
-                ));
-            }
-            let id = 500 + runners.seq.fetch_add(1, Ordering::SeqCst);
-            // Exactly the labels asked for, lowercased and deduplicated,
-            // every one `read-only` with id 0 — what the real API
-            // answered on 2026-09-07. It attaches **no** default
-            // `self-hosted`/`linux`/`x64`; the fake once believed it did,
-            // and a runner registered on that belief would never have
-            // taken a `runs-on: [self-hosted, weft]` job.
-            let mut labels: Vec<String> = Vec::new();
-            for l in asked.iter().map(|l| l.to_ascii_lowercase()) {
-                if !labels.contains(&l) {
-                    labels.push(l);
-                }
-            }
-            let labels_json: Vec<String> = labels
-                .iter()
-                .map(|l| format!(r#"{{"id":0,"name":"{l}","type":"read-only"}}"#))
-                .collect();
-            let runner_file = format!(r#"{{"agentName":"{name}","ephemeral":true}}"#);
-            let cfg = base64_std(
-                serde_json::json!({ ".runner": base64_std(runner_file.as_bytes()) })
-                    .to_string()
-                    .as_bytes(),
-            );
-            Some((
-                "201 Created".into(),
-                vec![],
-                format!(
-                    r#"{{"runner":{{"id":{id},"name":"{name}","os":"unknown","status":"offline","busy":false,"version":"2.337.0","labels":[{}],"runner_group_id":1}},"encoded_jit_config":"{cfg}"}}"#,
-                    labels_json.join(",")
-                ),
-            ))
-        }
-        "delete" => {
-            let id = tail[0];
-            if id == "0" {
-                return not_found();
-            }
-            // A repository whose runners the installation may register
-            // but not remove — the refusal `delete_runner` logs and
-            // otherwise ignores, the runner being ephemeral anyway.
-            if owner == "nodelete" {
-                return denied("administration: write (delete)");
-            }
-            runners
-                .runner_deletes
-                .lock()
-                .unwrap()
-                .push(format!("{owner}/{repo}#{id}"));
-            Some(("204 No Content".into(), vec![], String::new()))
-        }
-        _ => {
-            let id = tail[0];
-            if owner == "noactionswrite" {
-                return denied("actions: write");
-            }
-            // A run the installation cannot see: the refusal that is
-            // neither a permission nor "already over".
-            if owner == "private" {
-                return not_found();
-            }
-            if id == "0" {
-                // BELIEF: a run that is already over. Recorded by the
-                // manual gate.
-                return Some((
-                    "409 Conflict".into(),
-                    vec![],
-                    r#"{"message":"Cannot cancel a workflow run that is completed."}"#.into(),
-                ));
-            }
-            runners
-                .cancels
-                .lock()
-                .unwrap()
-                .push(format!("{owner}/{repo}#{id}"));
-            Some(("202 Accepted".into(), vec![], "{}".into()))
-        }
-    }
-}
-
-/// Standard base64 with padding — what `encoded_jit_config` is.
-fn base64_std(data: &[u8]) -> String {
-    const T: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity(data.len().div_ceil(3) * 4);
-    for chunk in data.chunks(3) {
-        let b = [
-            chunk[0],
-            *chunk.get(1).unwrap_or(&0),
-            *chunk.get(2).unwrap_or(&0),
-        ];
-        let n = (u32::from(b[0]) << 16) | (u32::from(b[1]) << 8) | u32::from(b[2]);
-        out.push(T[(n >> 18) as usize & 63] as char);
-        out.push(T[(n >> 12) as usize & 63] as char);
-        out.push(if chunk.len() > 1 {
-            T[(n >> 6) as usize & 63] as char
-        } else {
-            '='
-        });
-        out.push(if chunk.len() > 2 {
-            T[n as usize & 63] as char
-        } else {
-            '='
-        });
-    }
-    out
 }
 
 /// The issue-import routes, answered before the general dispatch above.

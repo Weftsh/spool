@@ -389,7 +389,11 @@ export function Login(props: {
     try {
       await api.resendVerification(email.trim());
       setNote(
-        `Another confirmation link is on its way to ${email.trim()}, if it can receive mail here. Check the spam folder too — the message comes from no-reply@weft.sh.`,
+        // No sender named: the address mail comes from is the
+        // deployment's own (STRATUM_MAIL_FROM), which this page does not
+        // know. It used to name the hosted product's, which on any other
+        // deployment sent a person looking for mail nobody would send.
+        `Another confirmation link is on its way to ${email.trim()}, if it can receive mail here. Check the spam folder too.`,
       );
     } catch (err) {
       setError(

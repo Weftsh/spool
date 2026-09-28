@@ -163,20 +163,7 @@ fn spawn_child(
             .env("STRATUM_BIND", bind)
             // Background origin polling would make timing nondeterministic;
             // suites that want it turn it back on explicitly.
-            .env("STRATUM_MIRROR_POLL_SECS", "0")
-            // And the site publisher, for a sharper reason than timing.
-            //
-            // A push enqueues a `sitepublish` job; the worker claims it
-            // and reads `manifest.json`. Chaos and the fault suites arm
-            // a fault at a *named store operation* and assert on which
-            // request hits it — so a background reader can swallow the
-            // fault the driver was supposed to meet, and the count then
-            // measures the wrong thing. Silencing it here is the same
-            // answer the fault-counting rule gives everywhere else:
-            // quiet the worker, never weaken the assertion.
-            //
-            // The site suites turn it back on with `1`.
-            .env("STRATUM_SITEPUBLISH_POLL_SECS", "0");
+            .env("STRATUM_MIRROR_POLL_SECS", "0");
         // `{bind}` in a value is the address this attempt binds — the
         // only way a suite can point an env var at the server itself,
         // since the port is not known until here and changes on restart.
