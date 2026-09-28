@@ -1,11 +1,16 @@
 # Workflows
 
-Put a YAML file in `.weft/` and pushing runs it. Each job runs in a
-throwaway container on Weft's runners — or on a machine you registered
-yourself, if it asks for one — its output is a log you can read while it
-is still being written, and its verdict arrives on the commit's
-**Checks** tab as a check named after the job, where it gates landing
-exactly like a check posted by any other CI.
+Put a YAML file in `.weft/` and pushing runs it. Each job runs on a
+machine your organization registered — a **runner** — its output is a log
+you can read while it is still being written, and its verdict arrives on
+the commit's **Checks** tab as a check named after the job, where it
+gates landing exactly like a check posted by any other CI.
+
+There is no hosted fleet behind a spool server. Every job runs on a
+runner somebody in your organization registered with `weft-runner`, and
+a push with no runner that can take its jobs fails at once and says so.
+[Running a self-hosted runner](self-hosted-runners.md) is the operator's
+side of this page.
 
 This is one of two ways to get a verdict here. The other is
 [CI integration](ci-integration.md): your own CI, wherever it runs,
@@ -34,9 +39,10 @@ jobs:
 ```
 
 That is a whole workflow. On every push to any branch, and on every
-patchset of every change, one job called `test` runs two commands in a
-container holding your repository at that commit, and a check called
-`ci / test` appears on the commit.
+patchset of every change, one job called `test` runs two commands on one
+of your runners, in a fresh checkout of your repository at that commit,
+and a check called `ci / test` appears on the commit. The job names no
+`runs-on`, so any runner your organization registered may take it.
 
 ## Where the files live
 
@@ -50,6 +56,11 @@ container holding your repository at that commit, and a check called
 They are read **from the pushed commit**, not from the default branch:
 a workflow change is tested by the push that contains it, and a branch
 that has not landed yet runs its own version of the file.
+
+`.weft/site.yml` and `.weft/site.yaml` are skipped. They configure a
+static site on Weft's hosted service, which spool does not serve, and a
+repository moved here keeps them without seeing them refused as broken
+workflows.
 
 One file is one workflow, and one workflow is one run. `---` document
 separators, YAML anchors, aliases and `!` tags are all refused — anchors
@@ -84,89 +95,90 @@ changeset]` asks for both, and a repository whose file says only
 `changeset` runs nothing on its own changes. See [Composed runs for a
 changeset](#composed-runs-for-a-changeset).
 
-**A job** takes `name`, `needs`, `image` (or `container`), `runs-on`,
-`env`, `strategy`, `timeout-minutes` and `steps`.
+**A job** takes `name`, `needs`, `runs-on`, `env`, `strategy`,
+`timeout-minutes` and `steps`. `image` and `container` are read so that
+they can be refused with a reason; see [below](#image-and-container).
 
 **A step** takes `name`, `run` and `env`. `run` is required and is a
 shell command; a step with nothing to run is refused.
 
 ### `runs-on`
 
-`runs-on` picks the **pool** a job runs on, and there are two: Weft's
-runners, and machines you registered yourself.
-
-**Weft's runners** are `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-22.04`
-and `linux`. All four mean the same thing — the ordinary Linux runner,
-which is the only hosted one there is — and the key is accepted only
-because those four are unambiguous. `macos-latest` and `windows-latest`
-are refused. Running a macOS job on Linux is not a smaller version of
-what was asked for; it is a different thing reported green.
-
-**Your own machines** are a `runs-on` containing `self-hosted`:
+`runs-on` says which of your runners may take the job. Every runner
+carries the label `self-hosted`, so that label is the one every
+`runs-on` must contain:
 
 ```yaml
-runs-on: ubuntu-latest              # hosted, unchanged
-runs-on: self-hosted                # your machines; any runner allowed to take it
+# no runs-on at all                 # any runner your organization registered
+runs-on: self-hosted                # the same thing
 runs-on: [self-hosted]              # the same thing
-runs-on: [self-hosted, linux, gpu]  # …narrowed by labels
+runs-on: [self-hosted, linux, gpu]  # …narrowed to runners with these labels
 ```
 
-Every other entry in that list is a **label**, and the job goes to a
-runner whose own labels contain all of them. A label is letters, digits,
-dot, dash or underscore, at most 64 characters. Labels are **lowercased
-once, here**, and duplicates dropped, so `GPU` in the file matches `gpu`
-on the runner rather than being a job that never runs and an operator
-with nothing to look at; the order you wrote is kept, because that order
-is what the refusals below print back at you. What the labels mean is in
-[Self-hosted runners](#self-hosted-runners) below.
+Leaving `runs-on` out is the same as writing `[self-hosted]`.
 
-The two do not mix inside one `runs-on`. Naming a hosted runner *and*
-`self-hosted` in the same list is refused:
+Every other entry in the list is a **label**, and the job goes to a
+runner whose own labels contain all of them. A label is lowercase
+letters, digits, dot, dash or underscore, at most 64 characters — the
+same thing you pass to `weft-runner register --labels`. Labels are
+**lowercased once, here**, and duplicates dropped, so `GPU` in the file
+matches `gpu` on the runner rather than being a job that never runs and
+an operator with nothing to look at; the order you wrote is kept,
+because that order is what the refusals below print back at you. What
+the labels mean is in [Runners](#runners) below.
 
-```
-`runs-on` names both a hosted runner and `self-hosted`; pick one
-```
-
-A list without `self-hosted` must be exactly one hosted label, and an
-unrecognised label is refused by name as it always was — the hint now
-also tells you about the `[self-hosted, …]` form, because "`gpu` is not a
-runner we have" is unhelpful to somebody who does have a GPU machine.
-
-Different jobs in the same file may use different pools. A file whose
-`build` runs here and whose `gpu-test` runs on your hardware is
-ordinary, and `needs` between them works exactly as it does within one
-pool.
-
-### `image`
-
-`image:` and `container:` both name a container image, in either the
-scalar form (`container: node:18`) or the block form with an `image:`
-key. Both **parse**, but only `image: default` — which is what a job
-gets when it says nothing — runs on the hosted fleet. Anything else
-fails that job at dispatch with
+A `runs-on` without `self-hosted` names a machine somebody else hosts —
+`ubuntu-latest`, `macos-latest`, a pasted Actions file — and is refused
+on its line, with the fix in the hint:
 
 ```
-image "node:18" is not available on hosted runners (only default)
+`runs-on: ubuntu-latest` names a hosted runner, and this server has none
 ```
 
-so the file is legal and the job is not. A container block's
-`credentials`, `ports`, `volumes` and `options` are refused outright
-rather than dropped quietly.
+The same goes for a list without `self-hosted`, such as `[linux, gpu]`.
+With `self-hosted` in the list, every other entry is only a label:
+`[self-hosted, ubuntu-latest]` asks for a runner you registered with the
+label `ubuntu-latest`. An empty `runs-on: []` is refused too, because it
+asks for no runner at all.
 
-A [self-hosted](#what-a-self-hosted-job-gets) job has no container at
-all, so it is refused for naming an image rather than for naming the
-wrong one.
+Different jobs in the same file may ask for different labels. A file
+whose `build` runs on any runner and whose `gpu-test` asks for
+`[self-hosted, gpu]` is ordinary, and `needs` between them works as it
+does anywhere else.
+
+### `image` and `container`
+
+A job runs its steps directly on the runner's machine, as the account
+the runner runs as. There is no container to put an image in, so a job
+that names one is refused — whether it says `image: rust:1.83`,
+`container: node:18` or the block form with an `image:` key. The run
+fails at trigger time with
+
+```
+image "rust:1.83" is not available on self-hosted runners; steps run directly on the machine
+```
+
+Ignoring the line would be worse than refusing it: the build would run,
+against whatever toolchain the machine has, and report a verdict about
+the wrong thing. You choose the toolchain by building the machine, not by
+naming a tag in the file. `image: default` is accepted and means the
+same as saying nothing.
+
+A container block's `credentials`, `ports`, `volumes` and `options` are
+refused when the file is parsed.
 
 ### What is refused, and what to write instead
 
 | You wrote | What happens |
 |---|---|
 | `uses:` on a step | Refused: "this forge does not run Actions". Run the command directly with `run:` |
+| `runs-on:` without `self-hosted` | Refused on its line. Write `[self-hosted]`, `[self-hosted, <label>, …]`, or leave `runs-on` out |
+| `image:` or `container:` naming an image | The run fails at trigger time. Install the toolchain on the runner |
 | `if:` on a job | Refused, "not supported yet". A job runs when everything it `needs` has passed, and that is the only condition there is |
 | `outputs:`, `defaults:` on a job | Refused, not supported yet |
 | `strategy.fail-fast`, `strategy.max-parallel` | Refused. Both are scheduler behaviour that does not exist here, and accepting them would be a lie |
 | `env:` at the top level | Refused. Job `env:` and step `env:` are the whole of it |
-| `shell:` on a step | Refused — see [the runner environment](#the-runner-environment) for what a step actually runs under |
+| `shell:` on a step | Refused — see [the job environment](#the-job-environment) for what a step actually runs under |
 
 `uses:` is the one most people meet first, and it has no equivalent. A
 workflow here is shell commands; if an action did something you need,
@@ -210,10 +222,11 @@ jobs:
       - run: ./test.sh $WEFT_MATRIX_TOOLCHAIN
 ```
 
-Each cell is a separate job with its own container, its own log and its
-own check. A cell's name — in the run, in the log and in the check — is
-`id (v1, v2)`, values in the order the axes were declared:
-`test (linux, 1.84)`.
+Each cell is a separate job with its own working directory, its own log
+and its own check. A cell's name — in the run, in the log and in the
+check — is `id (v1, v2)`, values in the order the axes were declared:
+`test (linux, 1.84)`. Every cell inherits its job's `runs-on`: a matrix
+expands what runs, not where.
 
 - **`exclude` is applied first and `include` after**, following GitHub's
   documented order, so an `include` entry can put back a combination an
@@ -231,39 +244,242 @@ Every axis value is also in the environment as
 replaced by `_` — so `node-version` arrives as
 `WEFT_MATRIX_NODE_VERSION`.
 
-## The runner environment
+## Runners
 
-This section describes a job on **Weft's** runners. Each job is one
-**isolated task, discarded when the job ends**. It is not a machine
-shared with your other jobs, and there is nothing left over from the
-previous one. On a self-hosted runner the machine is yours and that
-guarantee is yours to provide — see [what a self-hosted job
-gets](#what-a-self-hosted-job-gets).
+A runner is a machine — a build box, a VM, a laptop, an autoscaling
+group — running `weft-runner`, the agent that asks the server for work.
+It only ever makes **outbound** calls: it asks for a job and is handed
+one or told there is nothing. Nothing connects to it, nothing has to be
+port-forwarded, and it does not need a public address. The server keeps
+everything else: the file, the checks, the log, the run page, the land
+gate.
 
-What the job can reach:
+A runner may take a job when all of these hold:
+
+1. **every label in the job's `runs-on` is one of the runner's**;
+2. **the runner's group admits the repository**;
+3. **the organization's policy admits self-hosted runners for the
+   repository**;
+4. the runner has not been removed.
+
+The admission rules are checked again at the moment a runner claims the
+job, not only when the push arrives, because a job can sit in the queue
+across a settings change.
+
+### The organization's policy
+
+Under **Settings → Runners**, which needs `org:admin`:
+
+| | |
+|---|---|
+| **Self-hosted runners** | `all` (default), `selected` — naming the repositories that may use them — or `disabled` |
+
+Since every job runs on a registered runner, `disabled` switches
+workflows off for the organization, and `selected` switches them off for
+every repository not on the list. A push to such a repository fails its
+runs with
+
+```
+self-hosted runners are not allowed for this repository (organisation policy)
+```
+
+It is a **failed run**, not a blocked one: nothing lifts by itself, and
+somebody has to edit the settings. That is the point of refusing at
+trigger time. A job queued for a runner it can never reach sits there
+looking like a build that has not started yet.
+
+Reading and writing the policy over the API:
+
+```
+GET   /v1/orgs/{org}/runner-policy
+PATCH /v1/orgs/{org}/runner-policy
+```
+
+```json
+{ "self_hosted": "selected", "self_hosted_repos": ["builds"] }
+```
+
+`PATCH` takes either or both keys, needs `org:admin`, answers `422` on a
+value outside the set above, and lands in the audit log as
+`runner_policy.updated`. `self_hosted_repos` is a list of repository
+names and is replaced whole; `[]` clears it.
+
+### Runner groups
+
+A runner belongs to exactly one **group**, and a group decides which
+repositories may send it work. Every organization has a `default` group,
+created the first time one is needed; you can make others — a group of
+GPU machines only the ML repositories may use, say.
+
+| | |
+|---|---|
+| **Repository access** | `all` repositories in the organization (default), or `selected` ones by name |
+
+```
+GET    /v1/orgs/{org}/runner-groups
+POST   /v1/orgs/{org}/runner-groups        {"name", "repo_access"?, "repos"?}
+PATCH  /v1/orgs/{org}/runner-groups/{id}   any subset of the same keys
+DELETE /v1/orgs/{org}/runner-groups/{id}
+```
+
+Reads need organization membership, writes need `org:admin`. A duplicate
+name is `409`. Deleting a group is `204` and **moves its runners to the
+default group** rather than orphaning them; the default group itself
+cannot be deleted and cannot be renamed (`422`). The three writes are
+audited as `runner_group.created`, `.updated` and `.deleted`.
+
+### Registering a machine
+
+An organization admin mints a **registration token**, under **Settings →
+Runners → Add a runner** or over the API:
+
+```
+POST /v1/orgs/{org}/runners/registration-token   {"group": "default"}
+```
+
+```json
+{ "token": "weftg_…", "expires_at": 1800000000000, "group": "default",
+  "command": "weft-runner register --url https://spool.example.com --token weftg_…" }
+```
+
+It is **single-use and expires in one hour**. It is not the runner's
+credential: it is the right to obtain one, once. The machine exchanges
+it, and from then on holds a long-lived credential of its own:
+
+```bash
+weft-runner register --url https://spool.example.com --token weftg_… --labels gpu,cuda-12
+weft-runner run
+```
+
+The URL in `command` is the server's own public URL. `register` writes
+`.runner` in its working directory (mode `0600`), holding the URL, the
+runner's id and its credential, and prints one line:
+
+```
+registered build-01 as 01hx… in group default with labels [self-hosted, linux, x64, gpu, cuda-12]
+```
+
+`run` then loops: ask for a job, run it, ask again. `--name` defaults to
+the machine's hostname and `--dir` to the current directory.
+
+**Rotating a credential is re-registering.** Running `register` again
+with the same name replaces that runner: the old credential stops working
+immediately, the runner keeps its identity in the list, and there is no
+separate rotation dance to remember. Registration is audited as
+`runner.registered`, the token mint as
+`runner.registration_token.created`.
+
+### Labels
+
+A runner's labels are what it offered plus what the server always adds:
+
+| Added always | `self-hosted`, the OS (`linux`, `macos`, `windows`), the architecture (`x64`, `arm64`) |
+|---|---|
+| Added by you | anything from `--labels`, lowercased |
+
+`runs-on: [self-hosted]` — or no `runs-on` at all — therefore means *any*
+runner the group and the policy allow, and `[self-hosted, linux, gpu]`
+narrows it.
+
+Labels are matched, never invented. If no runner could ever satisfy the
+list, the run is refused at trigger time rather than queued:
+
+```
+no runner with labels [self-hosted, gpu] is registered for this repository
+```
+
+A repository with no runners at all gets the same sentence, with
+`[self-hosted]` in it. And if the repository is allowed self-hosted
+runners but no group will serve it:
+
+```
+no runner group admits this repository; add it to a group under Settings → Runners
+```
+
+A runner that is registered but switched off still counts: the job is
+queued and waits for it, rather than being refused. The refusal is for a
+label set no runner in an admitting group has.
+
+### The runner list, and disappearing machines
+
+`GET /v1/orgs/{org}/runners` — and the same table under Settings →
+Runners — shows every runner with its labels, its group, whether it is
+ephemeral, when it was last seen, and the job it is running:
+
+| State | Means |
+|---|---|
+| `busy` | a running job is assigned to it |
+| `online` | it called in within the last 60 seconds |
+| `offline` | it did not |
+
+State is **derived on read, never stored**, so a machine that loses power
+is `offline` a minute later without anything having to notice.
+
+A runner that stays away is eventually removed for you: **14 days**
+unseen for an ordinary runner, **1 day** for an ephemeral one. That is
+housekeeping, not a policy — a laptop that was registered for an
+afternoon should not be in the list forever.
+
+**Ephemeral runners** (`--ephemeral`) take one job and exit, and the
+server removes them the moment that job reaches a terminal state. It is
+the honest way to get a clean machine per job, and it is what to reach
+for if you are autoscaling.
+
+Removing one yourself is `DELETE /v1/orgs/{org}/runners/{id}`, or
+**Remove** in the table. Its credential is dead from that moment; the
+process finds out on its next call, prints `this runner has been removed;
+register it again` and exits. A job that was running on it is **failed**,
+with
+
+```
+runner removed while the job was running
+```
+
+and it is *not* retried. A job whose runner simply went quiet — the
+machine lost power mid-build — is different: once its lease runs out,
+another runner that matches may claim it and run it again. Losing a
+runner is an accident; removing one is a decision, and quietly re-running
+the job on another of your machines is not what the person who pressed
+the button asked for. The removal is audited as `runner.removed`.
+
+## The job environment
+
+The job runs in a fresh working directory under the runner's `--dir`,
+which is removed before the job starts and again when it ends. It runs
+**as the account the runner runs as**, directly on the machine. The
+isolation between one job and the next is that directory and nothing
+more — a step can write outside it, leave a process running or start a
+daemon — so what else the job can reach is whatever you built the
+machine to allow. [Running a runner](self-hosted-runners.md#isolating-it)
+is about exactly that.
+
+What the job gets from the server:
 
 - The repository, checked out at the pushed commit, in the working
   directory every step starts in. The fetch is the **one ref** the job
   is about, with `--no-tags`.
 - A **repository-read token minted for that one job**, held in the
-  runner's own environment and never passed to a step. It expires with
-  the job and is **revoked the moment the job reports its verdict**.
-- The public internet, and nothing of Weft's beyond the runner API it
-  reports to. No database, no object store, no cloud credentials, no
-  Docker socket. The task holds no IAM role at all.
+  runner's own environment and never passed to a step or written to the
+  checkout's `.git/config`. It expires with the job and is **revoked the
+  moment the job reports its verdict**.
+- The log, streamed live to the run page, and a check on the commit.
 
 Every step runs as **`bash -e -c '<your run block>'`** in the checkout,
 with a scrubbed environment — a step does **not** inherit whatever the
-container happened to hold. So each step is one bash script: `-e` means
-a multi-line `run:` block stops at its first failing command, and `set
-+e` turns that off if you want it to. There is **no `pipefail`** unless
-you set it yourself, so `a | b` reports `b`'s status and a failure in
-`a` passes silently — put `set -o pipefail` at the top of the block if
-that matters.
+runner's own environment held. So each step is one bash script: `-e`
+means a multi-line `run:` block stops at its first failing command, and
+`set +e` turns that off if you want it to. There is **no `pipefail`**
+unless you set it yourself, so `a | b` reports `b`'s status and a
+failure in `a` passes silently — put `set -o pipefail` at the top of the
+block if that matters.
 
 Steps run in order and stop at the first failure. The log lists the ones
 that never ran, so a reader scrolling to the bottom of a failed job can
 see what did not get a chance.
+
+Whatever is on the machine's `PATH` is what the job gets. A job that
+needs a tool the machine does not have installs it in a step, or you
+install it on the machine.
 
 ### The environment a step sees
 
@@ -287,37 +503,40 @@ lowest first: the job's `env:`, then the step's `env:` — so a step's
 `env` beats the job's — and the matrix variables last under their own
 prefix where nothing can shadow them.
 
-### What is in the image
-
-`git`, `curl`, `ca-certificates`, `build-essential`, `python3` and `jq`,
-on Debian bookworm. That is the list, and a job that needs anything else
-installs it in a step. There is no Docker daemon and no Docker socket —
-a runner that can talk to a daemon can escape its container — but there
-is a `docker` that builds and runs images without one, with kaniko and
-PRoot, for `docker build`, `docker run`, `push`, `login`, `pull`,
-`images`, `tag` and `rmi`; [the GitHub runners page](/docs/github-runners/) says exactly what
-it does and does not do, and it is the same tool in both images.
+### The process ceiling
 
 **A job may have 4096 processes at once.** The runner sets that ceiling
-on the step's own process before it execs, so it counts only that job's
-processes. It is deliberately generous — a parallel build legitimately
-runs hundreds of compilers, and a bound that failed an honest `make
--j$(nproc)` would be a worse bug than the fork bomb it prevents — and it
-exists because a job that spawns until something breaks otherwise takes
-its whole host down. Past the ceiling, `fork` fails the way it does on
-any busy machine, and the step sees that error.
+(`RLIMIT_NPROC`) on the step's own process before it execs. It is
+deliberately generous — a parallel build legitimately runs hundreds of
+compilers, and a bound that failed an honest `make -j$(nproc)` would be a
+worse bug than the fork bomb it prevents — and it exists because a job
+that spawns until something breaks otherwise takes the whole machine
+down. Past the ceiling, `fork` fails the way it does on any busy machine,
+and the step sees that error. The runner's operator can lower it with
+`STRATUM_RUNNER_MAX_PROCS`.
 
-### Timeouts and concurrency
+The kernel does not apply this limit to root. A runner started as root
+says so when it starts, and its jobs have no ceiling at all — one more
+reason to run it under an account of its own.
+
+### Timeouts
 
 `timeout-minutes` defaults to **360** (six hours) and must be a whole
 number of at least 1 — a limit no run can meet is refused in the file.
-The runner enforces it; a separate sweep fails a job five minutes past its timeout if the
-runner has stopped reporting at all, so a task killed underneath you
-still gets a verdict rather than sitting `running` forever.
+The runner enforces it. If the runner stops reporting altogether, the
+server fails the job five minutes past its timeout with
 
-There is also a **fleet ceiling**, which an operator sets and which is
-six hours on our deployment. A job asking for more than that does not
-run: the whole file is a **failed run**, with the reason
+```
+timed out after 360 minutes and the runner did not report back
+```
+
+so a machine that died underneath a build still gives it a verdict
+rather than leaving it `running` forever.
+
+There is also a **ceiling**, which whoever runs the server sets with
+`STRATUM_RUNNER_MAX_TIMEOUT_MINUTES`, and which defaults to six hours. A
+job asking for more than that does not run: the whole file is a **failed
+run**, with the reason
 
 ```
 timeout-minutes: 720 exceeds this fleet's limit of 360
@@ -330,13 +549,12 @@ anything they wrote. Like the parse refusals, it is reported whatever the
 event that found it — a file that only asks for `change` still gets told
 about it on a push.
 
-An organisation runs **4 jobs at once** by default. The limit is
-enforced inside the statement that hands out work, so it holds across
-the whole fleet, and it can be raised for an organisation by name.
+There is no concurrency limit on the server. How many jobs run at once
+is how many of your runners are free.
 
 ## What happens on a push
 
-1. You push a branch. Weft reads `.weft/` **at the commit you
+1. You push a branch. The server reads `.weft/` **at the commit you
    pushed**.
 2. If this was a push to a branch other than the default branch, the
    in-flight run for that branch is **cancelled**, recorded as
@@ -350,9 +568,10 @@ the whole fleet, and it can be raised for an organisation by name.
    existing one is found and left alone.
 4. Every job in the run is written as a `queued` check on the commit,
    named `<workflow> / <job>`: `ci / test`, `ci / test (linux, 1.84)`.
-5. The dispatcher claims jobs whose dependencies have passed, mints each
-   one a token, and starts a task. The check goes to `running`, then to
-   `passing` or `failing` when the job reports.
+5. A runner that may take a job — its labels, its group and the policy
+   all admit it — claims it once every job it needs has passed, and is
+   given a token for it. The check goes to `running`, then to `passing`
+   or `failing` when the runner reports.
 6. The run is over when nothing is left queued or running: `passed` if
    everything passed, `failed` if anything failed or was cancelled.
 
@@ -360,17 +579,32 @@ A **change** is the same, keyed on the patchset rather than the branch:
 a new patchset cancels the previous patchset's runs, the run carries the
 change key, and `WEFT_EVENT` is `change`.
 
-### When the file is wrong
+### When the file is wrong, or nothing can run it
 
 A refused file is a **failed run with a failing check named after the
 file** — `.weft/ci.yml` — carrying the refusal, its line and its
 hint. It is not silence. A workflow that quietly does not run looks
 exactly like one that has not started yet, and somebody waits for it.
 
-The same is true when a deployment has no runner configured: the run
-fails at trigger time with a message naming what the operator has to
-set. And when Weft itself could not read `.weft/` at the commit —
-the store refused, say — the run fails with a check named for the
+The same is true of a file that parses but that nothing on this server
+can run. These are checked in this order, and the run carries the first
+one that applies:
+
+1. a job names an image — `image "…" is not available on self-hosted runners; …`
+2. the organization's policy does not admit self-hosted runners for the
+   repository — `self-hosted runners are not allowed for this repository (organisation policy)`
+3. no runner group admits the repository — `no runner group admits this repository; …`
+4. no registered runner has a job's labels — `no runner with labels […] is registered for this repository`
+
+Each is somebody's decision — the file's author, the organization's
+admins, whoever runs the runners — and the first thing that is wrong is
+the one worth telling. All of them settle the run as `failed`, not
+`blocked`: somebody has to edit the file or the settings, and a check
+that says "waiting" for something that will never happen is the failure
+this whole family exists to avoid.
+
+And when the server itself could not read `.weft/` at the commit — the
+store refused, say — the run fails with a check named for the
 **directory**, `.weft`, carrying the store's answer and saying that
 nothing ran: which files were there is exactly what could not be
 learned, and a push whose CI failed to start must not look like a push
@@ -378,11 +612,12 @@ whose CI has not started yet.
 
 ### Changes pushed from a fork
 
-A change whose commits come from a fork is recorded as **`blocked`**,
-not run, and its check sits at `queued` rather than red — nothing is
-wrong with the change, it is waiting on a person. Its workflow file was
-written by the contributor, and running it would hand a stranger a
-repository token and a machine. The run's reason says so:
+A change whose commits come from a [fork](forks.md) is recorded as
+**`blocked`**, not run, and its check sits at `queued` rather than red —
+nothing is wrong with the change, it is waiting on a person. Its
+workflow file was written by the contributor, and running it would hand
+somebody who may only *read* your repository a repository token and one
+of your machines. The run's reason says so:
 
 ```
 this change comes from a fork; a maintainer has to approve its workflows before they run
@@ -399,7 +634,8 @@ POST /v1/orgs/{org}/repos/{repo}/changes/{change}/workflows/approve
 and it takes the same `repo:write` as landing does. Deliberately not the
 review-approval door beside it: `POST …/approve` is a review opinion,
 which somebody with read access may hold, and holding an opinion must
-not also start compute on our fleet. Two words, two authorizations.
+not also start somebody's code on your machines. Two words, two
+authorizations.
 
 **Approval is per tip, not per change.** It starts the workflows for the
 change's *current* patchset, and a new patchset from the fork is blocked
@@ -409,27 +645,21 @@ reason.
 
 The response is `202` with the runs that now exist at that tip, read back
 from the database rather than reported optimistically: the trigger may
-legitimately have settled a run instead of starting one — an
-organisation out of minutes, a file over the timeout cap — and a caller
-told "running" about a run that is `blocked` would wait for a build that
-is not coming. `409` if the change is not open, or if nothing is blocked
-at its current tip; `404` if there is no such change, or it has no
-patchsets.
+legitimately have settled a run instead of starting one — a file over
+the timeout ceiling, labels no runner has — and a caller told "running"
+about a run that failed would wait for a build that is not coming. `409`
+if the change is not open, or if nothing is blocked at its current tip;
+`404` if there is no such change, or it has no patchsets.
+
+The refusals in the previous section are decided **before** the fork
+gate, so a fork's file that names an image, or asks for labels no runner
+has, fails at once rather than waiting for an approval that could not
+help it.
 
 **Branch on `blocked_reason`, never on the words.** Every run carries it:
-`fork`, `budget` or `suspended`, and `null` unless the run is `blocked`.
-The sentence in `error` is written for a person and will be rewritten;
-this will not, and it is the only one of the two a client should read.
-The distinction matters most here. An organisation's own refusals are
-decided **before** the fork gate, so a fork change under an organisation
-that is out of minutes or suspended is coded `budget` or `suspended`,
-not `fork` — it is blocked for a reason no maintainer can approve away.
-This route does not refuse such a change: it accepts the approval,
-re-triggers, and honestly answers `202` with a run that is *still*
-blocked, for the reason that was actually stopping it. That is the right
-answer to give and a poor thing to have asked for, which is why the
-dashboard offers the button only when `blocked_reason` is `fork`, and why
-anything else building this UI should do the same.
+`fork` when the run is `blocked`, and `null` otherwise. The sentence in
+`error` is written for a person and will be rewritten; this will not,
+and it is the only one of the two a client should read.
 
 Behind the button, the blocked run and its mirrored check row are deleted
 before the real runs are created, so one run per workflow file per commit
@@ -474,9 +704,9 @@ order, as JSON:
 ```json
 [
   {"repo": "api", "change": "Iaa000001", "commit": "9e54f5f2…",
-   "path": "/work/workspace/api"},
+   "path": "/var/lib/weft-runner/work/01hx…/workspace/api"},
   {"repo": "web", "change": "Ibb000002", "commit": "3c1d90ab…",
-   "path": "/work/workspace/web"}
+   "path": "/var/lib/weft-runner/work/01hx…/workspace/web"}
 ]
 ```
 
@@ -487,9 +717,9 @@ the workspace is laid out.
 The job's own repository is checked out with the job token as it always
 was; each sibling is fetched with a fresh repository-read token minted
 for *that one repository*, and all of them are revoked when the job
-reports. There is deliberately no organisation-wide read token here: a
+reports. There is deliberately no organization-wide read token here: a
 member's CI script is code its author wrote, and one token that could
-read the whole organisation would let that script read repositories the
+read the whole organization would let that script read repositories the
 author cannot see. Like the job token, none of them is ever put in an
 environment a step can read, or printed in a log.
 
@@ -538,10 +768,10 @@ member's change comes from a fork and no maintainer has approved that
 tip yet, **every** member's composed run is `blocked` with
 `blocked_reason` `fork` — not only the fork member's own. A composed job
 is the one place where that has to be true: the job runs in a
-maintainer's own repository, but it materialises the stranger's tree
+maintainer's own repository, but it materialises the contributor's tree
 beside it under `$WEFT_WORKSPACE`, and the maintainer's own script is
 free to build it, test it, or execute it. Blocking only the fork
-member's run would leave a stranger's code being run by three
+member's run would leave the contributor's code being run by three
 repositories that never asked.
 
 Approving the fork change's workflows — the same button and the same
@@ -549,113 +779,20 @@ Approving the fork change's workflows — the same button and the same
 composition, and the held runs start. A tip already approved stays
 approved: recomposing does not put it back behind the button.
 
-## Hosted-runner minutes
+## Mining software
 
-A hosted fleet is somebody's compute bill, so an organisation has a
-budget of minutes and it can run out. How many is the operator's choice —
-the reference deployment gives an organisation **2000** minutes per
-rolling thirty days, and a self-hosted Weft can set any number or turn
-metering off entirely, in which case everything below is inert there.
+A runner executes a `run:` line somebody wrote, on a machine you pay
+for, and the thing people most often do with somebody else's CPU is mine
+cryptocurrency. Three things stand in the way of that on a spool server.
+Each can be walked around on its own, which is why there are several.
 
-**How the number is arrived at.** Usage is counted **per job, rounded
-up**: a job that ran for eleven seconds costs a minute, because a minute
-is the smallest thing the fleet bills. Summing raw milliseconds and
-rounding once at the end would let a thousand ten-second jobs cost almost
-nothing, which is exactly the shape of a workload you would want to
-notice. The window is a **rolling thirty days**, not a calendar month —
-a calendar month hands every tenant the same reset instant, which is both
-a stampede on the first and an obvious way to abuse the budget: burn the
-allowance, wait for midnight, burn it again.
-
-**A job still running counts from the moment it started.** The number
-moves while builds run, which is what somebody watching the page expects
-to see, and it means an organisation cannot hide its usage by keeping
-everything in flight.
-
-**GitHub Actions jobs count too.** A job that ran on this fleet from a
-workflow kept on GitHub — `runs-on: weft`, see
-[Weft runners for GitHub Actions](/docs/github-runners/) — draws from
-the same budget, rounded up the same way and multiplied by its size:
-`weft` at 1×, `weft-2x` at 2×, `weft-4x` at 4×. The billing page says
-how much of the total those were.
-
-**Where to read it.** Settings → Billing, in the organisation's
-dashboard, and on `GET /v1/orgs/{org}/billing`, which carries
-`ci_minutes_limit`, `ci_minutes_used` and `ci_minutes_remaining` (plus
-`ci_suspended_reason` and `ci_suspended_at`, below).
-
-**`null` is not zero.** A `null` limit means *unlimited* — no override on
-the organisation and no deployment default, which is the right default
-for a deployment paying its own compute bill. "0 minutes left" and "no
-limit at all" are opposite facts and a panel that rendered them the same
-way would be worse than showing nothing.
-
-`ci_minutes_limit` is therefore **never `0`**: a budget of zero is read
-as "no budget configured", so an unmetered organisation reports `null`
-for both `ci_minutes_limit` and `ci_minutes_remaining`. The zero that
-means *metered and out* is `ci_minutes_remaining: 0`, which is a real
-state and the one worth rendering loudly. It is floored there rather than
-going negative — a running job may take an organisation past its limit,
-since nothing is killed for budget — so `used` can legitimately exceed
-`limit` while `remaining` reads `0`.
-
-**When the budget is gone,** a push does not fail and it does not run:
-each workflow file gets a `blocked` run carrying, on a free organization
-or a personal namespace,
-
-```
-this organisation has used its 500 hosted-runner minutes for the month
-```
-
-with the number that was actually configured — "for the month" there is
-the rolling thirty days above; there is no reset date to wait for, and
-the oldest minutes fall out of the window as they age — and, on a paid
-organization whose pool and spend limit are both spent,
-
-```
-quota: hosted minutes are past this organization's pool and its spend limit — the job waits; raise the limit in Settings → Billing, or run it on your own runner
-```
-
-because a paid organization has a way out that costs money as well as
-the one that costs none (see [Billing](/docs/billing/#the-spend-limit)).
-It is refused at trigger
-time, where there is still somebody to tell — a job that quietly never
-got claimed leaves a build that looks like it has not started yet. The
-dispatcher asks again before it claims a job, because an organisation can
-cross its budget between queueing and claiming; a job that crossed it
-while waiting is cancelled with the same reason and no task is launched.
-
-**A running job is never killed for budget.** It is bounded by its
-timeout, and the minutes it spends are counted. The budget decides what
-starts, not what stops.
-
-An organisation's allowance is set by an operator, not from the
-dashboard: the deployment has a default for every organisation and an
-operator can override it for one by name. If you run Weft yourself,
-the statement to run is in `docs/deployment-aws.md` in the repository.
-
-## What is refused for abuse
-
-A hosted runner executes a `run:` line somebody wrote, on a machine we
-pay for. The one thing that is worth real money to steal here is CPU, and
-the thing people do with stolen CPU is mine cryptocurrency. Four separate
-things stand in the way of that, deliberately, because every one of them
-can be walked around on its own.
-
-**1 — nothing can reach a mining pool.** All egress from the runner VPC
-goes through a firewall with a domain **allowlist** and a default drop.
-There is no pool to dial and no open proxy to dial it through. This holds
-against a miner nobody has heard of and against one that arrives inside a
-dependency, which is why it is first. It is also why a build that needs
-an unlisted domain sees a dropped connection: the allowlist is the
-product, not a bug in it.
-
-**2 — the file is refused when you push it.** A workflow that names known
+**1 — the file is refused when you push it.** A workflow that names known
 mining software as a command, or that carries a mining pool URL, does not
 schedule anything at all. Both `run:` lines and `env:` values are read —
 `run: ./m $POOL` says nothing on its own, so a check that read only
 `run:` would be walked around by the first person who tried. The refusal
-is the ordinary kind, with the file, the line and a hint:
+is the ordinary kind, with the file, the line and a hint. Its wording
+still comes from the hosted service:
 
 ```
 mining software is not permitted on hosted runners
@@ -666,7 +803,7 @@ The pool schemes are `stratum+tcp://`, `stratum+ssl://`, `stratum2+tcp://`
 and `stratum+tls://`, matched anywhere on a `run:` line or in any `env:`
 value — no build has a use for one, so the scheme alone is enough.
 
-A miner name has to be **invoked as a command** for the run: check to
+A miner name has to be **invoked as a command** for the `run:` check to
 fire: `grep -rn xmrig .`, a step that writes `xmrig.log`, and a README
 quoting this paragraph are all somebody working, and a refusal that
 cannot tell those apart is one people learn to route around rather than
@@ -677,15 +814,15 @@ an `env:` **value** only the URL half applies: a value containing the
 word `xmrig` is somebody naming a file.
 
 This layer is a refusal, not a detector. `curl -o m https://…/x && ./m`
-walks straight past it, which is exactly why there are four layers.
+walks straight past it.
 
-**3 — a running step is killed.** While a step runs, the processes in its
-group are sampled every two seconds and read from `/proc`. A process is a
-miner if its **program** is one — its `comm`, or the basename of
-`argv[0]`, never an argument — or if a pool URL appears anywhere in its
-`argv`, since a renamed binary still has to be told where to send its
-shares. When one is found the whole process group is killed and the job
-ends `failed` with
+**2 — a running step is killed.** While a step runs, the runner samples
+the processes in its group every two seconds and reads them from
+`/proc`. A process is a miner if its **program** is one — its `comm`, or
+the basename of `argv[0]`, never an argument — or if a pool URL appears
+anywhere in its `argv`, since a renamed binary still has to be told
+where to send its shares. When one is found the whole process group is
+killed and the job ends `failed` with
 
 ```
 ✗ Build stopped: mining software detected: xmrig (3s)
@@ -697,40 +834,21 @@ Nothing here is measured: there is no CPU heuristic on purpose, because a
 release build with `-j8` looks exactly like a miner to one, and a compile
 flagged as abuse is a person locked out of their own forge.
 
-**4 — the organisation is suspended.** A verdict that reports abuse
-switches hosted workflows off for the whole organisation, not just that
-repository: everything it has running, in every repository it owns, is
-cancelled, and every later trigger is `blocked` with
+**3 — it is recorded.** The server writes a `workflow.abuse` entry to
+the organization's audit log, naming the runner, the job and the run, so
+an admin can see what happened and whose change it was. Nothing is
+switched off: the machine is yours, and what to do next is your
+decision.
 
-```
-hosted workflows are suspended for this organisation: mining software detected: xmrig
-```
+What spool does not give you is network control. Where a runner's
+traffic may go is decided by the network you put it on — see
+[Isolating it](self-hosted-runners.md#isolating-it).
 
-— the runner's own sentence, because it names what was found. It is
-recorded in the audit log as `workflow.suspended`. The **first** reason
-stands: a second offence does not overwrite the explanation somebody is
-in the middle of acting on with an identical-looking one bearing a later
-timestamp.
-
-The reason and the time also appear on the billing view, as
-`ci_suspended_reason` and `ci_suspended_at`, so the page a member goes to
-when their builds stop says why.
-
-**Clearing a suspension is an operator action, by SQL.** There is no
-route and no button, because there is no operator role on this server to
-hang one off and inventing one here would be a security surface built in
-passing. If you run Weft yourself, the statement is in
-`docs/deployment-aws.md`; on a hosted deployment, ask whoever operates
-it.
-
-### The audit trail for both of these
-
-Two events, and between them they are the whole record of a run that was
-held and what happened next:
+### The audit trail
 
 | Action | Recorded when | Details |
 |---|---|---|
-| `workflow.suspended` | a verdict reports abuse | `abuse`, `reason`, `job`, `run` |
+| `workflow.abuse` | a runner stops a job for abuse | `abuse`, `reason`, `pool` (always `self_hosted`), `runner`, `job`, `run` |
 | `workflow.approved` | somebody approves a fork's workflows | `change_key`, `commit` (the tip approved), `files` (the workflow files that were being held) |
 
 `workflow.approved` carries the approving principal, like every audit
@@ -740,281 +858,6 @@ afterwards remembers that these files were ever held. This row is the
 only surviving record that they were, and who let them go. It names the
 files for the same reason — "approved the workflows" without saying which
 is not a trail anybody can audit.
-
-## Self-hosted runners
-
-A job that says `runs-on: [self-hosted]` runs on a machine **you**
-registered — your laptop, a box under a desk, an autoscaling group, a
-GPU host that could never be a line item on our fleet. Weft keeps
-everything else: the file, the checks, the log, the run page, the land
-gate. What changes is whose CPU it is, and therefore who is responsible
-for what the job can reach.
-
-A runner only ever makes **outbound** calls. It asks for work, and it is
-handed a job or told there is nothing. Nothing of ours connects to it,
-nothing has to be port-forwarded, and it does not need a public address.
-[Running a runner](self-hosted-runners.md) is the operator's side of
-this page: the binary, a systemd unit, and how to isolate it.
-
-### The organisation's policy
-
-Under **Settings → Runners**, which needs `org:admin` like Billing:
-
-| | |
-|---|---|
-| **Weft-hosted runners** | `allowed` (default) or `disabled` |
-| **Self-hosted runners** | `all` (default), `selected` — naming the repositories that may use them — or `disabled` |
-
-An organisation that only trusts its own machines sets hosted to
-`disabled`, and a `runs-on: ubuntu-latest` file is then refused at
-trigger time with
-
-```
-hosted runners are disabled for this organisation; use runs-on: [self-hosted, …]
-```
-
-and a self-hosted job in an organisation that has not enabled them, or
-in a repository that is not one of the `selected` ones, is refused with
-
-```
-self-hosted runners are not allowed for this repository (organisation policy)
-```
-
-Both are **failed runs**, not blocked ones: nothing lifts by itself, and
-somebody has to edit either the file or the settings. That is the whole
-point of refusing at trigger time. A job queued against a pool it can
-never reach sits there looking like a build that has not started yet,
-which is the single most common thing people ask about somebody else's
-self-hosted setup.
-
-Reading and writing the policy over the API:
-
-```
-GET   /v1/orgs/{org}/runner-policy
-PATCH /v1/orgs/{org}/runner-policy
-```
-
-```json
-{ "hosted": "allowed", "self_hosted": "selected", "self_hosted_repos": ["builds"] }
-```
-
-`PATCH` takes any subset of those three keys, needs `org:admin`, answers
-`422` on a value outside the sets above, and lands in the audit log as
-`runner_policy.updated`.
-
-### Runner groups
-
-A runner belongs to exactly one **group**, and a group decides which
-repositories may send it work. Every organisation has a `default` group,
-created the first time one is needed; you can make others.
-
-| | |
-|---|---|
-| **Repository access** | `all` repositories in the organisation, or `selected` ones by name |
-| **Allow public repositories** | off by default |
-
-**Public repositories are excluded until you say otherwise, and that
-default is the important one.** Anybody may fork a public repository and
-open a change; the change carries its own `.weft/*.yml`; and a
-workflow file is a shell script. A group that admits public repositories
-is a group whose machines will, sooner or later, be asked to run a
-stranger's code as the runner's own user, on your network. The
-[fork-approval gate](#changes-pushed-from-a-fork) still stands in front
-of that — a maintainer has to press **Approve and run workflows** for
-each new tip — but a gate a tired person clicks through is one layer, not
-two, so the group starts closed.
-
-```
-GET    /v1/orgs/{org}/runner-groups
-POST   /v1/orgs/{org}/runner-groups        {"name", "repo_access"?, "allow_public"?, "repos"?}
-PATCH  /v1/orgs/{org}/runner-groups/{id}   any subset of the same keys
-DELETE /v1/orgs/{org}/runner-groups/{id}
-```
-
-Reads need organisation membership, writes need `org:admin`. A duplicate
-name is `409`. Deleting a group is `204` and **moves its runners to the
-default group** rather than orphaning them; the default group itself
-cannot be deleted and cannot be renamed (`422`). The three writes are
-audited as `runner_group.created`, `.updated` and `.deleted`.
-
-### Registering a machine
-
-An organisation admin mints a **registration token**:
-
-```
-POST /v1/orgs/{org}/runners/registration-token   {"group": "default"}
-```
-
-```json
-{ "token": "weftg_…", "expires_at": 1800000000000, "group": "default",
-  "command": "weft-runner register --url https://weft.sh --token weftg_…" }
-```
-
-It is **single-use and expires in one hour**. It is not the runner's
-credential: it is the right to obtain one, once. The machine exchanges
-it, and from then on holds a long-lived credential of its own:
-
-```bash
-weft-runner register --url https://weft.sh --token weftg_… --labels gpu,cuda-12
-weft-runner run
-```
-
-`register` writes `.runner` in its working directory (mode `0600`),
-holding the URL, the runner's id and its credential, and prints one line:
-
-```
-registered build-01 as rnr_… in group default with labels [self-hosted, linux, x64, gpu, cuda-12]
-```
-
-`run` then loops: ask for a job, run it, ask again. `--name` defaults to
-the machine's hostname and `--dir` to the current directory.
-
-**Rotating a credential is re-registering.** Running `register` again
-with the same name replaces that runner: the old credential stops working
-immediately, the runner keeps its identity in the list, and there is no
-separate rotation dance to remember. Registration is audited as
-`runner.registered`, the token mint as
-`runner.registration_token.created`.
-
-### Labels
-
-A runner's labels are what it offered plus what the server always adds:
-
-| Added always | `self-hosted`, the OS (`linux`, `macos`, `windows`), the architecture (`x64`, `arm64`) |
-|---|---|
-| Added by you | anything from `--labels`, lowercase |
-
-A job may run on a runner when **every label in its `runs-on` is one of
-the runner's**, the runner's group admits the repository, the
-organisation's policy admits self-hosted for that repository, and the
-runner has not been removed. `runs-on: [self-hosted]` on its own
-therefore means *any* machine the first three rules allow, and
-`[self-hosted, linux, gpu]` narrows it.
-
-Labels are matched, never invented. If no runner could ever satisfy the
-list, the run is refused at trigger time rather than queued:
-
-```
-no runner with labels [self-hosted, gpu] is registered for this repository
-```
-
-and if the repository is allowed self-hosted runners but no group will
-serve it — most often a public repository and no group with **allow
-public repositories** turned on:
-
-```
-no runner group admits this repository; add it to a group under Settings → Runners
-```
-
-### What a self-hosted job gets
-
-Everything a hosted job gets from Weft, and nothing a hosted job gets
-from the fleet:
-
-- The same **repository-read token minted for that one job**, expiring
-  with the job and revoked the moment it reports. The runner holds it;
-  steps never see it.
-- The same environment — `CI`, `WEFT_JOB`, `WEFT_SHA`,
-  `WEFT_REF`, `WEFT_EVENT`, `WEFT_CHANGE`, the matrix variables
-  — under the same rules, and the same `bash -e -c` per step.
-- The same log, streamed live to the same run page, and the same check
-  on the commit under the same name. Nothing downstream can tell the two
-  apart, which is the point.
-
-The job runs in a fresh working directory under the runner's own
-directory, which is removed when the job ends. It runs **as the user the
-runner runs as**, directly on the machine — so the process ceiling and
-the egress allowlist described above are properties of *our* fleet and
-not of yours, and the isolation between one job and the next is whatever
-you built. [Running a runner](self-hosted-runners.md) is about
-exactly that.
-
-Because there is no container, there is nothing for `image:` to name. A
-self-hosted job asking for one is refused at trigger time:
-
-```
-image "rust:1.83" is not available on self-hosted runners; steps run directly on the machine
-```
-
-Whatever is on that machine's `PATH` is what the job gets, which is the
-trade: you choose the toolchain by building the machine, not by naming a
-tag in the file.
-
-**Ephemeral runners** (`--ephemeral`) take one job and exit, and the
-server removes them the moment that job reaches a terminal state. It is
-the honest way to get a clean machine per job, and it is what to reach
-for if you are autoscaling.
-
-### The runner list, and disappearing machines
-
-`GET /v1/orgs/{org}/runners` — and the same table under Settings →
-Runners — shows every runner with its labels, its group, whether it is
-ephemeral, when it was last seen, and the job it is running:
-
-| State | Means |
-|---|---|
-| `busy` | a running job is assigned to it |
-| `online` | it called in within the last 60 seconds |
-| `offline` | it did not |
-
-State is **derived on read, never stored**, so a machine that loses power
-is `offline` a minute later without anything having to notice.
-
-A runner that stays away is eventually removed for you: **14 days**
-unseen for an ordinary runner, **1 day** for an ephemeral one. That is
-housekeeping, not a policy — a laptop that was registered for an
-afternoon should not be in the list forever.
-
-Removing one yourself is `DELETE /v1/orgs/{org}/runners/{id}`, or
-**Remove** in the table. Its credential is dead from that moment; the
-process finds out on its next call, prints `this runner has been removed;
-register it again` and exits. A job that was running on it is **failed**,
-with
-
-```
-runner removed while the job was running
-```
-
-and it is *not* retried. The dispatcher retries a job whose runner was
-lost, because losing a runner is an accident; removing one is a decision,
-and quietly re-running the job on another of your machines is not what
-the person who pressed the button asked for. The removal is audited as
-`runner.removed`.
-
-### What is the same, and what is not
-
-**Minutes are not metered.** [Hosted-runner
-minutes](#hosted-runner-minutes) count hosted jobs and only hosted jobs —
-it is your hardware and your electricity bill. So a file whose jobs are
-all self-hosted runs when the organisation is out of minutes, and runs
-when the organisation's hosted workflows are suspended: those two
-refusals apply only to files that contain a hosted job. A mixed file is
-refused as a whole, because it contains one.
-
-**The fork gate applies to both pools**, and matters more here. A change
-from a fork is `blocked` until a maintainer approves it, per tip, exactly
-as [described above](#changes-pushed-from-a-fork). On our fleet that
-protects our bill; on yours it protects your machine.
-
-**A miner is still killed, and your organisation is not suspended.** The
-[mining watch](#what-is-refused-for-abuse) runs wherever the runner runs:
-the file is refused when you push it, and a step caught running a miner
-has its whole process group killed and the job failed with the same
-sentence,
-
-```
-✗ Build stopped: mining software detected: xmrig (3s)
-```
-
-because a stranger's change mining on *your* hardware is the thing the
-watch exists to stop. What does **not** happen is the fourth layer:
-hosted workflows are not switched off for the organisation, because
-there is no compute bill of ours being stolen. The event is still
-recorded as `workflow.abuse`, carrying `pool: self_hosted`, so it is in
-the audit log for you to act on.
-
-The egress allowlist is not there either. Ours is a firewall in front of
-our VPC; your runner's network is yours.
 
 ## Checking a file before you push
 
@@ -1037,24 +880,27 @@ curl -sS "$WEFT_URL/v1/orgs/$ORG/repos/$REPO/workflows?at=my-branch" \
 
 An `ok: false` entry carries a `problems` array instead, each with
 `line`, `key`, `message`, `hint` and a pre-rendered `text`. It costs
-nothing and it is the difference between learning about `uses:` now and
-learning about it from a red push.
+nothing and it is the difference between learning about `uses:` or
+`runs-on: ubuntu-latest` now and learning about it from a red push.
+
+This reads the file only. Whether a runner exists for its labels is
+decided when a push arrives.
 
 ## The run page
 
-Every check a hosted job writes carries a **Details** link to that run's
-page in the dashboard, at `/<org>/<repo>/checks/runs/<run id>`. It shows
-the run's state, the commit and branch it is about, a link to the change
-if it came from one, the run's own error verbatim when there is one —
-the refused line of YAML, the cycle in `needs:` — and one panel per job.
-Selecting a job shows its log; while the job is live the page reads the
-same SSE stream described below, so the output arrives as it is written
-rather than on a refresh. A viewer with `repo:write` gets a **Cancel
-run** control there, which is the `cancel` route below. A job that ran on
-one of your own machines is labelled with the runner that took it.
+Every check a workflow job writes carries a **Details** link to that
+run's page in the dashboard, at `/<org>/<repo>/checks/runs/<run id>`. It
+shows the run's state, the commit and branch it is about, a link to the
+change if it came from one, the run's own error verbatim when there is
+one — the refused line of YAML, the cycle in `needs:` — and one panel per
+job, labelled with the runner that took it. Selecting a job shows its
+log; while the job is live the page reads the same SSE stream described
+below, so the output arrives as it is written rather than on a refresh.
+A viewer with `repo:write` gets a **Cancel run** control there, which is
+the `cancel` route below.
 
 There is no page that lists a repository's runs. The Checks tab lists
-the *checks*, hosted ones beside everybody else's, and a row is how you
+the *checks*, workflow ones beside everybody else's, and a row is how you
 reach its run.
 
 ## Runs, jobs and logs over the API
@@ -1073,17 +919,16 @@ Everything below needs `repo:read`, except cancel, which needs
 A run carries `id`, `file`, `name`, `commit_sha`, `ref_name`, `event`,
 `change_key`, `state`, `error`, `blocked_reason`, timestamps, and `jobs`.
 Run `state` is one of `running`, `passed`, `failed`, `cancelled`,
-`blocked`; `blocked_reason` is `fork`, `budget` or `suspended`, and
-`null` for every state but `blocked`. A job carries `id`, `job_id`,
-`key`, `matrix` (an object), `state`, `attempts`, `error`, `detail_url`,
-`log_chunks` and timestamps; job `state` is one of `queued`, `running`,
-`passed`, `failed`, `skipped`, `cancelled`.
+`blocked`; `blocked_reason` is `fork` for a blocked run and `null` for
+every other. A job carries `id`, `job_id`, `key`, `matrix` (an object),
+`state`, `attempts`, `error`, `detail_url`, `log_chunks` and timestamps;
+job `state` is one of `queued`, `running`, `passed`, `failed`,
+`skipped`, `cancelled`.
 
-A job also carries `pool` (`hosted` or `self_hosted`), the `labels` its
-`runs-on` asked for, and `runner` — `{"id", "name"}` for a job that ran
-on one of your machines, `null` otherwise. Branch on `pool`, not on
-whether `runner` happens to be set: a self-hosted job that has not been
-claimed yet has no runner either.
+A job also carries the `labels` its `runs-on` asked for, and `runner` —
+`{"id", "name"}` once a runner has claimed it, `null` before that. Its
+`pool` is always `self_hosted`; the field is kept so that clients written
+for Weft's hosted service keep working.
 
 **`commit_sha` and `change_key` narrow the query, not the page.** The
 filtering happens in the database, inside `limit`, which is the whole
@@ -1094,7 +939,8 @@ A panel that filters a window is a panel that loses its own controls
 exactly when the repository is busiest.
 
 A run or job belonging to another repository answers `404`, not `403`.
-An id that resolves differently for a stranger is an existence oracle.
+An id that resolves differently for somebody who cannot read it is an
+existence oracle.
 
 ### The live log
 
@@ -1112,24 +958,25 @@ together would disagree with the plain `…/log` route beside it. The feed
 polls the same stored chunks that route reads, so the two can never
 disagree, and it is held open for at most six hours.
 
-Logs live in object storage under a lifecycle rule and age out — **90
-days** on the reference AWS deployment (`ci_log_retention_days`). They
-are not permanent records.
+Logs live in the object store under `ci/logs/`. How long they are kept
+is up to whoever runs the server: the AWS reference deployment expires
+them after **90 days** (`ci_log_retention_days`). They are not permanent
+records.
 
-## How verdicts reach the rest of Weft
+## How verdicts reach the rest of spool
 
 Each job mirrors itself into one check row on its commit, named
 `<workflow name> / <job key>` and linking back to the run it came from
 at `/<org>/<repo>/checks/runs/<run id>`, and that is the whole
-integration. A workflow file we refused gets a row of its own, named for
-the file, and a `.weft/` we could not read gets one named for the
-directory; each links to the run that carries the reason — the row is
-the only thing on the commit page that says why nothing ran. The
-Checks tab, the change under review, the land queue and the README badge
-were all built for verdicts other people's build systems reached, and
-they need to know nothing about this one.
+integration. A workflow file the server refused gets a row of its own,
+named for the file, and a `.weft/` it could not read gets one named for
+the directory; each links to the run that carries the reason — the row
+is the only thing on the commit page that says why nothing ran. The
+Checks tab, the change under review and the land queue were all built for
+verdicts other people's build systems reached, and they need to know
+nothing about this one.
 
-A hosted row carries `provider: "weft"`, which is the server saying
+A workflow row carries `provider: "weft"`, which is the server saying
 *we wrote this*: the intake stamps `provider: "intake"` as a constant,
 so nothing posted from outside can claim it. That is what lets the
 **Details** link navigate inside the dashboard instead of opening a new
@@ -1138,8 +985,8 @@ tab the way a link to somebody else's build system does.
 So everything on [CI integration](ci-integration.md) applies
 unchanged: a `failing` check blocks the land queue, a check you have
 [made required](ci-integration.md#making-a-check-required) must go
-green before a change may land, and `ci / test` from a hosted workflow
-and `ci/tests` from Buildkite sit in the same list under the same rules.
+green before a change may land, and `ci / test` from a workflow and
+`ci/tests` from Buildkite sit in the same list under the same rules.
 
 Required-check names are matched against the check's name, so the name
 to require is the mirrored one — `ci / test`, including the spaces.
@@ -1159,18 +1006,16 @@ it.
 Said plainly, with no dates attached:
 
 - **No re-run button, and no re-run route.** Push again, or cancel and
-  push again. (The dispatcher retries a job whose *runner* was lost;
-  that is a different thing, and it is not something you can ask for.)
+  push again. (A job whose *runner* went quiet is claimed again by
+  another runner once its lease runs out; that is a different thing, and
+  it is not something you can ask for.)
 - **No artifacts and no caches.** Nothing is kept from a job but its log
-  and its verdict. A job that needs a dependency downloads it.
+  and its verdict. A job that needs a dependency downloads it, or finds
+  it already on the machine.
+- **No containers.** A job runs on the runner's machine directly; to
+  run jobs in a container, run the runner in one
+  ([`Dockerfile.runner`](self-hosted-runners.md#getting-the-binary)).
 - **No annotations.** A verdict and a log, not marks on the diff.
-- **No way to clear a suspension from the product.** Suspending an
-  organisation for abuse is automatic; switching it back on is an
-  operator running SQL, because there is no operator role here to give a
-  route to.
-- **No images but `default`.** The parser takes `image:` so that a
-  workflow written today reads correctly later; the fleet runs one image
-  today.
 - **No list of runs in the dashboard.** A run has a page and its log
   tails live there, but the way to it is a check row's **Details** link
   or, for a composed run, the Changeset builds panel on the Checks tab;
@@ -1179,8 +1024,4 @@ Said plainly, with no dates attached:
 - **No scheduled or manual triggers.** `push`, `change` and `changeset`
   are the three doors, and all three are something that happened to the
   repository.
-- **No composed clone URL, and no workspace page.** A composed run
-  materialises the members on the runner; there is no way yet to check
-  the same set out on your own machine, and no screen that lists a
-  changeset's members at their proposed heads.
 - **No conditions, no job outputs, no service containers.**

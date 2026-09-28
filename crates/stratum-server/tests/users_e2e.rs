@@ -1463,8 +1463,15 @@ fn set_cookie_on_login(server: &Server) -> String {
 }
 
 /// A signed-in person is not a member of every org. Against another org's
-/// private repo their session must be masked exactly as a foreign token
-/// is — 404, not 403 — while a public repo stays readable by anyone.
+/// repositories their session must be masked exactly as a foreign token
+/// is — 404, not 403 — for a read and for a write, and indistinguishably
+/// from a name the org does not have.
+///
+/// This used to carry a public half: an outsider's session read a public
+/// repository and was refused a push to it. Every repository is private
+/// now, so the half that survives is the one that was always about
+/// private repositories, made total — and the member beside the
+/// outsider proves the masking is about the outsider, not the route.
 #[test]
 fn a_session_from_another_org_is_masked_from_private_repos() {
     let minio = Minio::shared();
@@ -1473,13 +1480,13 @@ fn a_session_from_another_org_is_masked_from_private_repos() {
     let server = spawn_server(&bucket.base_url, &scratch);
     let acme = org_with_owner(&server, "acme", "owner@acme.test");
     org_with_owner(&server, "bravo", "outsider@bravo.test");
-    for (name, public) in [("private", false), ("open", true)] {
+    for name in ["private", "open"] {
         assert_eq!(
             server
                 .post(
                     "/v1/orgs/acme/repos",
                     &acme,
-                    Some(serde_json::json!({"name": name, "public": public}))
+                    Some(serde_json::json!({ "name": name }))
                 )
                 .0,
             201
@@ -1488,31 +1495,53 @@ fn a_session_from_another_org_is_masked_from_private_repos() {
 
     let mut outsider = Browser::new(&server);
     outsider.login("outsider@bravo.test", "a long enough password");
-    assert_eq!(
-        outsider.req("GET", "/v1/orgs/acme/repos/private", None).0,
-        404,
-        "a private repo must be masked from a signed-in outsider"
+    let mut owner = Browser::new(&server);
+    owner.login("owner@acme.test", "a long enough password");
+    let commit = serde_json::json!({
+        "message": "not mine",
+        "operations": [{"op": "put", "path": "x", "content": "x"}]
+    });
+    for name in ["private", "open", "never-was"] {
+        let path = format!("/v1/orgs/acme/repos/{name}");
+        assert_eq!(
+            outsider.req("GET", &path, None).0,
+            404,
+            "acme/{name} must be masked from a signed-in outsider"
+        );
+        // Reading is not all they are refused: a write is masked the
+        // same way, never a 403 that would confirm the name.
+        assert_eq!(
+            outsider
+                .req("POST", &format!("{path}/commits"), Some(commit.clone()))
+                .0,
+            404,
+            "a write to acme/{name} told an outsider something"
+        );
+        assert_eq!(
+            server.req("GET", &path, "", None).0,
+            401,
+            "acme/{name} answered a caller with no credential"
+        );
+    }
+    for name in ["private", "open"] {
+        assert_eq!(
+            owner
+                .req("GET", &format!("/v1/orgs/acme/repos/{name}"), None)
+                .0,
+            200,
+            "a member could not read acme/{name}"
+        );
+    }
+    // Nothing the outsider sent landed.
+    let (st, branches) = owner.req("GET", "/v1/orgs/acme/repos/open/branches", None);
+    assert_eq!(st, 200, "{branches}");
+    assert!(
+        branches["branches"]
+            .as_array()
+            .is_some_and(|b| b.is_empty()),
+        "{branches}"
     );
-    assert_eq!(
-        outsider.req("GET", "/v1/orgs/acme/repos/open", None).0,
-        200,
-        "a public repo is readable by anyone"
-    );
-    // …but reading is all they get on it.
-    assert_ne!(
-        outsider
-            .req(
-                "POST",
-                "/v1/orgs/acme/repos/open/commits",
-                Some(serde_json::json!({
-                    "message": "not mine",
-                    "operations": [{"op": "put", "path": "x", "content": "x"}]
-                })),
-            )
-            .0,
-        201,
-        "public means readable, not writable"
-    );
+    assert!(server.healthy());
 }
 
 /// One person, several orgs, is the normal case — so `user-create` for an
