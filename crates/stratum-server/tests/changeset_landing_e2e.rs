@@ -548,9 +548,10 @@ fn a_changeset_lands_every_member_or_refuses_before_writing_anything() {
     );
     approve(&server, "oa@acme.test", "api", "Iaa000001");
 
-    // Who may land: the same rule as composing. A viewer, a stranger and
-    // nobody are told there is no changeset; a hostile key is a 400 or a
-    // 404; an unknown org is a 404.
+    // Who may land: the same rule as composing. A viewer and a stranger
+    // are told there is no changeset, and nobody at all is asked who they
+    // are before anything is looked up; a hostile key is a 400 or a 404;
+    // an unknown org is a 404.
     let vic = sign_in(&server, "vic@acme.test");
     let (st, out) = as_person(&server, &vic, "POST", &format!("{CS}/Ic5000001/land"));
     assert_eq!(st, 404, "a viewer landing: {out}");
@@ -558,7 +559,7 @@ fn a_changeset_lands_every_member_or_refuses_before_writing_anything() {
     let (st, out) = server.post(&format!("{CS}/Ic5000001/land"), &rival, None);
     assert_eq!(st, 404, "{out}");
     let (st, out) = server.post(&format!("{CS}/Ic5000001/land"), "", None);
-    assert_eq!(st, 404, "{out}");
+    assert_eq!(st, 401, "{out}");
     let (st, out) = server.post("/v1/orgs/nobody/changesets/Ic5000001/land", &admin, None);
     assert_eq!(st, 404, "{out}");
     let (st, out) = land("Ic5000009");

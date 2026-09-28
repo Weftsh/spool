@@ -741,8 +741,8 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     assert_eq!(st, 200, "{body}");
     assert_eq!(body["viewed"], serde_json::json!(["b.txt"]), "{body}");
 
-    // He joins the conversation, as himself — "sign in to comment" is for
-    // somebody who has not.
+    // He joins the conversation, as himself: the comment is his, not the
+    // organisation's.
     let comments = "/v1/orgs/acme/repos/app/changes/I0000f00d/comments";
     let (st, body) = bob.req(
         "POST",

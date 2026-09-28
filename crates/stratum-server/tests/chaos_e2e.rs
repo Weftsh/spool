@@ -50,7 +50,6 @@ use stratum_testkit::browser::Browser;
 use stratum_testkit::closure;
 use stratum_testkit::faultproxy::{Fault, FaultHandle, FaultPlan, FaultRule};
 use stratum_testkit::gitcli::{self, Scratch};
-use stratum_testkit::mailbox::Mailbox;
 use stratum_testkit::{FaultProxy, Minio, Server};
 
 /// The seed CI runs unless told otherwise. Changing it changes which
@@ -1161,52 +1160,51 @@ fn one_frozen_prefix_does_not_stop_a_healthy_one() {
     assert!(server.healthy());
 }
 
-/// Sign somebody up, verify them, and hand back a **personal** token.
+/// Somebody made the way an operator makes them — `admin user-create`
+/// into `org` at `role`, which gives them their own personal namespace
+/// too — and a token of theirs bound to `token_org`.
 ///
-/// Forking takes a person — `caller_person` refuses a repository-scoped
-/// token because it has no namespace of its own — and only signup mints
-/// a personal namespace, so `bootstrap_org` cannot stand in here the way
-/// it does for the rest of this file.
-///
-/// A token rather than a session because this test restarts the node,
-/// and a `Browser` borrows the `Server` it was made from.
-fn person(server: &Server, mail: &Mailbox, handle: &str) -> String {
+/// A person rather than `bootstrap_org`'s service token, because
+/// forking takes one: `caller_person` refuses a token with nobody
+/// behind it, and a fork lands in its person's namespace. A token rather
+/// than a session because this test restarts the node, and a `Browser`
+/// borrows the `Server` it was made from.
+fn person(server: &Server, handle: &str, org: &str, role: &str, token_org: &str) -> String {
     let email = format!("{handle}@example.com");
-    let (st, body) = server.req(
-        "POST",
-        "/v1/auth/signup",
-        "",
-        Some(serde_json::json!({
-            "handle": handle,
-            "email": email,
-            "name": handle,
-            "password": "a long enough password",
-        })),
-    );
-    assert_eq!(st, 202, "signup {handle}: {body}");
-    let msg = mail.wait_for(&email, Duration::from_secs(10));
-    let link = msg.link().unwrap_or_else(|| panic!("no link in {msg:?}"));
-    let verify = link
-        .split_once("#verify=")
-        .unwrap_or_else(|| panic!("{link} carries no #verify="))
-        .1
-        .to_string();
-    let mut b = Browser::new(server);
-    let (st, body) = b.req(
-        "POST",
-        "/v1/auth/verify",
-        Some(serde_json::json!({ "token": verify })),
-    );
-    assert_eq!(st, 200, "verify {handle}: {body}");
+    server.admin_json(&[
+        "admin",
+        "user-create",
+        "--org",
+        org,
+        "--role",
+        role,
+        "--email",
+        &email,
+        "--password",
+        "a long enough password",
+        "--handle",
+        handle,
+    ]);
+    let mut b = Browser::signed_in(server, &email, "a long enough password");
     // No `repo` scope: bound to a repository it would be an automation
     // rather than a person, and forking would correctly refuse it.
     let (st, minted) = b.req(
         "POST",
-        &format!("/v1/orgs/{handle}/tokens"),
+        &format!("/v1/orgs/{token_org}/tokens"),
         Some(serde_json::json!({ "scopes": ["repo:read", "repo:write"], "label": "cli" })),
     );
     assert_eq!(st, 201, "mint {handle} token: {minted}");
     minted["token"].as_str().expect("token").to_string()
+}
+
+/// `ada` owns `acme`, where the upstream lives; `bob` may read it —
+/// every repository is private to its organisation, so a role in `acme`
+/// is the only way he can fork it — and forks into his own namespace.
+fn ada_and_bob(server: &Server) -> (String, String) {
+    server.bootstrap_org("acme");
+    let ada = person(server, "ada", "acme", "owner", "acme");
+    let bob = person(server, "bob", "acme", "viewer", "bob");
+    (ada, bob)
 }
 
 /// A signed-in session for `handle`, as its cookie. A fork reads one
@@ -1235,18 +1233,6 @@ fn as_session(
     b.req(method, path, body)
 }
 
-/// `owner` invites `guest` in as a viewer. Every repository is private
-/// to its organisation, so this is the only way `guest` can read — and
-/// so fork — one of `owner`'s.
-fn let_in(server: &Server, owner: &str, guest: &str) {
-    let mut b = Browser::signed_in(
-        server,
-        &format!("{owner}@example.com"),
-        "a long enough password",
-    );
-    b.invite_and_accept(owner, &format!("{guest}@example.com"), "viewer");
-}
-
 /// A fork is two writes in two systems that share no transaction: an
 /// `epoch_refs` row in Postgres, then a `locator.hdr` in the object
 /// store. The order is the correctness argument — reference first,
@@ -1267,8 +1253,7 @@ fn let_in(server: &Server, owner: &str, guest: &str) {
 fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
     let rig = rig("chaos-fork");
     let store = rig.store();
-    let mail = Mailbox::temp("chaos-fork");
-    let mut env: Vec<(&str, String)> = vec![
+    let env: Vec<(&str, String)> = vec![
         ("STRATUM_COMPACT_POLL_SECS", "0".into()),
         ("STRATUM_GC_SECS", "0".into()),
         ("STRATUM_FORK_POLL_SECS", "1".into()),
@@ -1277,21 +1262,16 @@ fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
         // here; the production default is five minutes.
         ("STRATUM_FORK_LEASE_SECS", "3".into()),
     ];
-    for (k, v) in mail.env() {
-        env.push((k, v.to_string()));
-    }
     let mut server = rig.server("chaos-fork", &env);
 
-    let ada = person(&server, &mail, "ada");
-    let bob = person(&server, &mail, "bob");
+    let (ada, bob) = ada_and_bob(&server);
     let (st, body) = server.req(
         "POST",
-        "/v1/orgs/ada/repos",
+        "/v1/orgs/acme/repos",
         &ada,
         Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
-    let_in(&server, "ada", "bob");
     let bob_session = session(&server, "bob");
     let up_prefix = format!(
         "o/{}/r/{}/prod",
@@ -1304,9 +1284,9 @@ fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
     // write and no window to die in — and compaction only folds once the
     // WAL is deep enough, which is why this is nine commits and not one.
     for i in 0..9 {
-        commit(&server, &ada, "/v1/orgs/ada/repos/widget", i);
+        commit(&server, &ada, "/v1/orgs/acme/repos/widget", i);
     }
-    let (st, out) = server.req("POST", "/v1/orgs/ada/repos/widget/compact", &ada, None);
+    let (st, out) = server.req("POST", "/v1/orgs/acme/repos/widget/compact", &ada, None);
     assert_eq!(st, 200, "compact: {out}");
     // The precondition, stated rather than assumed: a run where the fold
     // declined would arm a kill that never fires and prove nothing.
@@ -1344,7 +1324,7 @@ fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
         &server,
         &bob_session,
         "POST",
-        "/v1/orgs/ada/repos/widget/forks",
+        "/v1/orgs/acme/repos/widget/forks",
         None,
     );
     assert_eq!(st, 202, "{body}");
@@ -1394,9 +1374,9 @@ fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
     // rather than against a number hard-coded here: the fork must serve
     // exactly the history it forked, whatever that turns out to be.
     let up_clone = rig.scratch.path().join("upstream-clone");
-    let up_tip = gitcli::clone_and_fsck(&format!("{}/ada/widget.git", server.base), &up_clone);
+    let up_tip = gitcli::clone_and_fsck(&server.authed_url(&ada, "acme", "widget"), &up_clone);
     let clone = rig.scratch.path().join("fork-clone");
-    let fork_tip = gitcli::clone_and_fsck(&format!("{}/bob/widget.git", server.base), &clone);
+    let fork_tip = gitcli::clone_and_fsck(&server.authed_url(&bob, "bob", "widget"), &clone);
     assert_eq!(
         fork_tip, up_tip,
         "the resumed fork does not serve upstream's tip"
@@ -1434,8 +1414,7 @@ fn a_crash_between_the_epoch_reference_and_the_fork_pointer_resumes() {
 #[ignore = "chaos: parks a clone mid-stream; run with --ignored (see the module docs)"]
 fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
     let rig = rig("chaos-fork-i8");
-    let mail = Mailbox::temp("chaos-fork-i8");
-    let mut env: Vec<(&str, String)> = vec![
+    let env: Vec<(&str, String)> = vec![
         ("STRATUM_COMPACT_POLL_SECS", "0".into()),
         ("STRATUM_GC_SECS", "0".into()),
         // The clone has to stream from segments for this to test
@@ -1445,21 +1424,16 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
         ("STRATUM_FORK_POLL_SECS", "1".into()),
         ("STRATUM_FORK_LEASE_SECS", "3".into()),
     ];
-    for (k, v) in mail.env() {
-        env.push((k, v.to_string()));
-    }
     let server = rig.server("chaos-fork-i8", &env);
 
-    let ada = person(&server, &mail, "ada");
-    let bob = person(&server, &mail, "bob");
+    let (ada, bob) = ada_and_bob(&server);
     let (st, body) = server.req(
         "POST",
-        "/v1/orgs/ada/repos",
+        "/v1/orgs/acme/repos",
         &ada,
         Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
-    let_in(&server, "ada", "bob");
     let bob_session = session(&server, "bob");
     let up_prefix = format!(
         "o/{}/r/{}/prod",
@@ -1468,9 +1442,9 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
     );
 
     for i in 0..9 {
-        commit(&server, &ada, "/v1/orgs/ada/repos/widget", i);
+        commit(&server, &ada, "/v1/orgs/acme/repos/widget", i);
     }
-    let (st, out) = server.req("POST", "/v1/orgs/ada/repos/widget/compact", &ada, None);
+    let (st, out) = server.req("POST", "/v1/orgs/acme/repos/widget/compact", &ada, None);
     assert_eq!(st, 200, "compact: {out}");
     assert_eq!(out["outcome"], "Compacted", "the fold declined: {out}");
 
@@ -1490,7 +1464,7 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
         &server,
         &bob_session,
         "POST",
-        "/v1/orgs/ada/repos/widget/forks",
+        "/v1/orgs/acme/repos/widget/forks",
         None,
     );
     assert_eq!(st, 202, "{body}");
@@ -1510,9 +1484,9 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
     // gives up after its own timeout, so the only thing that may happen
     // while the clone is held is the sweep itself.
     for i in 9..19 {
-        commit(&server, &ada, "/v1/orgs/ada/repos/widget", i);
+        commit(&server, &ada, "/v1/orgs/acme/repos/widget", i);
     }
-    let (st, out) = server.req("POST", "/v1/orgs/ada/repos/widget/compact", &ada, None);
+    let (st, out) = server.req("POST", "/v1/orgs/acme/repos/widget/compact", &ada, None);
     assert_eq!(st, 200, "second compact: {out}");
     assert_eq!(out["outcome"], "Compacted", "{out}");
     let after: Manifest =
@@ -1545,7 +1519,7 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
         ),
     );
 
-    let fork_url = format!("{}/bob/widget.git", server.base);
+    let fork_url = server.authed_url(&bob, "bob", "widget");
     let clone_dir = rig.scratch.path().join("inflight-clone");
     let cloner = std::thread::spawn(move || {
         gitcli::clone_and_fsck(&fork_url, &clone_dir);
@@ -1573,7 +1547,7 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
     let objects_before = direct.list(&shared_dir).unwrap().len();
     let (st, report) = server.req(
         "POST",
-        "/v1/orgs/ada/repos/widget/gc",
+        "/v1/orgs/acme/repos/widget/gc",
         &ada,
         Some(serde_json::json!({ "grace_secs": 0 })),
     );
@@ -1614,8 +1588,7 @@ fn upstream_may_not_sweep_an_epoch_a_fork_is_cloning_from() {
 #[ignore = "chaos: races GC against a fork; run with --ignored (see the module docs)"]
 fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
     let rig = rig("chaos-fork-race");
-    let mail = Mailbox::temp("chaos-fork-race");
-    let mut env: Vec<(&str, String)> = vec![
+    let env: Vec<(&str, String)> = vec![
         ("STRATUM_COMPACT_POLL_SECS", "0".into()),
         // The sweeper runs continuously at the tightest interval it
         // takes, so it is genuinely racing rather than invited in.
@@ -1625,25 +1598,20 @@ fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
         ("STRATUM_FORK_POLL_SECS", "1".into()),
         ("STRATUM_FORK_LEASE_SECS", "3".into()),
     ];
-    for (k, v) in mail.env() {
-        env.push((k, v.to_string()));
-    }
     let server = rig.server("chaos-fork-race", &env);
 
-    let ada = person(&server, &mail, "ada");
-    let bob = person(&server, &mail, "bob");
+    let (ada, bob) = ada_and_bob(&server);
     let (st, body) = server.req(
         "POST",
-        "/v1/orgs/ada/repos",
+        "/v1/orgs/acme/repos",
         &ada,
         Some(serde_json::json!({ "name": "widget" })),
     );
     assert_eq!(st, 201, "{body}");
-    let_in(&server, "ada", "bob");
     let bob_session = session(&server, "bob");
 
     for i in 0..9 {
-        commit(&server, &ada, "/v1/orgs/ada/repos/widget", i);
+        commit(&server, &ada, "/v1/orgs/acme/repos/widget", i);
     }
     // Every fold here runs with the sweeper held off: with no grace, a
     // sweep landing between the new epoch's upload and its pointer swap
@@ -1652,7 +1620,7 @@ fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
     // is a different race from the one under test (see `hold_sweeps`),
     // and it fails the run at a `commit`, not at a fork.
     let quiet = hold_sweeps(&server);
-    let (st, out) = server.req("POST", "/v1/orgs/ada/repos/widget/compact", &ada, None);
+    let (st, out) = server.req("POST", "/v1/orgs/acme/repos/widget/compact", &ada, None);
     assert_eq!(st, 200, "compact: {out}");
     assert_eq!(out["outcome"], "Compacted", "{out}");
     drop(quiet);
@@ -1667,7 +1635,7 @@ fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
             &server,
             &bob_session,
             "POST",
-            "/v1/orgs/ada/repos/widget/forks",
+            "/v1/orgs/acme/repos/widget/forks",
             Some(serde_json::json!({ "name": name })),
         );
         assert_eq!(st, 202, "fork {n}: {body}");
@@ -1677,10 +1645,10 @@ fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
         // that read it is still running.
         if n % 3 == 2 {
             for i in 0..9 {
-                commit(&server, &ada, "/v1/orgs/ada/repos/widget", i);
+                commit(&server, &ada, "/v1/orgs/acme/repos/widget", i);
             }
             let quiet = hold_sweeps(&server);
-            let (st, out) = server.req("POST", "/v1/orgs/ada/repos/widget/compact", &ada, None);
+            let (st, out) = server.req("POST", "/v1/orgs/acme/repos/widget/compact", &ada, None);
             assert_eq!(st, 200, "fold {n}: {out}");
             drop(quiet);
         }
@@ -1707,7 +1675,7 @@ fn a_sweep_racing_a_fork_leaves_it_readable_or_absent_but_never_hollow() {
         assert_eq!(state, "ready", "{name} never finished: {state:?}");
 
         let dest = rig.scratch.path().join(format!("clone-{name}"));
-        let url = format!("{}/bob/{name}.git", server.base);
+        let url = server.authed_url(&bob, "bob", name);
         gitcli::clone_and_fsck(&url, &dest);
         assert!(
             gitcli::git(&dest, &["log", "--oneline"]).lines().count() > 0,
