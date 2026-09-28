@@ -482,13 +482,14 @@ claimed; the `jobs` table in the database says which.
 
 ## Security notes
 
-- **Accounts.** Anyone who can reach the dashboard can create an
-  account; it cannot create anything until its address is confirmed by
-  mail, and it sees no organisation's private repositories until it is
-  invited. If the server is reachable from the internet and mail is
-  configured, expect strangers to be able to make accounts with
-  personal namespaces. Keep the server on a private network or behind
-  your SSO proxy if that is not acceptable.
+- **Accounts.** Nobody can make their own account. An account comes
+  from an organisation admin's invitation, accepted by the person it
+  was mailed to, or from `admin user-create`; signing in with GitHub
+  only reaches an account that already exists. A signed-out visitor
+  cannot tell which organisations or people exist: a name nobody holds
+  answers exactly as one they may not see. The sign-in page itself is
+  still reachable by anybody who can reach the server, so keep it on a
+  private network if that is not acceptable.
 - **Database.** The server connects to PostgreSQL without TLS. Keep the
   database on a network only the server can reach (the compose file and
   the AWS deployment both do).
