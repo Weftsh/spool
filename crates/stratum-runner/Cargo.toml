@@ -3,6 +3,7 @@ name = "stratum-runner"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 # The package keeps the workspace's name; the binary a person installs,
 # runs under systemd and types into a shell is the product's.

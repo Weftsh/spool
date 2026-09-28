@@ -1,11 +1,9 @@
-//! Self-hosted mode: register once, then ask for work until stopped.
+//! The agent: register once, then ask for work until stopped.
 //!
-//! The hosted runner is handed a job by the dispatcher and dies with it.
-//! A self-hosted runner is somebody else's machine, which we cannot reach
-//! and must never need to: every call here is **outbound**, nothing
-//! listens, and the only credential on the machine is one this runner
-//! exchanged for itself and that its operator can revoke from the runner
-//! list.
+//! A runner is somebody else's machine, which the server cannot reach and
+//! must never need to: every call here is **outbound**, nothing listens,
+//! and the only credential on the machine is one this runner exchanged
+//! for itself and that its operator can revoke from the runner list.
 //!
 //! Two commands, and the seam between them is a file:
 //!
@@ -14,11 +12,11 @@
 //!   0600. That is the only time a registration token is on disk, and it
 //!   never is: it arrives as an argument and leaves as a request body.
 //! - `run` reads `DIR/.runner` and long-polls `POST /v1/runners/claim`. A
-//!   claimed job is handed the *same* per-job token a hosted runner gets,
-//!   so everything after the claim — the spec fetch, the checkout, the
-//!   steps, the miner watch, the verdict — is [`crate::run_with`],
-//!   unchanged and already proven. Self-hosted mode adds a loop and a
-//!   credential; it does not add a second way to run a job.
+//!   claimed job comes with a per-job token scoped to that job, and
+//!   everything after the claim — the spec fetch, the checkout, the
+//!   steps, the miner watch, the verdict — is [`crate::run_with`]. The
+//!   agent adds a loop and a credential around it; it does not add a
+//!   second way to run a job.
 //!
 //! **Nothing here holds the claim thread's socket open past a stop.** The
 //! claim blocks for up to 25 seconds by design — the server long-polls, so
@@ -299,7 +297,67 @@ impl Default for Params {
 }
 
 pub fn run(o: &RunOpts) -> i32 {
-    run_with(o, &Params::default(), signals::stop_flag())
+    start(
+        o,
+        |key| std::env::var_os(key).map(|v| v.to_string_lossy().into_owned()),
+        signals::stop_flag(),
+    )
+}
+
+/// [`run`], with the environment it reads passed in, so that a test can
+/// hand it a malformed knob without writing to the process-wide
+/// environment every other test in the suite is reading.
+///
+/// The knobs are read before `.runner` is, so a service unit with a typo
+/// in it fails the same way whether or not the machine has registered.
+fn start(o: &RunOpts, env: impl Fn(&str) -> Option<String>, stop: &'static AtomicBool) -> i32 {
+    match params_from(env) {
+        Ok(p) => run_with(o, &p, stop),
+        Err(e) => {
+            eprintln!("weft-runner: {e}");
+            2
+        }
+    }
+}
+
+/// The defaults, with the two knobs an operator may turn from the
+/// environment `run` is started in:
+///
+/// - `STRATUM_RUNNER_MAX_PROCS`, the ceiling on a step's processes (see
+///   [`steps::MAX_PROCS`]) — lowered where a job should have less of the
+///   machine, and by the end-to-end suite to prove the bound without
+///   forking the machine it runs on into the ground;
+/// - `STRATUM_RUNNER_FLUSH_MS`, how often a running job's log is sent.
+///
+/// Unset and empty mean the same thing, so a service unit can clear one
+/// with `Environment=NAME=`. Anything else that is not a whole number
+/// above zero is refused, by name, rather than ignored: an operator who
+/// meant to lower the ceiling and typoed it would otherwise run with the
+/// default and believe they had not. Zero is refused with the rest,
+/// because it reads as "no limit" and means the opposite — every fork a
+/// step makes, `git`'s own included, would fail — and a flush every 0 ms
+/// is a log thread spinning a core.
+fn params_from(env: impl Fn(&str) -> Option<String>) -> Result<Params, String> {
+    let mut p = Params::default();
+    if let Some(n) = knob(&env, "STRATUM_RUNNER_MAX_PROCS")? {
+        p.max_procs = n;
+    }
+    if let Some(ms) = knob(&env, "STRATUM_RUNNER_FLUSH_MS")? {
+        p.log.flush = Duration::from_millis(ms);
+    }
+    Ok(p)
+}
+
+fn knob(env: &impl Fn(&str) -> Option<String>, key: &str) -> Result<Option<u64>, String> {
+    match env(key).filter(|v| !v.is_empty()) {
+        None => Ok(None),
+        Some(v) => match v.parse::<u64>() {
+            Ok(n) if n > 0 => Ok(Some(n)),
+            _ => Err(format!(
+                "{key} must be a whole number above zero, not {v:?}"
+            )),
+        },
+    }
 }
 
 /// The loop, with the flag a signal raises passed in — the same injection,
@@ -317,6 +375,10 @@ pub fn run_with(o: &RunOpts, p: &Params, stop: &'static AtomicBool) -> i32 {
         .timeout_connect(p.connect_timeout)
         .timeout_read(p.claim_timeout)
         .build();
+    // SAFETY: geteuid has no preconditions and cannot fail.
+    if let Some(warning) = root_warning(unsafe { libc::geteuid() }) {
+        eprintln!("{warning}");
+    }
     println!("listening as {} ({})", reg.name, reg.labels.join(", "));
     loop {
         if stop.load(Ordering::SeqCst) {
@@ -361,6 +423,24 @@ pub fn run_with(o: &RunOpts, p: &Params, stop: &'static AtomicBool) -> i32 {
             }
         }
     }
+}
+
+/// What an agent started as root says before it takes any work.
+///
+/// A step runs as whoever started `weft-runner`, and the process ceiling
+/// that stops a fork bomb ([`steps::MAX_PROCS`]) is `RLIMIT_NPROC`, which
+/// the kernel does not apply to root. So an agent run as root — the
+/// default for a service unit that names no `User=` — runs every
+/// workflow step with the whole machine and no bound on what it forks.
+/// Said at startup, where the person installing it is looking, rather
+/// than refused: a disposable build VM is a reasonable place to run as
+/// root, and it is the operator's machine to decide about.
+fn root_warning(euid: u32) -> Option<&'static str> {
+    (euid == 0).then_some(
+        "weft-runner: warning: running as root — every workflow step runs as root on \
+         this machine, and the process ceiling that stops a fork bomb does not apply \
+         to root. Run the agent under an account of its own.",
+    )
 }
 
 /// A job this runner has been given, and the credentials to do it with.
@@ -424,12 +504,11 @@ fn job_from(body: &str) -> Claim {
         Ok(v) => v,
         Err(e) => return Claim::Trouble(format!("the claim answer is not JSON: {e}")),
     };
-    // `runner_url` is read deliberately not at all. The server tells a
-    // hosted runner where it is, and that answer is its own public URL —
-    // right for a container the server started on its own network, wrong
-    // for somebody else's machine, which may be behind NAT, on the other
-    // side of a proxy, or reaching us by a name only it knows. The URL
-    // this runner registered with is the one that has been proved to work
+    // `runner_url` is read deliberately not at all. It is the address the
+    // server believes it is reachable at, which is wrong as often as not
+    // from somebody else's machine — behind NAT, on the other side of a
+    // proxy, or reaching the server by a name only it knows. The URL this
+    // runner registered with is the one that has been proved to work
     // from here, so that is the one the job runs against.
     let (Some(job_id), Some(token)) = (v["job_id"].as_str(), v["token"].as_str()) else {
         return Claim::Trouble(format!(
@@ -464,13 +543,13 @@ fn is_name(s: &str) -> bool {
 /// The job itself, in a directory of its own that exists only while it
 /// runs.
 ///
-/// Removed before *and* after: a hosted runner gets isolation from the
-/// container going away, and this one has to build the same property out
-/// of a directory. Before, because a machine that was killed mid-job left
-/// the last one's checkout there; after, because the next job on this
-/// machine belongs to somebody else and a leftover `.git` with somebody
-/// else's credential in its config is exactly what self-hosted mode must
-/// not accumulate.
+/// Removed before *and* after: nothing tears this machine down between
+/// two jobs, so the isolation between them has to be built out of a
+/// directory. Before, because a machine that was killed mid-job left the
+/// last one's checkout there; after, because the next job on this machine
+/// may belong to somebody else and a leftover `.git` with somebody else's
+/// credential in its config is exactly what a shared machine must not
+/// accumulate.
 fn run_job(url: &str, dir: &Path, job: &Job, p: &Params, stop: &'static AtomicBool) -> i32 {
     let work = dir.join("work").join(&job.job_id);
     let _ = std::fs::remove_dir_all(&work);
@@ -491,14 +570,14 @@ fn run_job(url: &str, dir: &Path, job: &Job, p: &Params, stop: &'static AtomicBo
 
 /// `clone_url` with its origin replaced by `base`'s.
 ///
-/// The control plane builds a job's clone URL from `STRATUM_RUNNER_URL`,
-/// the address its own fleet reaches it at — a private listener, or
-/// `host.docker.internal` on a laptop. This machine is not on that
-/// network; the one address it knows it can reach is the one it
-/// registered with, so the repository path is kept and everything before
-/// it is swapped for that. Only `http(s)` URLs have an origin to swap;
-/// anything else (a path, in the unit tests) is returned unchanged, and so
-/// is a URL too malformed to have a path.
+/// The server builds a job's clone URL from its own `STRATUM_RUNNER_URL`
+/// setting — a private listener, or `host.docker.internal` on a laptop —
+/// which says nothing about what this machine can reach. The one address
+/// this machine knows it can reach is the one it registered with, so the
+/// repository path is kept and everything before it is swapped for that.
+/// Only `http(s)` URLs have an origin to swap; anything else (a path, in
+/// the unit tests) is returned unchanged, and so is a URL too malformed to
+/// have a path.
 pub(crate) fn clone_url_via(base: &str, clone_url: &str) -> String {
     let rest = clone_url
         .strip_prefix("http://")
@@ -543,7 +622,18 @@ mod tests {
         }};
     }
 
-    /// The fleet's address is swapped for the one this machine
+    /// Root is warned about, by what it costs; nobody else is.
+    #[test]
+    fn only_an_agent_running_as_root_is_warned() {
+        let said = root_warning(0).expect("root is warned");
+        assert!(said.contains("running as root"), "{said}");
+        assert!(said.contains("process ceiling"), "{said}");
+        for uid in [1, 1000, 65534] {
+            assert_eq!(root_warning(uid), None, "uid {uid}");
+        }
+    }
+
+    /// The server's own address is swapped for the one this machine
     /// registered with; the repository path, and anything that is not an
     /// http(s) URL, is left exactly as it came.
     #[test]
@@ -942,7 +1032,7 @@ mod tests {
 
     // --------------------------------------------------------- the loop
 
-    /// The whole of self-hosted mode in one test: claim, run a real step
+    /// The whole of the agent in one test: claim, run a real step
     /// against a real checkout, report the verdict, and go back to asking.
     #[test]
     fn the_agent_claims_a_job_runs_it_reports_it_and_asks_again() {
@@ -1371,5 +1461,122 @@ mod tests {
         assert_eq!(p.max_procs, steps::MAX_PROCS);
         assert_eq!(sentence(500, ""), "500: ");
         assert_eq!(snippet(&"x".repeat(400)).len(), 200);
+    }
+
+    // ------------------------------------------------------------ the knobs
+
+    /// An environment of exactly these variables, so that no test here
+    /// writes to the process's own — which every other test in the suite
+    /// is reading at the same time.
+    fn env_of(pairs: &'static [(&'static str, &'static str)]) -> impl Fn(&str) -> Option<String> {
+        move |k: &str| {
+            pairs
+                .iter()
+                .find(|(name, _)| *name == k)
+                .map(|(_, v)| v.to_string())
+        }
+    }
+
+    #[test]
+    fn run_takes_the_process_ceiling_and_the_flush_cadence_from_its_environment() {
+        let p = params_from(env_of(&[])).expect("nothing set");
+        assert_eq!(p.max_procs, steps::MAX_PROCS);
+        assert_eq!(p.log.flush, LogConfig::default().flush);
+
+        let p = params_from(env_of(&[
+            ("STRATUM_RUNNER_MAX_PROCS", "64"),
+            ("STRATUM_RUNNER_FLUSH_MS", "50"),
+        ]))
+        .expect("both set");
+        assert_eq!(p.max_procs, 64);
+        assert_eq!(p.log.flush, Duration::from_millis(50));
+        // Those two and nothing else: the claim cadence is not a knob.
+        assert_eq!(p.claim_timeout, Params::default().claim_timeout);
+        assert_eq!(p.log.heartbeat, LogConfig::default().heartbeat);
+
+        // Set to nothing is unset — what `Environment=NAME=` in a service
+        // unit leaves behind — rather than a malformed number.
+        let p = params_from(env_of(&[
+            ("STRATUM_RUNNER_MAX_PROCS", ""),
+            ("STRATUM_RUNNER_FLUSH_MS", ""),
+        ]))
+        .expect("both cleared");
+        assert_eq!(p.max_procs, steps::MAX_PROCS);
+        assert_eq!(p.log.flush, LogConfig::default().flush);
+    }
+
+    /// Refused by name, never ignored — and zero with the rest, because an
+    /// operator who writes `0` for the ceiling means "no limit" and would
+    /// get "no forks".
+    #[test]
+    fn a_knob_that_is_not_a_whole_number_above_zero_is_refused_by_name() {
+        for key in ["STRATUM_RUNNER_MAX_PROCS", "STRATUM_RUNNER_FLUSH_MS"] {
+            for bad in ["lots", "0", "-5", "1.5", " 64", "99999999999999999999"] {
+                let e = params_from(|k| (k == key).then(|| bad.to_string()))
+                    .map(|_| ())
+                    .expect_err("must refuse");
+                assert_eq!(
+                    e,
+                    format!("{key} must be a whole number above zero, not {bad:?}")
+                );
+            }
+        }
+    }
+
+    /// A malformed knob stops `run` before anything else happens: exit 2,
+    /// the code a mistyped command line gets, and not one claim — a runner
+    /// that took a job with a ceiling its operator did not mean is the
+    /// failure the refusal exists for.
+    #[test]
+    fn a_run_with_a_malformed_knob_exits_two_without_asking_for_work() {
+        let cp = FakeCp::start();
+        let dir = TestDir::new("badknob");
+        registered(&cp, dir.path(), false);
+        let stop = stop_flag!();
+        assert_eq!(
+            start(
+                &RunOpts {
+                    dir: dir.path().to_path_buf()
+                },
+                env_of(&[("STRATUM_RUNNER_MAX_PROCS", "lots")]),
+                stop
+            ),
+            2
+        );
+        assert_eq!(cp.state().claim_calls, 0, "it never asked for work");
+    }
+
+    /// …and a well-formed one reaches the step itself. `ulimit -u` is the
+    /// shell reporting its own `RLIMIT_NPROC`, so this is the child's view
+    /// of the ceiling, not the agent's idea of it.
+    #[test]
+    fn the_process_ceiling_from_the_environment_reaches_the_step() {
+        let cp = FakeCp::start();
+        let dir = TestDir::new("knob");
+        registered(&cp, dir.path(), true);
+        let (url, shas) = checkout::tests::origin(dir.path());
+        let mut doc = spec_json(serde_json::json!([
+            {"name": "Limits", "run": "ulimit -Su; ulimit -Hu"},
+        ]));
+        doc["clone_url"] = serde_json::Value::String(url);
+        doc["commit_sha"] = serde_json::Value::String(shas.split(' ').nth(1).expect("sha").into());
+        cp.set_spec(&doc);
+        cp.script_claim(vec![job_reply(&cp, "job1")]);
+
+        let stop = stop_flag!();
+        assert_eq!(
+            start(
+                &RunOpts {
+                    dir: dir.path().to_path_buf()
+                },
+                env_of(&[("STRATUM_RUNNER_MAX_PROCS", "512")]),
+                stop
+            ),
+            0
+        );
+        let s = cp.state();
+        assert_eq!(s.finish, Some(("passed".into(), None)));
+        let log = s.final_log.expect("log");
+        assert!(log.contains("512\n512\n"), "soft and hard, both 512: {log}");
     }
 }

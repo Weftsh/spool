@@ -1,22 +1,21 @@
-//! Being stopped: what a `StopTask` has to mean to a job that is running.
+//! Being stopped: what a SIGTERM has to mean to a job that is running.
 //!
-//! A superseded run is stopped with `docker stop` / an ECS `StopTask`,
-//! which is SIGTERM and then SIGKILL thirty seconds later. Neither default
-//! disposition is survivable for us. As an ordinary child the runner dies
-//! *instantly*, in the middle of a step: the log writer's pending bytes are
-//! never flushed, and — worse — the step is its own process group, so the
-//! `cargo build` it spawned is orphaned and keeps burning the task's CPU
-//! until the container itself is torn down. As PID 1 with no init to
-//! forward it, SIGTERM is ignored outright and the job runs happily to the
-//! end of a run nobody wants any more.
+//! An operator stops the agent with Ctrl-C, `systemctl stop` — SIGTERM,
+//! then SIGKILL when `TimeoutStopSec` runs out — or `docker stop`, which
+//! is the same pair thirty seconds apart. Neither default disposition is
+//! survivable for us. As an ordinary process the runner dies *instantly*,
+//! in the middle of a step: the log writer's pending bytes are never
+//! flushed, and — worse — the step is its own process group, so the
+//! `cargo build` it spawned is orphaned and keeps burning the machine's
+//! CPU with nobody left to stop it. As PID 1 in a container with no init
+//! to forward it, SIGTERM is ignored outright and the job runs happily to
+//! the end of a run nobody is waiting for.
 //!
-//! So the runner catches it, and treats it as exactly what it is: the
-//! control plane no longer wants this job. That is the same fact a 410
-//! already conveys, and it is deliberately routed onto the same
-//! `cancelled` flag rather than into a second ending of its own — the step
-//! group is killed, the log is flushed, and the process exits 0 without
-//! reporting a verdict, because a task that was stopped does not get to
-//! answer for itself.
+//! So the runner catches it, and gives the job the ending a 410 already
+//! gets: it is routed onto the same `cancelled` flag rather than into a
+//! second ending of its own — the step group is killed, the log is
+//! flushed, and nothing is reported, because a job that was stopped does
+//! not get to answer for itself.
 //!
 //! **In signal context, only a store.** The handler sets one atomic and
 //! returns; killing the group, writing the log and closing out the job all
@@ -34,8 +33,8 @@ use std::time::Duration;
 /// signal handler cannot be given anything else.
 static STOPPED: AtomicBool = AtomicBool::new(false);
 
-/// The signals a stopped task arrives as: SIGTERM from the orchestrator,
-/// SIGINT from a person with a terminal.
+/// The signals a stop arrives as: SIGTERM from a service manager or
+/// `docker stop`, SIGINT from a person at a terminal.
 const CAUGHT: [libc::c_int; 2] = [libc::SIGTERM, libc::SIGINT];
 
 /// How often [`bridge`] looks. Well inside the runner's own 50 ms step

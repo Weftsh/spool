@@ -252,7 +252,7 @@ fn handle(mut c: TcpStream, shared: &Arc<Mutex<Shared>>) {
     {
         s.rec.auth_seen.push(a);
     }
-    // The two routes a self-hosted runner uses before it has a job. They
+    // The two routes a runner uses before it has a job. They
     // are matched on the whole path rather than its last segment: `claim`
     // and `register` are org-level, not per-job, and folding them into the
     // per-job routing below is how a typo in either would quietly be

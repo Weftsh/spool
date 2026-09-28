@@ -1,25 +1,29 @@
-//! The hosted runner: env in, verdict out.
+//! `weft-runner`: the agent a spool operator runs on their own machine.
 //!
-//! One job per process, and then the process ends. There is no agent, no
-//! registration, no long-lived worker pool — a task starts with three
-//! environment variables, fetches its job, checks out a tree, runs some
-//! shell, reports what happened, and dies. Everything that could accumulate
-//! state between two people's jobs is therefore absent by construction
-//! rather than by cleanup, which is the property the whole design is for:
-//! the previous job's credential, its `~/.cargo`, its leftover daemons and
-//! its /tmp are all gone because the container is gone.
+//! `register` trades a registration token for this machine's own
+//! credential; `run` then asks the server for work until it is stopped,
+//! and runs each job it is given here — check out the tree, run the
+//! steps, stream the log, report the verdict. Every call is outbound:
+//! nothing listens, and the server never needs to reach this machine.
+//! [`agent`] is the loop; [`run_with`] is one job.
 //!
-//! The runner also never holds a cloud credential. It talks to the control
-//! plane over the same public URL any client uses, with a job token that
-//! is scoped to one repository, read-only, and expires with the job.
+//! A job is kept apart from the machine it borrows: it runs in a
+//! directory of its own that is removed before and after it, its steps
+//! see an allowlisted environment rather than the operator's, and it
+//! talks to the server with a per-job token that dies with the job.
 //!
-//! **Exit codes.** 0 means a verdict was reported, *or* the job turned out
-//! to be cancelled — both are the dispatcher's expected endings. 1 means
-//! the work happened but the verdict could not be delivered, which the
-//! dispatcher's overdue sweep will eventually settle. 2 means the job was
-//! never started: bad credentials, an unreadable spec. The three are
-//! distinguishable because an operator staring at a task that exited
-//! non-zero needs to know whether to look at the workflow or at us.
+//! **Exit codes.** For one job, [`run_with`] answers 0 when a verdict was
+//! reported, *or* when the job was cancelled, settled elsewhere or
+//! stopped by a signal — endings nobody has to act on. 1 means the server
+//! could not be reached, or the work happened and the verdict could not
+//! be delivered; the server's overdue sweep settles that job. 2 means the
+//! job never started: a refused token, an unreadable spec, a workdir that
+//! cannot be made. The agent prints that code beside the job and carries
+//! on. The process itself exits 0 when it is stopped or when an ephemeral
+//! runner has done its one job, 1 when a registration is refused, and 2
+//! when the operator has something to fix before it can run at all — a
+//! mistyped command line, a malformed knob, a missing `.runner`, a runner
+//! that has been removed.
 
 mod agent;
 mod checkout;
@@ -56,11 +60,10 @@ fn main() {
 /// and an `entry` that read `std::env::args` would parse the filter as a
 /// subcommand.
 fn entry(args: &[String]) -> i32 {
-    // Before anything else: a task can be stopped while it is still
-    // fetching its job, and a SIGTERM that arrives before the handler is
-    // installed kills the process on the default disposition. Installed
-    // for every subcommand, because the self-hosted agent is a long-lived
-    // process on somebody's own machine and Ctrl-C has to reach it.
+    // Before anything else, so that no moment of the process's life is
+    // on the default disposition — which is to die on the spot, mid-step
+    // if a step is running, and leave its process group behind on the
+    // operator's machine. The agent is long-lived; Ctrl-C has to reach it.
     let _handlers = match signals::install() {
         Ok(h) => h,
         Err(e) => {
@@ -69,21 +72,15 @@ fn entry(args: &[String]) -> i32 {
         }
     };
     match cli::parse(args) {
-        Ok(cli::Command::Hosted) => match Config::from_env() {
-            Ok(cfg) => run(&cfg),
-            Err(e) => {
-                eprintln!("weft-runner: {e}");
-                2
-            }
-        },
         Ok(cli::Command::Register(o)) => agent::register(&o),
         Ok(cli::Command::Run(o)) => agent::run(&o),
         Ok(cli::Command::Usage) => {
             println!("{}", cli::USAGE);
             0
         }
-        // 2, and the usage with it: a mistyped flag is the one moment an
-        // operator is definitely reading the terminal.
+        // 2, and the usage with it: a mistyped flag — or no command at
+        // all — is the one moment an operator is definitely reading the
+        // terminal.
         Err(e) => {
             eprintln!("weft-runner: {e}\n\n{}", cli::USAGE);
             2
@@ -91,7 +88,7 @@ fn entry(args: &[String]) -> i32 {
     }
 }
 
-/// What the task definition and the RunTask overrides between them say.
+/// One claimed job, as the agent hands it to [`run_with`].
 ///
 /// No `Debug`, deliberately: it holds the job token, and a derived one is
 /// how a credential ends up in a panic message that gets pasted into an
@@ -103,73 +100,27 @@ pub struct Config {
     pub workdir: PathBuf,
     pub tuning: Tuning,
     pub log: LogConfig,
-    /// The ceiling on the job's process count. Overridable so that an
-    /// operator can lower it for a fleet running smaller tasks, and so
-    /// that the end-to-end suite can prove the bound without running a
+    /// The ceiling on the job's process count: [`steps::MAX_PROCS`], or
+    /// `STRATUM_RUNNER_MAX_PROCS` when the operator lowered it — which is
+    /// also how the end-to-end suite proves the bound without running a
     /// real fork bomb on the machine doing the testing.
     pub max_procs: u64,
     /// When set, the job's clone URL is re-based onto this origin before
-    /// the checkout. The control plane builds `clone_url` from the
-    /// address *its* fleet reaches it at; a self-hosted runner is outside
-    /// that network by definition and clones from the address it
-    /// registered with instead — the one it has already proved it can
-    /// reach. Hosted runners leave this unset and clone from exactly the
-    /// URL they were handed.
+    /// the checkout. The server builds `clone_url` from the address it
+    /// believes it is reachable at; this machine clones from the address
+    /// it registered with instead — the one it has already proved it can
+    /// reach. The agent always sets it. `None` clones from exactly the URL
+    /// the job names, which is what the in-crate tests use, their origins
+    /// being local paths.
     pub clone_via: Option<String>,
-}
-
-impl Config {
-    fn from_env() -> Result<Config, String> {
-        let mut log = LogConfig::default();
-        if let Some(ms) = optional("STRATUM_RUNNER_FLUSH_MS")? {
-            log.flush = Duration::from_millis(
-                ms.parse()
-                    .map_err(|_| format!("STRATUM_RUNNER_FLUSH_MS is not a number: {ms}"))?,
-            );
-        }
-        Ok(Config {
-            base_url: required("STRATUM_RUNNER_URL")?,
-            job_id: required("STRATUM_JOB_ID")?,
-            token: required("STRATUM_JOB_TOKEN")?,
-            workdir: optional("STRATUM_RUNNER_WORKDIR")?
-                .unwrap_or_else(|| "/work".into())
-                .into(),
-            tuning: Tuning::default(),
-            log,
-            max_procs: match optional("STRATUM_RUNNER_MAX_PROCS")? {
-                Some(n) => n
-                    .parse()
-                    .map_err(|_| format!("STRATUM_RUNNER_MAX_PROCS is not a number: {n}"))?,
-                None => steps::MAX_PROCS,
-            },
-            clone_via: None,
-        })
-    }
-}
-
-fn required(key: &str) -> Result<String, String> {
-    match std::env::var(key) {
-        Ok(v) if !v.is_empty() => Ok(v),
-        _ => Err(format!("{key} is not set")),
-    }
-}
-
-/// An unset variable and an empty one mean the same thing: a container
-/// orchestrator that passes an override through as `""` is common enough
-/// that treating it as "set to nothing" would produce a workdir of `""`.
-fn optional(key: &str) -> Result<Option<String>, String> {
-    match std::env::var(key) {
-        Ok(v) if !v.is_empty() => Ok(Some(v)),
-        _ => Ok(None),
-    }
 }
 
 /// The changeset with every member's clone URL re-based onto `base`.
 ///
-/// Same reason as the job's own clone URL: the control plane built these
-/// from the address *its* fleet reaches it at, and a self-hosted runner
-/// is off that network by definition. A hosted runner passes `None` and
-/// clones from exactly the URLs it was handed.
+/// Same reason as the job's own clone URL: the server built these from
+/// the address it believes it is reachable at, and this machine clones
+/// from the one it registered with. `None` leaves them exactly as they
+/// came, as [`Config::clone_via`] does for the job's own.
 fn rebased(cs: &ChangesetSpec, base: Option<&str>) -> ChangesetSpec {
     ChangesetSpec {
         key: cs.key.clone(),
@@ -187,24 +138,19 @@ fn rebased(cs: &ChangesetSpec, base: Option<&str>) -> ChangesetSpec {
     }
 }
 
-/// The whole job.
+/// The whole job, with the flag a signal raises passed in.
 ///
-/// Stdout and stderr here are the *container's* log, not the build's: one
-/// line per phase, so that a task nobody can reach still says where it got
-/// to. The build's own output never comes here — it goes to the job log,
-/// which is what a person actually reads.
-fn run(cfg: &Config) -> i32 {
-    run_with(cfg, signals::stop_flag())
-}
-
-/// The job, with the flag a signal raises passed in.
+/// Stderr here is the runner's own narration, not the build's: one line
+/// per phase, which is what the operator's terminal or journal shows. The
+/// build's output never comes here — it goes to the job log, which is
+/// what the person who pushed actually reads.
 ///
-/// Injected rather than read from `signals` directly so the whole of this
-/// can be tested. `cargo test` runs a suite as threads in one process and a
-/// signal flag is process-global, so a test that raised a real SIGTERM
-/// would cancel whatever job another test happened to be running. The real
-/// signal is proven end to end against the built binary instead, where it
-/// has a process to itself.
+/// The flag is injected rather than read from `signals` directly so the
+/// whole of this can be tested. `cargo test` runs a suite as threads in
+/// one process and a signal flag is process-global, so a test that raised
+/// a real SIGTERM would cancel whatever job another test happened to be
+/// running. The real signal is proven end to end against the built binary
+/// instead, where it has a process to itself.
 fn run_with(cfg: &Config, stop: &'static AtomicBool) -> i32 {
     let client = Arc::new(Client::new(
         &cfg.base_url,
@@ -214,9 +160,9 @@ fn run_with(cfg: &Config, stop: &'static AtomicBool) -> i32 {
     ));
     let assignment = match client.fetch() {
         Ok(a) => a,
-        // Not an error: the job was cancelled or superseded before this
-        // task got going. Exiting 0 keeps it out of the failed-task noise
-        // an operator is meant to be able to trust.
+        // Not an error: the job was cancelled or superseded between the
+        // claim and the fetch. 0 keeps it out of the failures an operator
+        // is meant to be able to trust.
         Err(CallError::Gone) => {
             eprintln!("job {}: no longer running, nothing to do", cfg.job_id);
             return 0;
@@ -241,10 +187,9 @@ fn run_with(cfg: &Config, stop: &'static AtomicBool) -> i32 {
     }
     let log_path = cfg.workdir.join("job.log");
     let cancelled = Arc::new(AtomicBool::new(false));
-    // A signal from here on means the same thing a 410 does — the control
-    // plane no longer wants this job — so it is routed onto the same flag
-    // and gets the same ending: the step's group is killed, the log is
-    // flushed, and nothing is reported.
+    // A signal from here on — the operator stopping the runner — gets the
+    // ending a 410 does, on the same flag: the step's group is killed,
+    // the log is flushed, and nothing is reported.
     let _stopping = signals::bridge(stop, Arc::clone(&cancelled));
     let log = match Log::start(
         Arc::clone(&client),
@@ -324,7 +269,7 @@ fn run_with(cfg: &Config, stop: &'static AtomicBool) -> i32 {
         ),
         steps::Outcome::Cancelled => ("cancelled", None, None),
         // The one verdict that says what *kind* of failure it was. The
-        // control plane suspends the organisation on it, so it is a
+        // server records it in the organisation's audit trail, so it is a
         // separate field rather than a phrase in `error` that somebody
         // would have to match on.
         steps::Outcome::Abuse(name) => (
@@ -382,22 +327,11 @@ mod tests {
     use fakecp::{spec_json, FakeCp, Reply};
     use testdir::TestDir;
 
-    /// Serialise the tests that read process-wide environment. `from_env`
-    /// and `entry` are the only two that do, and letting them run beside
-    /// each other would make them depend on the harness's thread order.
-    static ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
     /// The tests drive `run_with` off this rather than off the flag a real
     /// signal raises: that one is process-global, and `cargo test` runs
     /// this suite as threads in a single process, so one test's signal
     /// would cancel another test's job.
     static TEST_STOP: AtomicBool = AtomicBool::new(false);
-
-    /// `map(|_| ())` because `Config` has no `Debug` on purpose — see the
-    /// note on the struct.
-    fn env_err() -> String {
-        Config::from_env().map(|_| ()).expect_err("must refuse")
-    }
 
     struct Fixture {
         cp: FakeCp,
@@ -474,7 +408,7 @@ mod tests {
         let (web, web_shas) = checkout::tests::origin_named(f.dir.path(), "web");
         let api_head = api_shas.split(' ').nth(1).expect("two shas").to_string();
         let web_head = web_shas.split(' ').nth(1).expect("two shas").to_string();
-        // A self-hosted runner is handed the control plane's own URLs and
+        // A runner is handed the control plane's own URLs and
         // re-bases them onto the address it registered with; `via` is
         // what that address would be here.
         let url = |real: &str, name: &str| match via {
@@ -648,11 +582,11 @@ mod tests {
         assert!(!log.contains("ran"), "no step ran: {log}");
     }
 
-    /// The same ending, reached the other way: not a 410 but a `StopTask`,
-    /// which arrives as SIGTERM. The step here backgrounds a sleep and
-    /// waits on it, so what is proven is that the whole process *group*
-    /// goes — the bug was an orphan that outlived the runner and kept
-    /// burning the task's CPU until the container was torn down.
+    /// The same ending, reached the other way: not a 410 but the operator
+    /// stopping the runner, which arrives as SIGTERM. The step here
+    /// backgrounds a sleep and waits on it, so what is proven is that the
+    /// whole process *group* goes — the bug was an orphan that outlived
+    /// the runner and kept burning the machine's CPU with nobody watching.
     #[test]
     fn a_signal_kills_the_step_group_flushes_the_log_and_reports_nothing() {
         static STOP: AtomicBool = AtomicBool::new(false);
@@ -684,7 +618,7 @@ mod tests {
             .parse()
             .expect("a pid");
         assert!(
-            unsafe { libc::kill(grandchild, 0) } != 0,
+            steps::tests::stops_within(grandchild, Duration::from_secs(5)),
             "the step's process group outlived the runner (pid {grandchild})"
         );
         // What was written before the signal is on disk — the log writer is
@@ -775,100 +709,17 @@ mod tests {
     }
 
     #[test]
-    fn the_environment_names_the_variable_it_is_missing() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // `entry` runs the job off the process-wide signal flag, so it must
-        // not overlap the test that raises a real signal.
+    fn the_entry_point_routes_each_command_and_refuses_a_bare_one() {
+        // `entry` installs the real handlers and `run` would poll the
+        // process-wide signal flag, so it must not overlap the test that
+        // raises a real signal.
         let _flag = signals::STOP_FLAG_LOCK
             .lock()
             .unwrap_or_else(|e| e.into_inner());
-        let keys = [
-            "STRATUM_RUNNER_URL",
-            "STRATUM_JOB_ID",
-            "STRATUM_JOB_TOKEN",
-            "STRATUM_RUNNER_WORKDIR",
-            "STRATUM_RUNNER_FLUSH_MS",
-        ];
-        for k in keys {
-            std::env::remove_var(k);
-        }
-        assert_eq!(env_err(), "STRATUM_RUNNER_URL is not set");
-        std::env::set_var("STRATUM_RUNNER_URL", "http://cp.invalid");
-        // An override passed through as an empty string is not "set".
-        std::env::set_var("STRATUM_JOB_ID", "");
-        assert_eq!(env_err(), "STRATUM_JOB_ID is not set");
-        std::env::set_var("STRATUM_JOB_ID", "job1");
-        assert_eq!(env_err(), "STRATUM_JOB_TOKEN is not set");
-        std::env::set_var("STRATUM_JOB_TOKEN", "tok");
 
-        let cfg = Config::from_env().expect("complete");
-        assert_eq!(cfg.workdir, PathBuf::from("/work"));
-        assert_eq!(cfg.log.flush, Duration::from_millis(1000));
-
-        std::env::set_var("STRATUM_RUNNER_WORKDIR", "/elsewhere");
-        std::env::set_var("STRATUM_RUNNER_FLUSH_MS", "50");
-        let cfg = Config::from_env().expect("complete");
-        assert_eq!(cfg.workdir, PathBuf::from("/elsewhere"));
-        assert_eq!(cfg.log.flush, Duration::from_millis(50));
-
-        std::env::set_var("STRATUM_RUNNER_FLUSH_MS", "soon");
-        assert_eq!(env_err(), "STRATUM_RUNNER_FLUSH_MS is not a number: soon");
-        std::env::remove_var("STRATUM_RUNNER_FLUSH_MS");
-
-        // The process ceiling defaults to the compiled-in bound, is
-        // overridable, and refuses a value that is not a number rather
-        // than silently falling back to the default — a fleet that meant
-        // to lower the bound and typoed it would otherwise run without
-        // one.
-        assert_eq!(
-            Config::from_env().expect("complete").max_procs,
-            steps::MAX_PROCS
-        );
-        std::env::set_var("STRATUM_RUNNER_MAX_PROCS", "64");
-        assert_eq!(Config::from_env().expect("complete").max_procs, 64);
-        std::env::set_var("STRATUM_RUNNER_MAX_PROCS", "lots");
-        assert_eq!(env_err(), "STRATUM_RUNNER_MAX_PROCS is not a number: lots");
-        std::env::remove_var("STRATUM_RUNNER_MAX_PROCS");
-        for k in keys {
-            std::env::remove_var(k);
-        }
-    }
-
-    #[test]
-    fn the_entry_point_runs_a_whole_job_out_of_the_environment() {
-        let _guard = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        // `entry` runs the job off the process-wide signal flag, so it must
-        // not overlap the test that raises a real signal.
-        let _flag = signals::STOP_FLAG_LOCK
-            .lock()
-            .unwrap_or_else(|e| e.into_inner());
-        let f = Fixture::new(serde_json::json!([])).with_origin(serde_json::json!([
-            {"name": "Read", "run": "cat README.md"},
-        ]));
-        std::env::set_var("STRATUM_RUNNER_URL", f.cp.base_url());
-        std::env::set_var("STRATUM_JOB_ID", "job1");
-        std::env::set_var("STRATUM_JOB_TOKEN", "tok");
-        std::env::set_var(
-            "STRATUM_RUNNER_WORKDIR",
-            f.dir.path().join("work").to_str().expect("path"),
-        );
-        assert_eq!(entry(&[]), 0);
-        assert_eq!(f.cp.state().finish, Some(("passed".into(), None)));
-
-        // …and with nothing set at all, it refuses rather than panicking.
-        for k in [
-            "STRATUM_RUNNER_URL",
-            "STRATUM_JOB_ID",
-            "STRATUM_JOB_TOKEN",
-            "STRATUM_RUNNER_WORKDIR",
-        ] {
-            std::env::remove_var(k);
-        }
+        // No command is a usage error, not an attempt to run a job out of
+        // whatever the environment happens to hold.
         assert_eq!(entry(&[]), 2);
-
-        // The subcommands route out of the same door, and a mistyped one
-        // is a usage error rather than an attempt to run a job out of an
-        // environment that is not there.
         assert_eq!(entry(&["--help".to_string()]), 0);
         assert_eq!(entry(&["nonsense".to_string()]), 2);
         assert_eq!(
@@ -906,15 +757,14 @@ mod tests {
     }
 
     /// The whole of layer 3, from the step that starts a miner to the
-    /// field the control plane suspends an organisation on. The "miner"
+    /// field the server records in the organisation's audit trail. The "miner"
     /// is `/bin/sleep` under the name `xmrig` — see the note on
     /// `steps::tests::a_step_that_starts_a_miner_is_killed_and_the_job_says_why`.
     ///
     /// The verdict is `failed` *and* carries `abuse`, which are two
     /// different statements: the first is what the change's author sees,
-    /// the second is what makes it expensive to have tried. A job that
-    /// reported only `failed` would cost the fleet a six-hour budget per
-    /// attempt and tell nobody why.
+    /// the second is what tells the machine's owner what was tried on it.
+    /// A job that reported only `failed` would look like any broken build.
     #[test]
     fn a_job_that_starts_a_miner_is_failed_as_abuse() {
         let f = Fixture::new(serde_json::json!([])).with_origin(serde_json::json!([

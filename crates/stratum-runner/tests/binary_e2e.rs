@@ -1,13 +1,14 @@
-//! The runner as the fleet actually runs it: the built binary, three
-//! environment variables, and nothing else.
+//! The runner as an operator actually runs it: the built binary, a command
+//! line, a `.runner` file, and an environment with nothing else in it.
 //!
-//! The in-crate tests drive `entry()` in-process, which proves the phases
-//! and their composition but not the artefact. What is only true of the
-//! binary is the part this suite holds: that `cargo` builds a bin target at
-//! all (a crate whose only tests are unit tests can lose its `main` to a
-//! refactor and stay green), that `main` turns each verdict into the exit
-//! code the dispatcher reads, and that a process started with an empty-ish
-//! environment finds everything it needs in those variables.
+//! The in-crate tests drive the agent loop and the job in-process, which
+//! proves the phases and their composition but not the artefact. What is
+//! only true of the binary is the part this suite holds: that `cargo`
+//! builds a bin target at all (a crate whose only tests are unit tests can
+//! lose its `main` to a refactor and stay green), that `main` turns each
+//! ending into the exit code and the line an operator reads, that a real
+//! signal reaches a real process, and that a process started with an empty
+//! environment finds everything it needs in its arguments and `.runner`.
 //!
 //! Hermetic, like everything else here: the control plane is a scripted
 //! `TcpListener` on loopback and the origin is a real local repository
@@ -17,6 +18,7 @@ use std::collections::{BTreeMap, VecDeque};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::fs::PermissionsExt;
+use std::os::unix::process::CommandExt;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -25,9 +27,9 @@ use std::time::{Duration, Instant};
 
 // ---------------------------------------------------------------- the stub
 
-/// What the stub saw. The assertions are all about this: the runner's own
-/// stdout is a container log, and the product surface is what reached the
-/// control plane.
+/// What the stub saw. Most assertions are about this: the runner's own
+/// output is narration for the operator, and the product surface is what
+/// reached the control plane.
 #[derive(Default)]
 struct Seen {
     chunks: Vec<String>,
@@ -38,15 +40,20 @@ struct Seen {
     /// sent" from "sent as null".
     abuse: Option<String>,
     leases: u32,
+    /// The `Authorization` of every call, in order…
     auth: Vec<String>,
+    /// …and of the per-job ones alone: the spec, the log, the lease, the
+    /// verdict. Kept apart so a test can say every one of them carried the
+    /// job's token and not the runner's.
+    job_auth: Vec<String>,
     /// The body of `POST /v1/runners/register`, and how many times
-    /// `POST /v1/runners/claim` was asked. Self-hosted mode's whole
-    /// product surface before a job starts is these two calls.
+    /// `POST /v1/runners/claim` was asked. The agent's whole product
+    /// surface before a job starts is these two calls.
     register_body: Option<String>,
     claims: u32,
 }
 
-/// What the stub has been told to answer the two self-hosted routes with.
+/// What the stub has been told to answer the two runner routes with.
 /// `register` defaults to a successful exchange and `claims` to 204 —
 /// nothing to run — which is what an idle runner sees all day.
 #[derive(Default)]
@@ -160,7 +167,7 @@ fn serve(
     let body = String::from_utf8_lossy(&body).to_string();
 
     let mut s = seen.lock().expect("stub state");
-    s.auth.push(auth);
+    s.auth.push(auth.clone());
 
     // The two routes a runner uses before it has a job. Answered here,
     // ahead of the per-job routing below, because they are org-level and
@@ -188,6 +195,7 @@ fn serve(
         write_response(&mut conn, status, &payload);
         return;
     }
+    s.job_auth.push(auth);
 
     let status = match (method.as_str(), path.rsplit('/').next().unwrap_or_default()) {
         ("POST", "log") => {
@@ -318,518 +326,11 @@ fn spec_json(clone_url: &str, sha: &str, steps: serde_json::Value) -> String {
     .to_string()
 }
 
-/// Run the built binary against a stub, returning its exit code.
-///
-/// The environment is cleared rather than inherited: a runner task starts
-/// with exactly what the task definition gives it, and a test that leaked
-/// the developer's `PATH`-adjacent variables in would not be testing that.
-/// `PATH` itself stays, because the image has one and the steps need `sh`.
-fn run_binary(stub: &Stub, workdir: &Path) -> i32 {
-    run_binary_with(stub, workdir, &[])
-}
-
-/// The same, plus whatever else the task definition would have set.
-fn run_binary_with(stub: &Stub, workdir: &Path, extra: &[(&str, &str)]) -> i32 {
-    let mut cmd = Command::new(env!("CARGO_BIN_EXE_weft-runner"));
-    cmd.env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("STRATUM_RUNNER_URL", stub.base_url())
-        .env("STRATUM_JOB_ID", "job-e2e")
-        .env("STRATUM_JOB_TOKEN", "tok-e2e")
-        .env("STRATUM_RUNNER_WORKDIR", workdir)
-        // Short, so the streaming assertions do not wait a second per
-        // chunk; the default is proven by `log`'s own tests.
-        .env("STRATUM_RUNNER_FLUSH_MS", "50");
-    for (k, v) in extra {
-        cmd.env(k, v);
-    }
-    let out = cmd.output().expect("spawn weft-runner");
-    // Printed rather than asserted on: it is the container log, and seeing
-    // it is what makes a failure here diagnosable at all.
-    eprint!("{}", String::from_utf8_lossy(&out.stderr));
-    out.status.code().expect("runner exited with a code")
-}
-
-/// The stub records under a lock the runner's log thread also writes
-/// through, so "the verdict is in" is waited for rather than assumed.
-fn wait_for_finish(stub: &Stub) -> (String, Option<String>) {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(f) = stub.seen().finish.clone() {
-            return f;
-        }
-        assert!(Instant::now() < deadline, "no verdict was reported");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-// ---------------------------------------------------------------- the tests
-
-#[test]
-fn the_binary_runs_a_whole_job_and_reports_it_passed() {
-    let dir = TestDir::new("pass");
-    let (url, sha) = origin(dir.path());
-    let steps = serde_json::json!([
-        { "name": "greet", "run": "echo \"$GREETING $WEFT_MATRIX_RUST on $WEFT_SHA\"" },
-        { "name": "read the tree", "run": "cat VERSION" },
-    ]);
-    let stub = Stub::start(200, spec_json(&url, &sha, steps));
-    let work = dir.path().join("work");
-
-    let code = run_binary(&stub, &work);
-
-    assert_eq!(code, 0, "a job whose steps all pass exits 0");
-    assert_eq!(wait_for_finish(&stub), ("passed".to_string(), None));
-
-    let s = stub.seen();
-    assert!(
-        s.final_log.contains(&format!("✓ Checkout {sha}")),
-        "the checkout is in the log: {}",
-        s.final_log
-    );
-    assert!(
-        s.final_log.contains(&format!("hello stable on {sha}")),
-        "spec env, matrix and the job's own variables all reach the step: {}",
-        s.final_log
-    );
-    assert!(
-        s.final_log.contains("from-the-checked-out-tree"),
-        "the step ran inside the checked-out tree: {}",
-        s.final_log
-    );
-    assert!(
-        s.final_log.contains("✓ greet (") && s.final_log.contains("✓ read the tree ("),
-        "each step is marked done: {}",
-        s.final_log
-    );
-    // Streaming is the point of the chunk endpoint: a person watching a
-    // running job sees output before the final PUT.
-    assert!(!s.chunks.is_empty(), "the log was streamed while it ran");
-    assert!(
-        s.final_log.contains(s.chunks[0].trim_end()),
-        "streamed chunks are the same text as the final log"
-    );
-    assert!(
-        s.auth.iter().all(|a| a == "Bearer tok-e2e"),
-        "every call carries the job token: {:?}",
-        s.auth
-    );
-    // The tree is left where the contract says it is, not somewhere the
-    // runner invented.
-    assert!(work.join("repo/VERSION").exists());
-    assert!(work.join("job.log").exists());
-}
-
-#[test]
-fn a_failing_step_stops_the_job_and_names_it() {
-    let dir = TestDir::new("fail");
-    let (url, sha) = origin(dir.path());
-    let steps = serde_json::json!([
-        { "name": "build", "run": "echo building; exit 3" },
-        { "name": "test", "run": "echo never" },
-    ]);
-    let stub = Stub::start(200, spec_json(&url, &sha, steps));
-
-    let code = run_binary(&stub, &dir.path().join("work"));
-
-    // 0, not 1: the verdict was delivered. A failing build is not a failing
-    // runner, and the dispatcher reads the two differently.
-    assert_eq!(code, 0);
-    assert_eq!(
-        wait_for_finish(&stub),
-        (
-            "failed".to_string(),
-            Some("step \"build\" exited 3".to_string())
-        )
-    );
-    let s = stub.seen();
-    assert!(
-        s.final_log.contains("✗ build exited 3 ("),
-        "{}",
-        s.final_log
-    );
-    assert!(
-        s.final_log.contains("– test (not run)"),
-        "a step after the failure is reported as not run: {}",
-        s.final_log
-    );
-    assert!(
-        !s.final_log.contains("never"),
-        "and it really did not run: {}",
-        s.final_log
-    );
-}
-
-#[test]
-fn a_job_the_control_plane_refuses_exits_two() {
-    let dir = TestDir::new("refused");
-    let stub = Stub::start(403, String::new());
-
-    let code = run_binary(&stub, &dir.path().join("work"));
-
-    assert_eq!(code, 2, "a job that never started is distinguishable");
-    assert!(
-        stub.seen().finish.is_none(),
-        "nothing is reported for a job that was never fetched"
-    );
-}
-
-#[test]
-fn a_job_that_is_no_longer_running_exits_zero_without_a_verdict() {
-    let dir = TestDir::new("gone");
-    let stub = Stub::start(410, String::new());
-
-    let code = run_binary(&stub, &dir.path().join("work"));
-
-    // Cancelled or superseded between the launch and the task starting.
-    // Exiting 0 is what keeps the failed-task count meaningful.
-    assert_eq!(code, 0);
-    assert!(stub.seen().finish.is_none());
-}
-
-#[test]
-fn a_binary_with_no_environment_says_which_variable_is_missing() {
-    let out = Command::new(env!("CARGO_BIN_EXE_weft-runner"))
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .output()
-        .expect("spawn weft-runner");
-    assert_eq!(out.status.code(), Some(2));
-    let err = String::from_utf8_lossy(&out.stderr);
-    assert!(
-        err.contains("STRATUM_RUNNER_URL is not set"),
-        "the operator is told what to set: {err}"
-    );
-}
-
-/// Not an assertion about the runner so much as about this file: the
-/// helpers above must not quietly stop being used, which is how a suite
-/// grows a fixture nobody drives.
-#[test]
-fn the_fixture_builds_a_repository_the_runner_could_check_out() {
-    let dir = TestDir::new("fixture");
-    let (url, sha) = origin(dir.path());
-    assert_eq!(sha.len(), 40, "a real commit sha");
-    let refs: BTreeMap<String, String> = run_git(Path::new(&url), &["show-ref"])
-        .lines()
-        .filter_map(|l| l.split_once(' '))
-        .map(|(a, b)| (b.to_string(), a.to_string()))
-        .collect();
-    assert_eq!(refs.get("refs/heads/main"), Some(&sha));
-}
-
-/// A superseded run's task is stopped with `docker stop` / an ECS
-/// `StopTask`, which is SIGTERM and then, thirty seconds later, SIGKILL.
-/// Before the handler existed the runner had no disposition for it: as a
-/// child it died instantly, mid-step, leaving the step's *process group*
-/// orphaned — the `sleep` here outlived the runner and kept a container's
-/// worth of CPU until the task was torn down — and as PID 1 with no init
-/// the signal was ignored outright and the job ran to the end.
-///
-/// The grandchild is the assertion that matters. A runner that merely dies
-/// looks fine from the outside; only the surviving process shows the bug.
-#[test]
-fn a_sigterm_kills_the_step_group_and_exits_quietly() {
-    let dir = TestDir::new("sigterm");
-    let (url, sha) = origin(dir.path());
-    let work = dir.path().join("work");
-    let pidfile = dir.path().join("child.pid");
-    // The step backgrounds a long sleep, records its pid where the test can
-    // read it, and waits: exactly the shape of a build that has spawned a
-    // compiler and is blocked on it.
-    let steps = serde_json::json!([
-        { "name": "slow", "run": "echo started; sleep 30 & echo $! > \"$PIDFILE\"; wait" },
-    ]);
-    let mut spec: serde_json::Value =
-        serde_json::from_str(&spec_json(&url, &sha, steps)).expect("spec");
-    spec["env"] = serde_json::json!({ "PIDFILE": pidfile.to_string_lossy() });
-    let stub = Stub::start(200, spec.to_string());
-
-    let mut child = Command::new(env!("CARGO_BIN_EXE_weft-runner"))
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .env("STRATUM_RUNNER_URL", stub.base_url())
-        .env("STRATUM_JOB_ID", "job-e2e")
-        .env("STRATUM_JOB_TOKEN", "tok-e2e")
-        .env("STRATUM_RUNNER_WORKDIR", &work)
-        .env("STRATUM_RUNNER_FLUSH_MS", "50")
-        .spawn()
-        .expect("spawn weft-runner");
-
-    let grandchild = wait_for_pid(&pidfile);
-    assert!(alive(grandchild), "the step's sleep is running");
-
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-
-    // Within a second, per the contract: ECS gives thirty, but a runner
-    // that needs seconds to let go is one that gets SIGKILLed with its log
-    // unflushed.
-    let deadline = Instant::now() + Duration::from_secs(2);
-    while alive(grandchild) {
-        assert!(
-            Instant::now() < deadline,
-            "the step's process group outlived the runner (pid {grandchild})"
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
-    let code = wait_with_timeout(&mut child, Duration::from_secs(5));
-    assert_eq!(
-        code,
-        Some(0),
-        "a stopped task is an expected ending, not a failure"
-    );
-    // The log that was written before the signal is on disk, and no verdict
-    // was reported: a task that was stopped does not answer for itself.
-    let log = std::fs::read_to_string(work.join("job.log")).expect("job.log");
-    assert!(log.contains("▶ slow") && log.contains("started"), "{log}");
-    assert!(
-        stub.seen().finish.is_none(),
-        "no verdict for a stopped task"
-    );
-}
-
-/// The pid the step wrote, once it has written it.
-fn wait_for_pid(pidfile: &Path) -> i32 {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Ok(s) = std::fs::read_to_string(pidfile) {
-            if let Ok(pid) = s.trim().parse() {
-                return pid;
-            }
-        }
-        assert!(Instant::now() < deadline, "the step never started");
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// `kill(pid, 0)` asks whether a pid is still there without signalling it.
-/// A zombie still answers yes, which is why the runner reaps its child.
-fn alive(pid: i32) -> bool {
-    unsafe { libc::kill(pid, 0) == 0 }
-}
-
-fn wait_with_timeout(child: &mut std::process::Child, budget: Duration) -> Option<i32> {
-    let deadline = Instant::now() + budget;
-    loop {
-        match child.try_wait().expect("wait") {
-            Some(st) => return st.code(),
-            None => assert!(
-                Instant::now() < deadline,
-                "the runner did not exit after SIGTERM"
-            ),
-        }
-        std::thread::sleep(Duration::from_millis(20));
-    }
-}
-
-/// Layer 3 against the artefact: the built binary, its own process, its
-/// own two-second sampler. The in-crate test drives the same path, but
-/// only here is the watch running inside a `main` that a task definition
-/// started — and only here would a `#[cfg(test)]`-shaped mistake, or a
-/// sampler that reads `/proc` for the wrong process, show up.
-///
-/// The miner is `/bin/sleep` under the name `xmrig`: a *symlink*, because
-/// a copied system binary is SIGKILLed on sight by macOS for an invalid
-/// signature and the test would then pass against a zombie. Nothing that
-/// mines anything is in this repository.
-#[test]
-fn the_binary_stops_a_step_that_starts_a_miner_and_says_it_was_abuse() {
-    let dir = TestDir::new("miner");
-    let (url, sha) = origin(dir.path());
-    let steps = serde_json::json!([
-        { "name": "build", "run": "ln -s /bin/sleep ./xmrig; ./xmrig 120 & echo $! > ../miner.pid; wait" },
-        { "name": "test", "run": "echo never" },
-    ]);
-    let stub = Stub::start(200, spec_json(&url, &sha, steps));
-    let work = dir.path().join("work");
-
-    let started = Instant::now();
-    let code = run_binary(&stub, &work);
-
-    assert_eq!(code, 0, "the verdict was delivered, so the task exits 0");
-    assert!(
-        started.elapsed() < Duration::from_secs(60),
-        "it waited out the miner instead of killing it"
-    );
-    assert_eq!(
-        wait_for_finish(&stub),
-        (
-            "failed".to_string(),
-            Some("mining software detected: xmrig".to_string())
-        )
-    );
-    let s = stub.seen();
-    assert_eq!(
-        s.abuse.as_deref(),
-        Some("mining"),
-        "the verdict says what kind of failure it was"
-    );
-    // Killed, not merely reported: the group is gone, so the task stops
-    // costing anything the moment the verdict is written.
-    let pid: i32 = std::fs::read_to_string(work.join("miner.pid"))
-        .expect("the step recorded its miner")
-        .trim()
-        .parse()
-        .expect("a pid");
-    assert!(
-        unsafe { libc::kill(pid, 0) } != 0,
-        "the miner outlived the runner (pid {pid})"
-    );
-    assert!(
-        s.final_log
-            .contains("\u{2717} build stopped: mining software detected: xmrig"),
-        "{}",
-        s.final_log
-    );
-    assert!(
-        !s.final_log.contains("never"),
-        "the step after it did not run: {}",
-        s.final_log
-    );
-}
-
-/// How many tasks the uid running this test already has, which is what
-/// `RLIMIT_NPROC` counts against the bound. Linux counts *threads*, so the
-/// thread listing is what is counted there; on macOS, where processes are
-/// what count, it is the process listing.
-///
-/// The fork-bomb test below sets the runner's ceiling above this rather
-/// than at some absolute number: the bound is per-uid and shared with
-/// everything else this machine is doing, so an absolute one would either
-/// be under the floor — failing the checkout, which forks too — or so far
-/// above it that proving the bound would mean actually forking a machine
-/// into the ground.
-///
-/// The headroom over the measured count is deliberately large. This is
-/// one reading of a number that keeps moving: `RLIMIT_NPROC` is checked
-/// against the uid's count at the moment of each `fork`, the tests in
-/// this file run in parallel threads, and the sibling test below puts a
-/// hundred processes on the same uid on purpose. A tight headroom means
-/// that whenever the two overlap it is the fork-bomb test's *checkout*
-/// that is refused its forks, failing as "fetch of refs/heads/main
-/// failed" — the same failure as a ceiling set too low, arriving by a
-/// different door, and likeliest under llvm-cov where everything is slow
-/// enough to overlap. 300 is far more than the checkout and the sibling
-/// together can take, and still well short of what the step below
-/// attempts, so the bomb is refused in milliseconds either way.
-fn tasks_now() -> u64 {
-    let uid = unsafe { libc::getuid() }.to_string();
-    // Not a fallback chain: BSD `ps` answers `-L` by printing the list of
-    // format keywords and exiting 0, so "try the Linux spelling first"
-    // would silently count nothing and set the ceiling below the
-    // checkout's own needs.
-    let args: &[&str] = if cfg!(target_os = "linux") {
-        &["-eLo", "uid="]
-    } else {
-        &["-Ao", "uid="]
-    };
-    let listing = Command::new("ps").args(args).output().expect("ps");
-    String::from_utf8_lossy(&listing.stdout)
-        .lines()
-        .filter(|l| l.trim() == uid)
-        .count() as u64
-}
-
-/// The process ceiling, against the built binary. A fork bomb is the one
-/// thing a step can do that costs somebody other than its own job: it
-/// takes the host down, and every task sharing it. Fargate accepts only
-/// the `nofile` ulimit, so the bound cannot live in the task definition
-/// and lives in the runner instead — which means this is the only place
-/// it can be proven.
-///
-/// Two things are asserted, and the second is the point. The step fails,
-/// *as the step*: the shell's own "fork: Resource temporarily
-/// unavailable" reaches the job log and the verdict names the step, so
-/// the author sees a step they can fix rather than a runner that broke.
-/// And the runner itself is unharmed — it reports the verdict and exits
-/// 0, which is what stops a bomb from taking the fleet's dispatcher with
-/// it.
-///
-/// Nothing here forks a machine into the ground: the ceiling is set a few
-/// hundred above what this uid already has, so the loop is refused a fork
-/// long before it reaches its two-thousandth and bash gives up on the
-/// spot. `sleep 5`, not a tenth of a second, so that the processes it does
-/// start are still alive while the rest are being refused: a sleep short
-/// enough to exit under the loop would free slots as fast as they were
-/// taken, and the bound would never be reached.
-#[test]
-fn the_binary_bounds_a_step_that_tries_to_fork_without_end() {
-    let dir = TestDir::new("forkbomb");
-    let (url, sha) = origin(dir.path());
-    let steps = serde_json::json!([
-        { "name": "build", "run": "for i in $(seq 1 2000); do /bin/sleep 5 & done; wait; echo unbounded" },
-        { "name": "test", "run": "echo never" },
-    ]);
-    let stub = Stub::start(200, spec_json(&url, &sha, steps));
-    let ceiling = (tasks_now() + 300).to_string();
-
-    let started = Instant::now();
-    let code = run_binary_with(
-        &stub,
-        &dir.path().join("work"),
-        &[("STRATUM_RUNNER_MAX_PROCS", &ceiling)],
-    );
-
-    assert_eq!(code, 0, "the runner survived it and reported a verdict");
-    assert!(
-        started.elapsed() < Duration::from_secs(60),
-        "it waited the forks out instead of being refused them"
-    );
-    let (state, error) = wait_for_finish(&stub);
-    assert_eq!(state, "failed");
-    let error = error.expect("a failed job says why");
-    assert!(
-        error.starts_with("step \"build\" exited"),
-        "the step's own failure, not the runner's: {error}"
-    );
-    let s = stub.seen();
-    assert!(
-        s.abuse.is_none(),
-        "a fork bomb is a failed job, not a suspended organisation"
-    );
-    assert!(
-        !s.final_log.contains("unbounded"),
-        "the loop never finished: {}",
-        s.final_log
-    );
-    assert!(
-        !s.final_log.contains("never"),
-        "and the step after it did not run: {}",
-        s.final_log
-    );
-}
-
-/// The half that decides whether the bound is usable at all. A hundred
-/// processes at once is an ordinary parallel build, not an attack, and
-/// the default ceiling has to let it through — a bound that failed honest
-/// work would be a worse bug than the one it prevents, and it would be
-/// discovered by somebody's build rather than by us.
-#[test]
-fn a_step_that_forks_a_hundred_processes_is_not_a_fork_bomb() {
-    let dir = TestDir::new("fanout");
-    let (url, sha) = origin(dir.path());
-    let steps = serde_json::json!([
-        { "name": "build", "run": "for i in $(seq 1 100); do /bin/sleep 0.2 & done; wait; echo fanned out" },
-    ]);
-    let stub = Stub::start(200, spec_json(&url, &sha, steps));
-
-    let code = run_binary(&stub, &dir.path().join("work"));
-
-    assert_eq!(code, 0);
-    assert_eq!(wait_for_finish(&stub), ("passed".to_string(), None));
-    assert!(
-        stub.seen().final_log.contains("fanned out"),
-        "{}",
-        stub.seen().final_log
-    );
-}
-
-// ------------------------------------------------------- self-hosted mode
-
-/// Run the built binary with arguments rather than an environment: the
-/// self-hosted commands take everything they need from the command line
-/// and from `.runner`, which is the point — a machine an operator owns has
-/// no task definition to put variables in.
+/// Run the built binary with arguments and an otherwise empty environment:
+/// everything the runner needs comes from the command line and from
+/// `.runner`, which is the point — a test that leaked the developer's own
+/// variables in would not be testing that. `PATH` stays, because every
+/// machine has one and the steps need `bash`.
 fn run_agent(args: &[&str]) -> std::process::Output {
     Command::new(env!("CARGO_BIN_EXE_weft-runner"))
         .env_clear()
@@ -861,13 +362,13 @@ fn write_runner_file(dir: &Path, stub: &Stub, ephemeral: bool) {
 
 /// A claim answer that hands over a job — and points somewhere useless.
 ///
-/// The `runner_url` a claim carries is the server's own public URL, which
-/// is what *it* is reachable at, not what this machine can reach: a runner
-/// in a container behind NAT is handed `127.0.0.1:8080` and cannot use it.
-/// The URL the runner registered with is the one that has actually been
-/// proved to work, so the job goes there and this field is ignored. The
-/// bogus value is what proves it: port 9 refuses every connection, so a
-/// runner that believed the answer could not fetch a spec at all.
+/// The `runner_url` a claim carries is the server's own idea of where it
+/// can be reached, not what this machine can reach: a runner in a
+/// container behind NAT is handed `127.0.0.1:8080` and cannot use it. The
+/// URL the runner registered with is the one that has actually been proved
+/// to work, so the job goes there and this field is ignored. The bogus
+/// value is what proves it: port 9 refuses every connection, so a runner
+/// that believed the answer could not fetch a spec at all.
 fn claim_reply(_stub: &Stub, job_id: &str) -> (u16, String) {
     (
         200,
@@ -876,6 +377,247 @@ fn claim_reply(_stub: &Stub, job_id: &str) -> (u16, String) {
         })
         .to_string(),
     )
+}
+
+/// An ephemeral registration under `dir/agent`, and the stub told to hand
+/// it `job-e2e` on its first claim. Ephemeral so that `run` ends once the
+/// job does, which lets a test wait for the process rather than guess at a
+/// duration.
+fn agent_with_one_job(dir: &Path, stub: &Stub) -> PathBuf {
+    let agent = dir.join("agent");
+    write_runner_file(&agent, stub, true);
+    stub.answer_claims(&[claim_reply(stub, "job-e2e")]);
+    agent
+}
+
+/// `weft-runner run` over the registration in `agent`, with an empty
+/// environment but for `PATH`, a short log flush and `extra`.
+fn agent_command(agent: &Path, extra: &[(&str, &str)]) -> Command {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_weft-runner"));
+    cmd.env_clear()
+        .env("PATH", std::env::var("PATH").unwrap_or_default())
+        // Short, so the streaming assertions do not wait a second per
+        // chunk; the default is proven by `log`'s own tests.
+        .env("STRATUM_RUNNER_FLUSH_MS", "50")
+        .args(["run", "--dir", agent.to_str().expect("path")]);
+    for (k, v) in extra {
+        cmd.env(k, v);
+    }
+    cmd
+}
+
+/// Run a command to its end and hand back what it said. Stderr is printed
+/// rather than asserted on: it is the agent's narration, and seeing it is
+/// what makes a failure here diagnosable at all.
+fn finish_run(mut cmd: Command) -> std::process::Output {
+    let out = cmd.output().expect("spawn weft-runner");
+    eprint!("{}", String::from_utf8_lossy(&out.stderr));
+    out
+}
+
+/// The line the agent prints once a job is over. `code` is what the job
+/// itself ended with — 0 prints no code at all, anything else is named —
+/// and it is the only place that code survives: an ephemeral agent exits
+/// 0 after its one job however that job went.
+fn finished_line(out: &std::process::Output, code: i32) {
+    let said = String::from_utf8_lossy(&out.stdout);
+    let want = match code {
+        0 => "finished job job-e2e".to_string(),
+        n => format!("finished job job-e2e (the runner exited {n})"),
+    };
+    assert!(
+        said.lines().any(|l| l == want),
+        "expected the line {want:?}: {said}"
+    );
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "an ephemeral agent that has done its one job exits 0"
+    );
+}
+
+/// The stub records under a lock the runner's log thread also writes
+/// through, so "the verdict is in" is waited for rather than assumed.
+fn wait_for_finish(stub: &Stub) -> (String, Option<String>) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Some(f) = stub.seen().finish.clone() {
+            return f;
+        }
+        assert!(Instant::now() < deadline, "no verdict was reported");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// The pid the step wrote, once it has written it.
+fn wait_for_pid(pidfile: &Path) -> i32 {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if let Ok(s) = std::fs::read_to_string(pidfile) {
+            if let Ok(pid) = s.trim().parse() {
+                return pid;
+            }
+        }
+        assert!(Instant::now() < deadline, "the step never started");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// Whether `pid` is still running.
+///
+/// Not `kill(pid, 0)` alone, which also answers for a zombie. A step's
+/// grandchild is reparented to PID 1 when the step's shell dies, and stays
+/// a zombie until PID 1 reaps it — which some inits do on a timer: the one
+/// this suite was first run under took about two seconds, and every
+/// assertion made straight after the kill failed on it. What the runner
+/// promises is that the group is killed; how promptly somebody else's init
+/// tidies up is not its to promise. (The in-crate twin is
+/// `steps::tests::stopped`; this suite is a separate crate and cannot
+/// share it.)
+fn alive(pid: i32) -> bool {
+    if unsafe { libc::kill(pid, 0) } != 0 {
+        return false;
+    }
+    let out = Command::new("ps")
+        .args(["-o", "stat=", "-p", &pid.to_string()])
+        .output()
+        .expect("ps");
+    !String::from_utf8_lossy(&out.stdout)
+        .trim_start()
+        .starts_with('Z')
+}
+
+/// `!alive(pid)`, given `budget` to come true: a group-wide SIGKILL is
+/// delivered to each process as it is next scheduled, not all at once.
+fn stops_within(pid: i32, budget: Duration) -> bool {
+    let deadline = Instant::now() + budget;
+    while alive(pid) && Instant::now() < deadline {
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    !alive(pid)
+}
+
+fn wait_with_timeout(child: &mut std::process::Child, budget: Duration) -> Option<i32> {
+    let deadline = Instant::now() + budget;
+    loop {
+        match child.try_wait().expect("wait") {
+            Some(st) => return st.code(),
+            None => assert!(
+                Instant::now() < deadline,
+                "the runner did not exit after SIGTERM"
+            ),
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// `nobody`, numerically: it need not be in `/etc/passwd` to be a uid the
+/// kernel counts processes against.
+const NOBODY: u32 = 65534;
+
+/// The account a fork-bound test runs the agent as.
+///
+/// `RLIMIT_NPROC` does not bind root: the kernel does not enforce it for
+/// root, nor for a process holding `CAP_SYS_RESOURCE` or `CAP_SYS_ADMIN`.
+/// A suite run as root — a container, a CI image — would watch a fork bomb
+/// succeed and blame the runner, and watch an honest fan-out pass without
+/// the bound ever having been in play. So as root the agent runs as `nobody`, and
+/// the bound is proven under the condition the kernel enforces it in —
+/// which is also how an operator ought to run the agent. Anyone else runs
+/// it as themselves.
+fn bounded_account() -> u32 {
+    match unsafe { libc::geteuid() } {
+        0 => NOBODY,
+        me => me,
+    }
+}
+
+/// `cmd`, set to run as `uid`, with `dir` handed to that account first
+/// when it is not the one running the test.
+///
+/// The whole directory, the origin included, and not only the agent's:
+/// `git` refuses to fetch from a repository another account owns, and the
+/// runner's `git` runs with its environment cleared to three variables, so
+/// there is no way to hand it `safe.directory` from here.
+fn run_as(cmd: &mut Command, dir: &Path, uid: u32) {
+    if uid == unsafe { libc::geteuid() } {
+        return;
+    }
+    let chown = Command::new("chown")
+        .arg("-R")
+        .arg(format!("{uid}:{uid}"))
+        .arg(dir)
+        .status()
+        .expect("spawn chown");
+    assert!(chown.success(), "chown -R {}", dir.display());
+    cmd.uid(uid).gid(uid);
+}
+
+/// How many tasks `uid` already has, which is what `RLIMIT_NPROC` counts
+/// against the bound. Linux counts *threads*, so the thread listing is
+/// what is counted there; on macOS, where processes are what count, it is
+/// the process listing.
+///
+/// The fork-bomb test below sets the runner's ceiling above this rather
+/// than at some absolute number: the bound is per-uid and shared with
+/// everything else that account is doing, so an absolute one would either
+/// be under the floor — failing the checkout, which forks too — or so far
+/// above it that proving the bound would mean actually forking a machine
+/// into the ground.
+///
+/// The headroom over the measured count is deliberately large. This is
+/// one reading of a number that keeps moving: `RLIMIT_NPROC` is checked
+/// against the uid's count at the moment of each `fork`, the tests in
+/// this file run in parallel threads, and the sibling test below puts a
+/// hundred processes on the same uid on purpose. A tight headroom means
+/// that whenever the two overlap it is the fork-bomb test's *checkout*
+/// that is refused its forks, failing as "fetch of refs/heads/main
+/// failed" — the same failure as a ceiling set too low, arriving by a
+/// different door, and likeliest under llvm-cov where everything is slow
+/// enough to overlap. 300 is far more than the checkout and the sibling
+/// together can take, and still well short of what the step below
+/// attempts, so the bomb is refused in milliseconds either way.
+fn tasks_now(uid: u32) -> u64 {
+    let uid = uid.to_string();
+    // Not a fallback chain: BSD `ps` answers `-L` by printing the list of
+    // format keywords and exiting 0, so "try the Linux spelling first"
+    // would silently count nothing and set the ceiling below the
+    // checkout's own needs.
+    let args: &[&str] = if cfg!(target_os = "linux") {
+        &["-eLo", "uid="]
+    } else {
+        &["-Ao", "uid="]
+    };
+    let listing = Command::new("ps").args(args).output().expect("ps");
+    String::from_utf8_lossy(&listing.stdout)
+        .lines()
+        .filter(|l| l.trim() == uid)
+        .count() as u64
+}
+
+// ---------------------------------------------------------------- the tests
+
+/// The helper the signal and miner tests lean on, held to the case it
+/// exists for: a child this test killed and has not yet reaped is a
+/// zombie, which `kill(pid, 0)` still answers for and which has
+/// nonetheless stopped.
+#[test]
+fn a_killed_process_nobody_has_reaped_yet_is_not_alive() {
+    let mut child = Command::new("sleep").arg("30").spawn().expect("spawn");
+    let pid = child.id() as i32;
+    assert!(
+        !stops_within(pid, Duration::from_millis(60)),
+        "a running sleep is alive"
+    );
+    unsafe { libc::kill(pid, libc::SIGKILL) };
+    assert!(stops_within(pid, Duration::from_secs(5)), "it was killed");
+    assert_eq!(
+        unsafe { libc::kill(pid, 0) },
+        0,
+        "and it is a zombie rather than gone, which is the point"
+    );
+    child.wait().expect("reap");
+    assert!(!alive(pid), "and once reaped it is gone");
 }
 
 /// The registration exchange, against the artefact. What is only true here
@@ -992,43 +734,93 @@ fn a_mistyped_command_line_is_a_usage_error_that_prints_the_usage() {
     assert!(String::from_utf8_lossy(&out.stdout).contains("weft-runner register --url URL"));
 }
 
+/// No command at all. There is no default to fall back on — a machine
+/// that has not registered has nothing to ask for work with — so the
+/// operator who types the bare name is shown what it does, as a usage
+/// error: the same 2 and the same usage a mistyped flag gets.
+#[test]
+fn a_bare_weft_runner_prints_the_usage_and_exits_two() {
+    let out = run_agent(&[]);
+    assert_eq!(out.status.code(), Some(2));
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("a command is needed: register or run"),
+        "the operator is told what is missing: {err}"
+    );
+    assert!(
+        err.contains("weft-runner register --url URL")
+            && err.contains("weft-runner run [--dir DIR]"),
+        "and shown both commands: {err}"
+    );
+    assert!(out.stdout.is_empty(), "a usage error is not output");
+}
+
 /// The whole of `run`, against the artefact: read the credential, claim,
-/// check out a real repository, run a real step, report the verdict, and —
-/// because this runner is ephemeral — stop.
+/// check out a real repository, run real steps, stream the log, report the
+/// verdict, and — because this runner is ephemeral — stop.
 #[test]
 fn the_agent_claims_a_job_runs_it_on_this_machine_and_reports_the_verdict() {
     let dir = TestDir::new("agent-job");
     let (url, sha) = origin(dir.path());
     let steps = serde_json::json!([
-        { "name": "read the tree", "run": "cat VERSION" },
+        { "name": "greet", "run": "echo \"$GREETING $WEFT_MATRIX_RUST on $WEFT_SHA\"" },
+        { "name": "read the tree", "run": "cat VERSION; pwd" },
     ]);
     let stub = Stub::start(200, spec_json(&url, &sha, steps));
-    let agent = dir.path().join("agent");
-    write_runner_file(&agent, &stub, true);
-    stub.answer_claims(&[claim_reply(&stub, "job-e2e")]);
+    let agent = agent_with_one_job(dir.path(), &stub);
+    // Where the job's tree has to be, as the step's own `pwd` will print
+    // it: physical, because that is what the kernel hands a shell.
+    let tree = agent
+        .canonicalize()
+        .expect("the agent directory exists")
+        .join("work/job-e2e/repo");
 
-    let out = run_agent(&["run", "--dir", agent.to_str().expect("path")]);
+    let out = finish_run(agent_command(&agent, &[]));
 
-    assert_eq!(
-        out.status.code(),
-        Some(0),
-        "{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    finished_line(&out, 0);
     let said = String::from_utf8_lossy(&out.stdout);
     assert!(
         said.contains("listening as box1 (self-hosted, linux, x64, gpu)"),
         "it says what a job would have to match: {said}"
     );
     assert!(said.contains("took job job-e2e"), "{said}");
-    assert!(said.contains("finished job job-e2e"), "{said}");
 
     assert_eq!(wait_for_finish(&stub), ("passed".to_string(), None));
     let s = stub.seen();
     assert!(
+        s.final_log.contains(&format!("✓ Checkout {sha}")),
+        "the checkout is in the log: {}",
+        s.final_log
+    );
+    assert!(
+        s.final_log.contains(&format!("hello stable on {sha}")),
+        "spec env, matrix and the job's own variables all reach the step: {}",
+        s.final_log
+    );
+    assert!(
         s.final_log.contains("from-the-checked-out-tree"),
         "the step ran inside the checked-out tree: {}",
         s.final_log
+    );
+    // …and the tree is where the agent keeps a job's work, not somewhere
+    // it invented: `DIR/work/<job>/repo`.
+    assert!(
+        s.final_log.contains(&format!("{}\n", tree.display())),
+        "the tree was checked out under {}: {}",
+        tree.display(),
+        s.final_log
+    );
+    assert!(
+        s.final_log.contains("✓ greet (") && s.final_log.contains("✓ read the tree ("),
+        "each step is marked done: {}",
+        s.final_log
+    );
+    // Streaming is the point of the chunk endpoint: a person watching a
+    // running job sees output before the final PUT.
+    assert!(!s.chunks.is_empty(), "the log was streamed while it ran");
+    assert!(
+        s.final_log.contains(s.chunks[0].trim_end()),
+        "streamed chunks are the same text as the final log"
     );
     assert!(
         s.auth.contains(&"Bearer strr-e2e".to_string()),
@@ -1036,9 +828,9 @@ fn the_agent_claims_a_job_runs_it_on_this_machine_and_reports_the_verdict() {
         s.auth
     );
     assert!(
-        s.auth.contains(&"Bearer tok-e2e".to_string()),
-        "and the job carried the per-job one: {:?}",
-        s.auth
+        !s.job_auth.is_empty() && s.job_auth.iter().all(|a| a == "Bearer tok-e2e"),
+        "and every call about the job carried the per-job one: {:?}",
+        s.job_auth
     );
     // The job's directory existed only while the job did: a leftover
     // checkout is the next person's job reading somebody else's tree.
@@ -1046,6 +838,87 @@ fn the_agent_claims_a_job_runs_it_on_this_machine_and_reports_the_verdict() {
         !agent.join("work/job-e2e").exists(),
         "the workdir was removed"
     );
+}
+
+#[test]
+fn a_failing_step_stops_the_job_and_names_it() {
+    let dir = TestDir::new("fail");
+    let (url, sha) = origin(dir.path());
+    let steps = serde_json::json!([
+        { "name": "build", "run": "echo building; exit 3" },
+        { "name": "test", "run": "echo never" },
+    ]);
+    let stub = Stub::start(200, spec_json(&url, &sha, steps));
+    let agent = agent_with_one_job(dir.path(), &stub);
+
+    let out = finish_run(agent_command(&agent, &[]));
+
+    // The job ended 0, not 1: the verdict was delivered. A failing build
+    // is not a failing runner, and the operator reads the two differently.
+    finished_line(&out, 0);
+    assert_eq!(
+        wait_for_finish(&stub),
+        (
+            "failed".to_string(),
+            Some("step \"build\" exited 3".to_string())
+        )
+    );
+    let s = stub.seen();
+    assert!(
+        s.final_log.contains("✗ build exited 3 ("),
+        "{}",
+        s.final_log
+    );
+    assert!(
+        s.final_log.contains("– test (not run)"),
+        "a step after the failure is reported as not run: {}",
+        s.final_log
+    );
+    assert!(
+        !s.final_log.contains("never"),
+        "and it really did not run: {}",
+        s.final_log
+    );
+}
+
+/// A job whose token the control plane refuses never starts, and the
+/// agent says so with the job's own code — 2 — beside it, so an operator
+/// can tell "the job never started" from "the job ran and failed". The
+/// agent itself is fine, and an ephemeral one still exits 0.
+#[test]
+fn a_job_the_control_plane_refuses_is_reported_as_never_started() {
+    let dir = TestDir::new("refused");
+    let stub = Stub::start(403, String::new());
+    let agent = agent_with_one_job(dir.path(), &stub);
+
+    let out = finish_run(agent_command(&agent, &[]));
+
+    finished_line(&out, 2);
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("job job-e2e: refused: 403"),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        stub.seen().finish.is_none(),
+        "nothing is reported for a job that was never fetched"
+    );
+}
+
+#[test]
+fn a_job_that_is_no_longer_running_ends_quietly_without_a_verdict() {
+    let dir = TestDir::new("gone");
+    let stub = Stub::start(410, String::new());
+    let agent = agent_with_one_job(dir.path(), &stub);
+
+    let out = finish_run(agent_command(&agent, &[]));
+
+    // Cancelled or superseded between the claim and the fetch. An ending
+    // nobody has to act on, so the job's code is 0 and no code is shown.
+    finished_line(&out, 0);
+    let s = stub.seen();
+    assert!(s.finish.is_none(), "no verdict for a job that is over");
+    assert!(s.chunks.is_empty(), "and no work was done for it");
 }
 
 #[test]
@@ -1117,16 +990,27 @@ fn a_sigterm_while_idle_stops_the_agent_promptly() {
     assert!(stub.seen().finish.is_none(), "nothing ran");
 }
 
-/// The same signal, arriving while a job is running on somebody's own
-/// machine. The grandchild is the assertion that matters, as it is for the
-/// hosted runner: a runner that merely dies looks fine from the outside,
-/// and only the surviving process shows that the step's group was orphaned
-/// — on a self-hosted runner, on hardware the operator keeps using.
+/// An operator stopping the runner while a job is running on it: Ctrl-C,
+/// `systemctl stop`, `docker stop` — SIGTERM, and then SIGKILL when the
+/// service manager's patience runs out. Before the handler existed the
+/// runner had no disposition for it: it died instantly, mid-step, leaving
+/// the step's *process group* orphaned — the `sleep` here outlived the
+/// runner and kept burning the machine's CPU with nobody left to stop it —
+/// and as PID 1 in a container with no init the signal was ignored
+/// outright and the job ran to the end.
+///
+/// The grandchild is the assertion that matters. A runner that merely dies
+/// looks fine from the outside; only the surviving process shows the bug.
+/// The registration is *not* ephemeral, so the exit also proves that the
+/// stop ended the loop rather than the loop ending itself after one job.
 #[test]
-fn a_sigterm_during_a_self_hosted_job_kills_the_step_group_and_reports_nothing() {
+fn a_sigterm_during_a_job_kills_the_step_group_and_reports_nothing() {
     let dir = TestDir::new("agent-job-term");
     let (url, sha) = origin(dir.path());
     let pidfile = dir.path().join("child.pid");
+    // The step backgrounds a long sleep, records its pid where the test can
+    // read it, and waits: exactly the shape of a build that has spawned a
+    // compiler and is blocked on it.
     let steps = serde_json::json!([
         { "name": "slow", "run": "echo started; sleep 30 & echo $! > \"$PIDFILE\"; wait" },
     ]);
@@ -1138,33 +1022,234 @@ fn a_sigterm_during_a_self_hosted_job_kills_the_step_group_and_reports_nothing()
     write_runner_file(&agent, &stub, false);
     stub.answer_claims(&[claim_reply(&stub, "job-e2e")]);
 
-    let mut child = Command::new(env!("CARGO_BIN_EXE_weft-runner"))
-        .env_clear()
-        .env("PATH", std::env::var("PATH").unwrap_or_default())
-        .args(["run", "--dir", agent.to_str().expect("path")])
+    let mut child = agent_command(&agent, &[])
         .spawn()
         .expect("spawn weft-runner");
 
     let grandchild = wait_for_pid(&pidfile);
     assert!(alive(grandchild), "the step's sleep is running");
-
-    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
-
-    let deadline = Instant::now() + Duration::from_secs(5);
-    while alive(grandchild) {
+    // What the step said before the signal has reached the control plane.
+    // Waited for rather than assumed, and the only place it can be seen:
+    // once the job is cancelled nothing more is sent, and the agent
+    // removes the job's directory, log file and all. That the file itself
+    // is flushed rather than abandoned mid-buffer is proven in-crate, by
+    // `a_signal_kills_the_step_group_flushes_the_log_and_reports_nothing`.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !stub.seen().chunks.concat().contains("started") {
         assert!(
             Instant::now() < deadline,
-            "the step's process group outlived the runner (pid {grandchild})"
+            "the step's output never streamed"
         );
         std::thread::sleep(Duration::from_millis(20));
     }
+
+    unsafe { libc::kill(child.id() as i32, libc::SIGTERM) };
+
+    // Within two seconds: a service manager gives more, but a runner that
+    // needs seconds to let go is one that gets SIGKILLed with its log
+    // unflushed.
+    assert!(
+        stops_within(grandchild, Duration::from_secs(2)),
+        "the step's process group outlived the runner (pid {grandchild})"
+    );
     assert_eq!(
         wait_with_timeout(&mut child, Duration::from_secs(5)),
         Some(0),
-        "a stopped runner is an expected ending, not a failure"
+        "an operator stopping a runner is an expected ending, not a failure"
+    );
+    let s = stub.seen();
+    let streamed = s.chunks.concat();
+    assert!(
+        streamed.contains("▶ slow") && streamed.contains("started"),
+        "{streamed}"
     );
     assert!(
-        stub.seen().finish.is_none(),
+        s.finish.is_none(),
         "a job that was stopped does not answer for itself"
     );
+    assert!(s.final_log.is_empty(), "nor upload an authoritative log");
+    assert_eq!(s.claims, 1, "and the runner did not ask for another");
+}
+
+/// Layer 3 against the artefact: the built binary, its own process, its
+/// own two-second sampler. The in-crate test drives the same path, but
+/// only here is the watch running inside a `main` that an operator
+/// started — and only here would a `#[cfg(test)]`-shaped mistake, or a
+/// sampler that reads `/proc` for the wrong process, show up.
+///
+/// The miner is `/bin/sleep` under the name `xmrig`: a *symlink*, because
+/// a copied system binary is SIGKILLed on sight by macOS for an invalid
+/// signature and the test would then pass against a zombie. Nothing that
+/// mines anything is in this repository.
+#[test]
+fn the_binary_stops_a_step_that_starts_a_miner_and_says_it_was_abuse() {
+    let dir = TestDir::new("miner");
+    let (url, sha) = origin(dir.path());
+    // The pid goes outside the job's directory, which the agent removes
+    // when the job is over.
+    let pidfile = dir.path().join("miner.pid");
+    let steps = serde_json::json!([
+        { "name": "build", "run": "ln -s /bin/sleep ./xmrig; ./xmrig 120 & echo $! > \"$PIDFILE\"; wait" },
+        { "name": "test", "run": "echo never" },
+    ]);
+    let mut spec: serde_json::Value =
+        serde_json::from_str(&spec_json(&url, &sha, steps)).expect("spec");
+    spec["env"] = serde_json::json!({ "PIDFILE": pidfile.to_string_lossy() });
+    let stub = Stub::start(200, spec.to_string());
+    let agent = agent_with_one_job(dir.path(), &stub);
+
+    let started = Instant::now();
+    let out = finish_run(agent_command(&agent, &[]));
+
+    finished_line(&out, 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "it waited out the miner instead of killing it"
+    );
+    assert_eq!(
+        wait_for_finish(&stub),
+        (
+            "failed".to_string(),
+            Some("mining software detected: xmrig".to_string())
+        )
+    );
+    let s = stub.seen();
+    assert_eq!(
+        s.abuse.as_deref(),
+        Some("mining"),
+        "the verdict says what kind of failure it was"
+    );
+    // Killed, not merely reported: the group is gone, so the step stops
+    // costing the machine anything the moment the verdict is written.
+    let pid = wait_for_pid(&pidfile);
+    assert!(
+        stops_within(pid, Duration::from_secs(5)),
+        "the miner outlived the runner (pid {pid})"
+    );
+    assert!(
+        s.final_log
+            .contains("\u{2717} build stopped: mining software detected: xmrig"),
+        "{}",
+        s.final_log
+    );
+    assert!(
+        !s.final_log.contains("never"),
+        "the step after it did not run: {}",
+        s.final_log
+    );
+}
+
+/// The process ceiling, against the built binary. A fork bomb is the one
+/// thing a step can do that costs somebody other than its own job: it
+/// takes the machine down, and everything else its owner runs there. The
+/// bound is `RLIMIT_NPROC`, set by the runner on each step, which means
+/// this is the only place it can be proven end to end — and
+/// `STRATUM_RUNNER_MAX_PROCS` on `run` is how it is proven without a real
+/// fork bomb.
+///
+/// Two things are asserted, and the second is the point. The step fails,
+/// *as the step*: the shell's own "fork: Resource temporarily
+/// unavailable" reaches the job log and the verdict names the step, so
+/// the author sees a step they can fix rather than a runner that broke.
+/// And the runner itself is unharmed — it reports the verdict and ends the
+/// job cleanly, which is what stops a bomb from taking the agent with it.
+///
+/// Nothing here forks a machine into the ground: the ceiling is set a few
+/// hundred above what the agent's account already has, so the loop is
+/// refused a fork long before it reaches its two-thousandth and bash gives
+/// up. `sleep 5`, not a tenth of a second, so that the processes it does
+/// start are still alive while the rest are being refused: a sleep short
+/// enough to exit under the loop would free slots as fast as they were
+/// taken, and the bound would never be reached.
+#[test]
+fn the_binary_bounds_a_step_that_tries_to_fork_without_end() {
+    let dir = TestDir::new("forkbomb");
+    let (url, sha) = origin(dir.path());
+    let steps = serde_json::json!([
+        { "name": "build", "run": "for i in $(seq 1 2000); do /bin/sleep 5 & done; wait; echo unbounded" },
+        { "name": "test", "run": "echo never" },
+    ]);
+    let stub = Stub::start(200, spec_json(&url, &sha, steps));
+    let agent = agent_with_one_job(dir.path(), &stub);
+    let uid = bounded_account();
+    let ceiling = (tasks_now(uid) + 300).to_string();
+    let mut cmd = agent_command(&agent, &[("STRATUM_RUNNER_MAX_PROCS", &ceiling)]);
+    run_as(&mut cmd, dir.path(), uid);
+
+    let started = Instant::now();
+    let out = finish_run(cmd);
+
+    finished_line(&out, 0);
+    assert!(
+        started.elapsed() < Duration::from_secs(60),
+        "it waited the forks out instead of being refused them"
+    );
+    let (state, error) = wait_for_finish(&stub);
+    assert_eq!(state, "failed");
+    let error = error.expect("a failed job says why");
+    assert!(
+        error.starts_with("step \"build\" exited"),
+        "the step's own failure, not the runner's: {error}"
+    );
+    let s = stub.seen();
+    assert!(
+        s.abuse.is_none(),
+        "a fork bomb is a failed job, not an abuse report"
+    );
+    assert!(
+        !s.final_log.contains("unbounded"),
+        "the loop never finished: {}",
+        s.final_log
+    );
+    assert!(
+        !s.final_log.contains("never"),
+        "and the step after it did not run: {}",
+        s.final_log
+    );
+}
+
+/// The half that decides whether the bound is usable at all. A hundred
+/// processes at once is an ordinary parallel build, not an attack, and
+/// the default ceiling has to let it through — a bound that failed honest
+/// work would be a worse bug than the one it prevents, and it would be
+/// discovered by somebody's build rather than by us. Run under the same
+/// account as the bomb above, so that as root the default ceiling is
+/// really in play rather than waved through.
+#[test]
+fn a_step_that_forks_a_hundred_processes_is_not_a_fork_bomb() {
+    let dir = TestDir::new("fanout");
+    let (url, sha) = origin(dir.path());
+    let steps = serde_json::json!([
+        { "name": "build", "run": "for i in $(seq 1 100); do /bin/sleep 0.2 & done; wait; echo fanned out" },
+    ]);
+    let stub = Stub::start(200, spec_json(&url, &sha, steps));
+    let agent = agent_with_one_job(dir.path(), &stub);
+    let mut cmd = agent_command(&agent, &[]);
+    run_as(&mut cmd, dir.path(), bounded_account());
+
+    let out = finish_run(cmd);
+
+    finished_line(&out, 0);
+    assert_eq!(wait_for_finish(&stub), ("passed".to_string(), None));
+    assert!(
+        stub.seen().final_log.contains("fanned out"),
+        "{}",
+        stub.seen().final_log
+    );
+}
+
+/// Not an assertion about the runner so much as about this file: the
+/// helpers above must not quietly stop being used, which is how a suite
+/// grows a fixture nobody drives.
+#[test]
+fn the_fixture_builds_a_repository_the_runner_could_check_out() {
+    let dir = TestDir::new("fixture");
+    let (url, sha) = origin(dir.path());
+    assert_eq!(sha.len(), 40, "a real commit sha");
+    let refs: BTreeMap<String, String> = run_git(Path::new(&url), &["show-ref"])
+        .lines()
+        .filter_map(|l| l.split_once(' '))
+        .map(|(a, b)| (b.to_string(), a.to_string()))
+        .collect();
+    assert_eq!(refs.get("refs/heads/main"), Some(&sha));
 }

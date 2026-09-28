@@ -85,13 +85,16 @@ pub struct Ctx<'a> {
 
 /// How many processes one job is allowed. A fork bomb — deliberate, or a
 /// build script's parallelism multiplied by itself — otherwise takes the
-/// whole host down with it, and every other task on that host with it.
+/// whole machine down with it, and everything else its owner runs there.
 ///
-/// It lives here rather than in the task definition because Fargate
-/// accepts only the `nofile` ulimit, so there is nowhere else on the
-/// deployed fleet to put it. `RLIMIT_NPROC` is per *uid*, and the
-/// container runs exactly one job as uid 10002, so the only processes
-/// counted against this bound are that job's own.
+/// It is `RLIMIT_NPROC`, set on each step as it starts, and the kernel
+/// counts that per *uid*: against every process the runner's account has
+/// (every thread, on Linux), not only the job's. On a machine where that
+/// account does other work too, a job's headroom is this bound less
+/// whatever is already running, which is why the agent is best run under
+/// an account of its own. And the kernel does not hold root to it at all:
+/// an agent started as root has no process ceiling, whatever this says.
+/// `STRATUM_RUNNER_MAX_PROCS` lowers it; see `agent::params_from`.
 ///
 /// The number is deliberately generous: a parallel build legitimately
 /// runs hundreds of compilers, and a bound that fails an honest `make
@@ -333,9 +336,10 @@ pub fn run_steps(
         // Checked before the exit code, because what the exit code says
         // about a step whose group was killed is "137", and a job stopped
         // for mining must not be reported as an ordinary failure — the
-        // control plane suspends the organisation on this and nothing
-        // else. `xmrig || true` is why it is checked even when the step
-        // exited 0.
+        // verdict's `abuse` field is what tells the machine's owner what
+        // was tried on it, and this is the only place it is set.
+        // `xmrig || true` is why it is checked even when the step exited
+        // 0.
         if let Some(name) = ctx.abuse.found() {
             ctx.sink.line(&format!(
                 "\u{2717} {} stopped: mining software detected: {name} ({secs}s)",
@@ -377,7 +381,7 @@ pub fn not_run(a: &Assignment, from: usize, sink: &Sink) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use crate::spec::parse_assignment;
     use crate::testdir::TestDir;
@@ -401,6 +405,62 @@ mod tests {
 
     fn far() -> Instant {
         Instant::now() + Duration::from_secs(60)
+    }
+
+    /// Whether `pid` has stopped running: gone, or a zombie waiting for
+    /// whoever reaps it.
+    ///
+    /// Not `kill(pid, 0)` alone. When a step's shell dies its children are
+    /// reparented to PID 1, and a zombie answers `kill(pid, 0)` exactly as
+    /// a running process does until PID 1 gets round to reaping it — which
+    /// some inits do on a timer: the one this suite was first run under
+    /// took about two seconds. What the runner promises is that the group
+    /// is killed; how promptly somebody else's init tidies up is not its
+    /// to promise, and a test that asserted it failed on that machine
+    /// every time.
+    pub(crate) fn stopped(pid: i32) -> bool {
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return true;
+        }
+        let out = Command::new("ps")
+            .args(["-o", "stat=", "-p", &pid.to_string()])
+            .output()
+            .expect("ps");
+        String::from_utf8_lossy(&out.stdout)
+            .trim_start()
+            .starts_with('Z')
+    }
+
+    /// [`stopped`], given a moment: a group-wide SIGKILL is delivered to
+    /// each process as it is next scheduled, not all at once.
+    pub(crate) fn stops_within(pid: i32, budget: Duration) -> bool {
+        let deadline = Instant::now() + budget;
+        while !stopped(pid) && Instant::now() < deadline {
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        stopped(pid)
+    }
+
+    /// The case the helper exists for, made on purpose: a child this test
+    /// killed and has not yet reaped is a zombie, which `kill(pid, 0)`
+    /// still answers for and which has nonetheless stopped.
+    #[test]
+    fn a_killed_process_nobody_has_reaped_yet_has_stopped() {
+        let mut child = Command::new("sleep").arg("30").spawn().expect("spawn");
+        let pid = child.id() as i32;
+        assert!(
+            !stops_within(pid, Duration::from_millis(60)),
+            "a running sleep has not stopped"
+        );
+        unsafe { libc::kill(pid, libc::SIGKILL) };
+        assert!(stops_within(pid, Duration::from_secs(5)), "it was killed");
+        assert_eq!(
+            unsafe { libc::kill(pid, 0) },
+            0,
+            "and it is a zombie rather than gone, which is the point"
+        );
+        child.wait().expect("reap");
+        assert!(stopped(pid), "and once reaped it is gone");
     }
 
     fn no() -> AtomicBool {
@@ -766,8 +826,8 @@ mod tests {
     ///
     /// The step backgrounds it and waits, so what is proven is that the
     /// whole *group* dies. A step that merely returned while its miner
-    /// carried on would keep burning the task's CPU until the container
-    /// was torn down, which is the cost this exists to stop.
+    /// carried on would keep burning the machine's CPU after the job had
+    /// ended, which is the cost this exists to stop.
     #[test]
     fn a_step_that_starts_a_miner_is_killed_and_the_job_says_why() {
         let dir = TestDir::new("steps-miner");
@@ -789,7 +849,7 @@ mod tests {
             .parse()
             .expect("a pid");
         assert!(
-            unsafe { libc::kill(miner, 0) } != 0,
+            stops_within(miner, Duration::from_secs(5)),
             "the miner outlived the step (pid {miner})"
         );
         let out = drain(&rx);
@@ -876,6 +936,19 @@ mod tests {
     /// its four-thousandth.
     #[test]
     fn a_step_that_forks_past_the_ceiling_fails_without_wedging_the_runner() {
+        // Root is exempt: the kernel does not enforce `RLIMIT_NPROC` for
+        // root, nor for a process holding `CAP_SYS_RESOURCE` or
+        // `CAP_SYS_ADMIN`, so as root the ceiling is set —
+        // `a_step_runs_under_a_process_ceiling` still holds — and never
+        // hit, and this step would fork freely. This
+        // process cannot become another uid for one test: `setuid` here is
+        // process-wide and one-way. The refusal is proven instead against
+        // the built binary, which `binary_e2e` starts as `nobody` when it
+        // finds itself root.
+        if unsafe { libc::geteuid() } == 0 {
+            eprintln!("NOTE: root is not bound by RLIMIT_NPROC; binary_e2e proves the refusal");
+            return;
+        }
         let dir = TestDir::new("nproc-bomb");
         let (sink, rx) = collector();
         let a = assignment(serde_json::json!([

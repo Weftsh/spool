@@ -151,7 +151,7 @@ fn into(
             "checkout",
             vec!["checkout".into(), "-q".into(), sha.into()],
             // The overwhelmingly common cause, and the one worth naming:
-            // the branch moved between the dispatcher reading it and the
+            // the branch moved between the server queueing the job and the
             // runner fetching it, so the commit under test is no longer
             // reachable from the ref we were told to fetch.
             format!("commit {sha} is no longer on {fetch_ref}"),
@@ -181,11 +181,10 @@ fn into(
 /// A `git` invocation with a scrubbed environment and the auth header.
 ///
 /// The environment is cleared down to the same allowlist a step gets —
-/// `spec::inherited_env` — so that a variable in the task definition
-/// (`GIT_SSH_COMMAND`, a proxy, an `http.*` override) cannot change where
-/// the fetch goes, and so that the job token in this process's own
-/// environment cannot reach git by accident. It arrives below, as a
-/// header, deliberately.
+/// `spec::inherited_env` — so that a variable in the operator's own
+/// environment (`GIT_SSH_COMMAND`, a proxy, an `http.*` override) cannot
+/// change where the fetch goes, and so that nothing but the job token
+/// authenticates it. That arrives below, as a header, deliberately.
 fn git(cwd: &Path, args: &[String], token: &str, inherited: &BTreeMap<String, String>) -> Command {
     let mut c = Command::new("git");
     c.current_dir(cwd).args(args).env_clear();
@@ -375,7 +374,7 @@ pub(crate) mod tests {
 
     #[test]
     fn an_earlier_commit_on_the_ref_is_still_reachable() {
-        // The dispatcher's sha is not always the tip: a push of two commits
+        // The job's sha is not always the tip: a push of two commits
         // can queue a job for the first one.
         let dir = TestDir::new("checkout-old");
         let (url, shas) = origin(dir.path());
@@ -466,7 +465,7 @@ pub(crate) mod tests {
         );
         // The errno differs by platform (EROFS under SIP, EACCES on a
         // Linux runner); what must not differ is that it is reported as
-        // the job's error rather than a panic in the container.
+        // the job's error rather than a panic in the runner.
         // Matched through Debug rather than destructured: a `let … else`
         // would need an arm that a passing run can never take, and the
         // coverage gate would rightly ask what it is for.

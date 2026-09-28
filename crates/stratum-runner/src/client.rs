@@ -4,11 +4,11 @@
 //!
 //! **410 is not an error.** It is the control plane saying the job left
 //! `running` — cancelled by a person, superseded by a newer push, or timed
-//! out by the dispatcher's sweep — and the only correct response is to stop
-//! doing work and exit 0. Treating it as a transport failure would mean a
-//! cancelled job keeps compiling for another six hours, holding a Fargate
-//! task nobody is watching, and eventually reporting a verdict for a run
-//! that already settled.
+//! out by the server's overdue sweep — and the only correct response is to
+//! stop doing work and end the job quietly. Treating it as a transport
+//! failure would mean a cancelled job keeps compiling for another six
+//! hours on the operator's machine, and eventually reports a verdict for a
+//! run that already settled.
 
 use crate::spec::{parse_assignment, Assignment};
 use std::io::Read;
@@ -88,7 +88,7 @@ impl Client {
     }
 
     /// `GET /v1/runner/jobs/:id`, retried five times because a control
-    /// plane that is redeploying while a task starts is normal and losing
+    /// plane that is restarting just as a job starts is normal and losing
     /// the job over it is not.
     pub fn fetch(&self) -> Result<Assignment, CallError> {
         let body = self.retry(5, || {
@@ -124,8 +124,8 @@ impl Client {
 
     /// The idle heartbeat. A job whose steps are silent for minutes — a
     /// long link step, a test suite that only prints at the end — is still
-    /// alive, and without this the dispatcher's lease expires and another
-    /// runner claims the same attempt.
+    /// alive, and without this its lease on the server expires and another
+    /// runner is handed the same job while this one is still doing it.
     pub fn renew(&self) -> Result<(), CallError> {
         self.agent
             .post(&self.url("/lease"))
@@ -151,7 +151,7 @@ impl Client {
     }
 
     /// The verdict. Retried, because a verdict that never lands leaves the
-    /// job to be failed by the dispatcher's overdue sweep hours later.
+    /// job to be failed by the server's overdue sweep hours later.
     pub fn finish(
         &self,
         state: &str,
@@ -218,7 +218,7 @@ fn classify(e: ureq::Error) -> CallError {
     }
 }
 
-/// The first 200 bytes of an error body, for the container log. The whole
+/// The first 200 bytes of an error body, for the runner's stderr. The whole
 /// body could be an HTML error page from a proxy nobody knew was there.
 fn snippet(r: ureq::Response) -> String {
     let mut s = String::new();
@@ -359,7 +359,7 @@ mod tests {
     }
 
     #[test]
-    fn call_errors_read_as_themselves_in_the_container_log() {
+    fn call_errors_read_as_themselves_on_the_runners_stderr() {
         assert_eq!(CallError::Gone.to_string(), "job is no longer running");
         assert_eq!(
             CallError::Refused("403: nope".into()).to_string(),
@@ -370,7 +370,7 @@ mod tests {
     }
 
     #[test]
-    fn an_error_body_is_trimmed_to_something_a_container_log_can_hold() {
+    fn an_error_body_is_trimmed_to_something_a_terminal_can_hold() {
         let cp = FakeCp::start();
         cp.script_spec(vec![Reply::body(
             403,
