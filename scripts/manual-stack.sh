@@ -298,7 +298,9 @@ Start Docker, or run as root."
   # had: MinIO publishes no darwin build any more (scripts/fetch-minio.sh).
   local minio_release minio_image pull_log
   minio_release=$(tr -d '[:space:]' < "$ROOT/.minio-version")
-  minio_image="quay.io/minio/minio:$minio_release"
+  # STRATUM_MINIO_IMAGE names another copy of it, the same variable
+  # scripts/fetch-minio.sh reads (a repository, no tag).
+  minio_image="${STRATUM_MINIO_IMAGE:-quay.io/minio/minio}:$minio_release"
   MINIO_HOST=1
   if [ "$USE_DOCKER" = 1 ]; then
     pull_log=$(mktemp)
@@ -306,7 +308,8 @@ Start Docker, or run as root."
        || docker pull -q "$minio_image" > "$pull_log" 2>&1; then
       MINIO_HOST=0
     elif [ -x "$ROOT/.testkit/bin/minio" ]; then
-      say "minio: docker could not pull $minio_image ($(tail -1 "$pull_log" | cut -c1-120))"
+      # The end of docker's sentence is the reason; the start is the name.
+      say "minio: docker could not pull $minio_image (…$(tail -1 "$pull_log" | tail -c 90))"
       say "  running .testkit/bin/minio on the host instead"
     else
       die "docker could not pull $minio_image, and there is no .testkit/bin/minio to fall back to:

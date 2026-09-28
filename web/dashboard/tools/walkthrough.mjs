@@ -3922,12 +3922,10 @@ await step("connecting GitHub and picking a repository", async () => {
         text: `the stack's origin for acme-inc/atlas is not at ${bare} (STRATUM_MAIL_DIR unset, or the stack was built elsewhere)`,
       });
     } else {
-      // acme's own admin token, from the stack's bootstrap — not the
-      // page cookie. By this stage the browser is signed in as the
-      // GitHub user (`ada-dev`), who owns a personal namespace and is
-      // no member of `acme`, so a cookie-minted token 404s on acme.
-      // The mirror was created with acme's admin session; the git push
-      // must use the same identity.
+      // acme's own admin token, from the stack's bootstrap — a
+      // credential the stack already holds, so this push leaves nothing
+      // behind to revoke. What is under test is the forward, not how the
+      // pusher authenticated; the token and SSH-key stages cover that.
       let tok = null;
       try {
         tok = JSON.parse(
@@ -4010,22 +4008,31 @@ await step("connecting GitHub and picking a repository", async () => {
           text: `a push through the mirror failed: ${detail.replace(/\s+/g, " ").slice(0, 400)}`,
         });
       }
-      // Do NOT navigate to /dashboard/repos/atlas here: by this stage
-      // the browser is the GitHub user, who is no member of acme and
-      // cannot load acme's private mirror, so the tree/branches reads
-      // would 404 and be recorded as problems. The "pushes are
-      // forwarded" notice is exercised in full by the Playwright suite
-      // (mocked API, every push state) and by a live headed check; the
-      // product proof here is the real git push above landing on the
-      // origin. Shoot the current screen (the first-sync result), which
-      // the session can see.
-      await shot(page, "27-mirror-push", "a mirror that pushed back through to its origin");
+      // And the repository's own page says where a push goes. The
+      // Playwright suite drives every push state against a mocked API;
+      // this is the one state a real installation with `Contents: write`
+      // produces, read off the real server by the owner who made it.
+      // (This used to be skipped on the belief that the browser was a
+      // GitHub-made account with no seat in acme by now. It is the owner:
+      // the stage before signed back in as one.)
+      await page.goto(`${BASE}/acme/atlas`, { waitUntil: "networkidle" });
+      const notice = page.getByTestId("mirror-push");
+      const says = await notice
+        .waitFor({ timeout: 15000 })
+        .then(() => notice.innerText())
+        .catch(() => "");
+      if (!/^Pushes to this mirror are forwarded to .*acme-inc\/atlas/.test(says))
+        problems.push({
+          where: stage,
+          kind: "content",
+          text: `the mirror's page should say its pushes are forwarded to acme-inc/atlas; it says ${JSON.stringify(says)}`,
+        });
+      await shot(page, "27-mirror-push", "a mirror that pushed back through to its origin, and says so");
     }
   }
 
-  // Leave the org as it was found. acme's admin token, not the page
-  // cookie: the browser is the GitHub user by now and cannot delete an
-  // acme repo.
+  // Leave the org as it was found, with the same admin token the push
+  // used.
   try {
     const adminTok = JSON.parse(
       fs.readFileSync(path.join(path.dirname(MAIL_DIR), "bootstrap.json"), "utf8"),

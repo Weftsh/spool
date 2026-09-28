@@ -29,6 +29,9 @@ set -euo pipefail
 
 root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 release="$(tr -d '[:space:]' < "$root/.minio-version")"
+# Another copy of the pinned image, when quay.io is not reachable from
+# here — the same variable scripts/fetch-minio.sh and manual-stack.sh read
+# (a repository, no tag).
 
 # `--fresh` throws the container away and starts a new one.
 #
@@ -79,7 +82,7 @@ case "$state" in
       -e MINIO_ROOT_USER=stratum-test \
       -e MINIO_ROOT_PASSWORD=stratum-test-only \
       -e MINIO_BROWSER=off \
-      "quay.io/minio/minio:$release" server /data >/dev/null
+      "${STRATUM_MINIO_IMAGE:-quay.io/minio/minio}:$release" server /data >/dev/null
     ;;
 esac
 
