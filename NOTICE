@@ -1,0 +1,31 @@
+Spool
+Copyright 2026 Weft
+
+This product includes or redistributes the following third-party software.
+
+--------------------------------------------------------------------------
+Rust crates
+The server and runner binaries are built from the crates pinned in
+Cargo.lock, each under its own license (predominantly MIT and/or
+Apache-2.0).
+
+--------------------------------------------------------------------------
+Dashboard dependencies
+The dashboard bundle is built from the npm packages pinned in
+web/dashboard/package-lock.json, each under its own license
+(predominantly MIT).
+
+--------------------------------------------------------------------------
+Git
+Copyright Linus Torvalds and others.
+Licensed under the GNU General Public License, version 2.
+Source: https://git-scm.com/
+The server image installs git from Debian's package archive, unmodified.
+The server runs it as a separate program; it is not linked into Spool.
+
+--------------------------------------------------------------------------
+tini
+Copyright Thomas Orozco.
+Licensed under the MIT License.
+Source: https://github.com/krallin/tini
+The server image installs tini from Debian's package archive, unmodified.

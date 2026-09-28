@@ -3,6 +3,7 @@ name = "stratum-store"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [features]
 # STRATUM-CORE DIVERGENCE: the research repo's client-side S3 latency models

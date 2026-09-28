@@ -3,6 +3,7 @@ name = "stratum-control"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 postgres.workspace = true

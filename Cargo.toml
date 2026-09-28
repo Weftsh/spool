@@ -13,6 +13,7 @@ members = [
 [workspace.package]
 edition = "2021"
 publish = false
+license = "FSL-1.1-ALv2"
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }
@@ -33,8 +34,8 @@ debug = true
 
 # Dependencies, but never a workspace member: `"*"` in a profile matches
 # only packages we did not write. Every `crates/stratum-*` line keeps
-# `opt-level = 0`, so the lcov line mapping that `coverage-ledger.toml` is
-# exact against is untouched — and the debug suite stops paying
+# `opt-level = 0`, so stepping through our own code and mapping a line
+# back to its source stay exact — and the debug suite stops paying
 # unoptimised Argon2, SHA-1/2 and zlib, which is most of what a git forge
 # does. Costs one slow rebuild of the dependency graph per cache miss.
 [profile.dev.package."*"]

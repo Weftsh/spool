@@ -3,6 +3,7 @@ name = "stratum-proto"
 version = "0.1.0"
 edition.workspace = true
 publish.workspace = true
+license.workspace = true
 
 [dependencies]
 stratum-store = { path = "../stratum-store" }
