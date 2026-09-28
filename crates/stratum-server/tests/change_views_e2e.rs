@@ -583,16 +583,22 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     let mut ada = signup(&server, &mail, "ada", "ada@example.com");
     let mut bob = signup(&server, &mail, "bob", "bob@example.com");
 
-    // Ada's public project, with three files on trunk.
-    let (st, body) = ada.req(
-        "POST",
-        "/v1/orgs/ada/repos",
-        Some(serde_json::json!({ "name": "app" })),
-    );
+    // Ada's project, in an organisation — a personal namespace has no
+    // members, and somebody else has to be able to read it to fork it —
+    // with two files on trunk. Bob is a viewer: he may read, and he may
+    // not push.
+    let (st, body) = ada.req("POST", "/v1/orgs", Some(serde_json::json!({ "name": "acme" })));
     assert_eq!(st, 201, "{body}");
     let (st, body) = ada.req(
         "POST",
-        "/v1/orgs/ada/repos/app/commits",
+        "/v1/orgs/acme/repos",
+        Some(serde_json::json!({ "name": "app" })),
+    );
+    assert_eq!(st, 201, "{body}");
+    ada.invite_and_accept("acme", "bob@example.com", "viewer");
+    let (st, body) = ada.req(
+        "POST",
+        "/v1/orgs/acme/repos/app/commits",
         Some(serde_json::json!({
             "message": "seed",
             "operations": [
@@ -603,8 +609,8 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     );
     assert_eq!(st, 201, "{body}");
 
-    // Bob, who is nobody here, forks it and does the work in his copy.
-    let (st, body) = bob.req("POST", "/v1/orgs/ada/repos/app/forks", None);
+    // Bob, who may not push here, forks it and does the work in his copy.
+    let (st, body) = bob.req("POST", "/v1/orgs/acme/repos/app/forks", None);
     assert_eq!(st, 202, "{body}");
     assert_eq!(await_fork(&mut bob, "/v1/orgs/bob/repos/app"), "ready");
     let (st, body) = bob.req(
@@ -635,13 +641,13 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     );
     let (st, body) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/app/changes",
+        "/v1/orgs/acme/repos/app/changes",
         Some(serde_json::json!({ "from": "feature", "source": "bob/app" })),
     );
     assert_eq!(st, 201, "open a change from the fork: {body}");
 
     // Ada reads both files and ticks them.
-    let views = "/v1/orgs/ada/repos/app/changes/I0000f00d/views";
+    let views = "/v1/orgs/acme/repos/app/changes/I0000f00d/views";
     for path in ["a.txt", "b.txt"] {
         let (st, body) = ada.req(
             "PUT",
@@ -662,7 +668,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     );
     let (st, body) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/app/changes",
+        "/v1/orgs/acme/repos/app/changes",
         Some(serde_json::json!({ "from": "feature", "source": "bob/app" })),
     );
     assert_eq!(st, 201, "{body}");
@@ -694,7 +700,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     let bob_id = me["id"].as_str().expect("bob has an id").to_string();
     let (st, body) = ada.req(
         "GET",
-        "/v1/orgs/ada/repos/app/changes/I0000f00d/associations",
+        "/v1/orgs/acme/repos/app/changes/I0000f00d/associations",
         None,
     );
     assert_eq!(st, 200, "{body}");
@@ -729,7 +735,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
 
     // He joins the conversation, as himself — "sign in to comment" is for
     // somebody who has not.
-    let comments = "/v1/orgs/ada/repos/app/changes/I0000f00d/comments";
+    let comments = "/v1/orgs/acme/repos/app/changes/I0000f00d/comments";
     let (st, body) = bob.req(
         "POST",
         comments,
@@ -748,13 +754,13 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     // not have. The verdict still names Ada as the one who must approve.
     let (st, body) = bob.req(
         "POST",
-        "/v1/orgs/ada/repos/app/changes/I0000f00d/approve",
+        "/v1/orgs/acme/repos/app/changes/I0000f00d/approve",
         None,
     );
     assert_eq!(st, 204, "{body}");
     let (st, body) = ada.req(
         "GET",
-        "/v1/orgs/ada/repos/app/changes/I0000f00d/verdict",
+        "/v1/orgs/acme/repos/app/changes/I0000f00d/verdict",
         None,
     );
     assert_eq!(st, 200, "{body}");
@@ -775,7 +781,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     );
     let (st, body) = nobody.req(
         "POST",
-        "/v1/orgs/ada/repos/app/changes/I0000f00d/approve",
+        "/v1/orgs/acme/repos/app/changes/I0000f00d/approve",
         None,
     );
     assert_eq!(st, 401, "{body}");
@@ -787,7 +793,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     // left asking a maintainer to tidy up after them. A third person,
     // equally a stranger to the repository, gets the writer's refusal:
     // the change is not theirs, and the door does not say why.
-    let abandon = "/v1/orgs/ada/repos/app/changes/I0000f00d/abandon";
+    let abandon = "/v1/orgs/acme/repos/app/changes/I0000f00d/abandon";
     let mut cam = signup(&server, &mail, "cam", "cam@example.com");
     let (st, body) = cam.req("POST", abandon, None);
     assert_eq!(
@@ -798,7 +804,7 @@ fn viewed_marks_follow_a_change_that_came_from_a_fork() {
     assert_eq!(st, 401, "{body}");
     let (st, body) = bob.req("POST", abandon, None);
     assert_eq!(st, 204, "the author may withdraw their own change: {body}");
-    let (st, body) = ada.req("GET", "/v1/orgs/ada/repos/app/changes/I0000f00d", None);
+    let (st, body) = ada.req("GET", "/v1/orgs/acme/repos/app/changes/I0000f00d", None);
     assert_eq!(st, 200, "{body}");
     assert_eq!(
         body["change"]["state"],
