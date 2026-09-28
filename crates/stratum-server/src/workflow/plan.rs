@@ -414,10 +414,7 @@ mod tests {
             env: BTreeMap::new(),
             matrix,
             timeout_minutes: None,
-            // The planner expands cells; which fleet they land on is
-            // decided before it and carried through it untouched.
-            pool: crate::workflow::model::Pool::Hosted,
-            labels: vec!["ubuntu-latest".to_string()],
+            labels: vec!["self-hosted".to_string()],
             steps: vec![Step {
                 name: None,
                 run: "true".into(),

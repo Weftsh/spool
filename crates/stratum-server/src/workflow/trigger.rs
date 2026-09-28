@@ -49,7 +49,7 @@
 
 use crate::api::reads::with_reader;
 use crate::app::SharedState;
-use crate::workflow::model::{Job, Pool, Trigger, Workflow};
+use crate::workflow::model::{Job, Trigger, Workflow};
 use crate::workflow::read::{read_dir, stem, DIR};
 use crate::workflow::{mirror, parse, plan};
 use sha2::{Digest, Sha256};
@@ -80,11 +80,10 @@ pub fn job_spec(job: &Job, matrix: &BTreeMap<String, String>) -> serde_json::Val
     serde_json::json!({
         "image": job.image.as_deref().unwrap_or("default"),
         "timeout_minutes": job.timeout_minutes.unwrap_or(360),
-        // The runner does not read these — it is handed a job, not a
-        // choice of fleet — but the spec is the frozen record of what
-        // the commit asked for, and "which fleet did this run on, and
-        // why" is a question somebody asks about a build from last week.
-        "pool": job.pool.as_str(),
+        // The runner does not read these — the claim already matched
+        // them — but the spec is the frozen record of what the commit
+        // asked for, and "which machines could have run this" is a
+        // question somebody asks about a build from last week.
         "labels": job.labels,
         "env": job.env,
         "matrix": matrix,
@@ -555,14 +554,15 @@ pub async fn cancel_and_stop(state: &SharedState, run_id: &str, reason: &str) ->
 /// Why this file may not run at all, whoever pushed it — or `None` if it
 /// may.
 ///
-/// Five refusals, in an order that is deliberate: each one is a
+/// Four refusals, in an order that is deliberate: each one is a
 /// different person's decision, and a reader has to be told the *first*
-/// thing that is wrong rather than the last. A `ubuntu-latest` file is
-/// not going to run on a server with no hosted fleet however many
-/// machines are registered, and a repository no group admits will not
-/// be routed however many labels match.
+/// thing that is wrong rather than the last. A file that names an image
+/// is not going to run however many machines are registered, and a
+/// repository no group admits will not be routed however many labels
+/// match. (A `runs-on: ubuntu-latest` is a fifth, refused by the parser
+/// before a run is ever composed.)
 ///
-/// All five settle the run as **failed with no blocked reason**, and
+/// All four settle the run as **failed with no blocked reason**, and
 /// that is the difference between them and the fork gate: an approval
 /// lifts that one, so a `blocked` run is a run that might still happen.
 /// These do not. Somebody has to edit the file or edit the settings, and
@@ -578,33 +578,17 @@ fn pool_refusal(state: &SharedState, repo: &Repo, wf: &Workflow) -> Option<Strin
     let warn = |what: &str, e: stratum_control::runners::Error| {
         eprintln!("weft: workflow trigger: {what} for {}: {e}", repo.id);
     };
-    // Every job runs on the organisation's own machines here: there is
-    // no hosted fleet behind this server. A job whose `runs-on` does not
-    // name `self-hosted` is refused by the file rather than queued for a
-    // runner that will never exist, and the sentence says what to write.
-    if let Some(job) = wf.jobs.iter().find(|j| j.pool == Pool::Hosted) {
-        return Some(format!(
-            "job {:?} asks for runs-on: {}, but this server runs workflows only on \
-             self-hosted runners; use runs-on: [self-hosted, …]",
-            job.id,
-            job.labels.join(", ")
-        ));
-    }
-    let self_hosted: Vec<&Job> = wf
-        .jobs
-        .iter()
-        .filter(|j| j.pool == Pool::SelfHosted)
-        .collect();
-    if self_hosted.is_empty() {
-        return None;
-    }
+    // Every job runs on the organisation's own machines: there is no
+    // hosted fleet behind this server, and the parser has already
+    // refused a `runs-on` that asked for one.
+    //
     // Before any policy question, because this one is a property of the
     // file alone and the answer does not change with who is asking. A
     // self-hosted job runs its steps directly on the machine somebody
     // owns — there is no container to put an image in — so a file that
     // names one is asking for something that cannot happen, and saying
     // so is more useful than silently ignoring the line.
-    if let Some(reason) = image_refusal(&self_hosted) {
+    if let Some(reason) = image_refusal(&wf.jobs) {
         return Some(reason);
     }
     match runners::self_hosted_allowed(&state.db, &repo.org_id, &repo.id) {
@@ -633,7 +617,7 @@ fn pool_refusal(state: &SharedState, repo: &Repo, wf: &Workflow) -> Option<Strin
     // only one of them may be missing. The labels are printed in the
     // order the file wrote them so the sentence is recognisable as the
     // `runs-on:` line its author typed.
-    for job in self_hosted {
+    for job in &wf.jobs {
         match runners::any_runner_for(&state.db, &repo.org_id, &repo.id, &job.labels) {
             Ok(false) => {
                 return Some(format!(
@@ -654,16 +638,14 @@ fn pool_refusal(state: &SharedState, repo: &Repo, wf: &Workflow) -> Option<Strin
 /// it, in whatever the machine has — there is no container to put an
 /// image in. Ignoring the line would be worse than refusing it: the
 /// build would run, and run against the wrong toolchain.
-fn image_refusal(self_hosted: &[&Job]) -> Option<String> {
-    self_hosted
-        .iter()
-        .find_map(|job| match job.image.as_deref() {
-            None | Some("default") => None,
-            Some(image) => Some(format!(
-                "image {image:?} is not available on self-hosted runners; \
+fn image_refusal(jobs: &[Job]) -> Option<String> {
+    jobs.iter().find_map(|job| match job.image.as_deref() {
+        None | Some("default") => None,
+        Some(image) => Some(format!(
+            "image {image:?} is not available on self-hosted runners; \
              steps run directly on the machine"
-            )),
-        })
+        )),
+    })
 }
 
 /// What is asking for a run, and everything about it a workflow file's
@@ -864,20 +846,18 @@ pub(crate) async fn start(state: &SharedState, repo: &Repo, cause: &Cause<'_>) {
             settle(state, repo, &new, "failed", &reason, None);
             continue;
         }
-        // The fork gate applies to **both** pools, and it matters more
-        // for the self-hosted one: the thing being protected there is
-        // somebody's own machine, and the workflow file was written by
-        // a stranger.
+        // The fork gate: the thing being protected is somebody's own
+        // machine, and the workflow file was written by a stranger.
         if let Some(why) = fork_hold {
             settle(state, repo, &new, "blocked", why, Some(BlockedReason::Fork));
             continue;
         }
         // Owned strings first, then the borrowed slice `create_run`
         // wants: `NewJob` borrows and the planner's cells are ours.
-        // Every cell of a matrix inherits its job's pool and labels:
-        // `runs-on` is written once for the job, and a matrix expands
-        // what it runs, not where.
-        let cells: Vec<(String, String, String, &'static str, Vec<String>)> = planned
+        // Every cell of a matrix inherits its job's labels: `runs-on` is
+        // written once for the job, and a matrix expands what it runs,
+        // not where.
+        let cells: Vec<(String, String, String, Vec<String>)> = planned
             .order
             .iter()
             .map(|&i| {
@@ -889,7 +869,6 @@ pub(crate) async fn start(state: &SharedState, repo: &Repo, cause: &Cause<'_>) {
                     serde_json::to_string(&pj.matrix).expect("matrix json"),
                     job_spec(job, &pj.matrix).to_string(),
                     pj.key.clone(),
-                    job.pool.as_str(),
                     job.labels.clone(),
                 )
             })
@@ -917,8 +896,8 @@ pub(crate) async fn start(state: &SharedState, repo: &Repo, cause: &Cause<'_>) {
                 matrix: &cells[pos].0,
                 needs: &needs[pos],
                 spec: &cells[pos].1,
-                pool: cells[pos].3,
-                labels: &cells[pos].4,
+                pool: workflows::POOL_SELF_HOSTED,
+                labels: &cells[pos].3,
             })
             .collect();
         match workflows::create_run(&state.db, &repo.org_id, &repo.id, &new, &jobs) {
@@ -986,7 +965,7 @@ mod tests {
         assert_eq!(spec["matrix"], serde_json::json!({}));
     }
 
-    /// A self-hosted job that names an image is refused by its own text,
+    /// A job that names an image is refused by its own text,
     /// naming the image back — and `default`, which is what every job
     /// that says nothing gets, is not an image anybody is naming.
     #[test]
@@ -996,9 +975,8 @@ mod tests {
             "on: push\njobs:\n  a:\n    runs-on: [self-hosted, gpu]\n    image: rust:1.83\n    steps:\n      - run: cargo test\n",
         )
         .unwrap();
-        let jobs: Vec<&Job> = wf.jobs.iter().collect();
         assert_eq!(
-            image_refusal(&jobs).as_deref(),
+            image_refusal(&wf.jobs).as_deref(),
             Some(
                 "image \"rust:1.83\" is not available on self-hosted runners; \
                  steps run directly on the machine"
@@ -1010,8 +988,7 @@ mod tests {
             "on: push\njobs:\n  a:\n    runs-on: [self-hosted]\n    image: default\n    steps:\n      - run: x\n",
         ] {
             let wf = parse::parse("ci", text).unwrap();
-            let jobs: Vec<&Job> = wf.jobs.iter().collect();
-            assert_eq!(image_refusal(&jobs), None, "{text}");
+            assert_eq!(image_refusal(&wf.jobs), None, "{text}");
         }
 
         // A file whose *second* self-hosted job names one is refused
@@ -1021,9 +998,8 @@ mod tests {
             "on: push\njobs:\n  a:\n    runs-on: [self-hosted]\n    steps:\n      - run: x\n  b:\n    runs-on: [self-hosted]\n    container: node:18\n    steps:\n      - run: y\n",
         )
         .unwrap();
-        let jobs: Vec<&Job> = wf.jobs.iter().collect();
         assert!(
-            image_refusal(&jobs)
+            image_refusal(&wf.jobs)
                 .unwrap()
                 .starts_with("image \"node:18\""),
             "the second job's image is the one named"

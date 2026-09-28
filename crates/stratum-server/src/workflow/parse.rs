@@ -31,7 +31,7 @@
 //! the key, the line, and what to do instead — and a reader pasting an
 //! Actions workflow meets those messages before they meet anything else.
 
-use super::model::{Job, Matrix, Pool, Refusal, Step, Trigger, Workflow};
+use super::model::{Job, Matrix, Refusal, Step, Trigger, Workflow};
 use granit_parser::{Event, Parser};
 use std::collections::BTreeMap;
 
@@ -39,43 +39,17 @@ use std::collections::BTreeMap;
 /// more than any real one; the point is that there is a bound.
 pub const MAX_BYTES: usize = 64 * 1024;
 
-/// `runs-on` values that mean "your ordinary Linux runner on our fleet".
+/// The label every registered runner carries, and so what a job asks
+/// for when it names nothing more particular.
 ///
-/// Accepting these rather than refusing the key is the one place this
-/// parser bends toward a pasted Actions file, and it bends only where
-/// the answer is unambiguous: `ubuntu-latest` asks for a standard Linux
-/// runner and gets one. macOS and Windows are still refused, because
-/// running those on Linux is not a smaller version of what was asked
-/// for, it is a different thing reported green — and if the author has
-/// a Mac of their own, the answer is now `[self-hosted, macos]` rather
-/// than a lie.
-const RUNS_ON_OK: [&str; 4] = ["ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "linux"];
-
-/// What a hosted job's labels say when the file said nothing at all.
-///
-/// A job with no `runs-on:` still has to answer "what did you ask for"
-/// in the run JSON, and the honest answer is the standard Linux runner
-/// it is about to get.
-const DEFAULT_HOSTED_LABEL: &str = "ubuntu-latest";
-
-/// The label that turns `runs-on` into a request for somebody else's
-/// machine.
+/// There is no hosted fleet behind this server: every job runs on a
+/// machine its organisation registered. A job with no `runs-on:` is
+/// therefore a request for any of them — the same thing `[self-hosted]`
+/// says — and one whose `runs-on:` leaves this label out is naming a
+/// machine somebody else hosts (`ubuntu-latest`, a pasted Actions file)
+/// and is refused on its line rather than queued for a runner that will
+/// never exist.
 const SELF_HOSTED: &str = "self-hosted";
-
-/// The hosted labels that can only ever mean our fleet, and so are the
-/// ones that contradict `self-hosted` when a list holds both.
-///
-/// `linux` is deliberately **not** here even though it is in
-/// [`RUNS_ON_OK`], and the omission is the whole reason this is a
-/// separate list. The server gives every registered Linux machine the
-/// labels `self-hosted`, `linux` and its architecture, so
-/// `[self-hosted, linux, gpu]` — the form GitHub's own documentation
-/// uses, and the form this feature's contract gives as its example — is
-/// an ordinary self-hosted request naming the OS. Testing the
-/// contradiction against `RUNS_ON_OK` refused it, which would have made
-/// the most common way to write a self-hosted job the one thing the
-/// parser would not accept.
-const HOSTED_ONLY: [&str; 3] = ["ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04"];
 
 /// A YAML document, reduced to the three shapes this subset has.
 ///
@@ -569,22 +543,21 @@ pub fn parse(stem: &str, src: &str) -> Result<Workflow, Refusal> {
     Ok(Workflow { name, on, jobs })
 }
 
-/// Read `runs-on:` into the pool it names and the labels it asked for.
+/// Read `runs-on:` into the labels it asked for.
 ///
-/// Four shapes are accepted and they fall into two families:
+/// Three shapes are accepted:
 ///
 /// ```yaml
-/// runs-on: ubuntu-latest              # hosted, unchanged
 /// runs-on: self-hosted                # the bare string form
 /// runs-on: [self-hosted]              # any runner in an admitting group
 /// runs-on: [self-hosted, linux, gpu]  # …that also has these labels
 /// ```
 ///
-/// A list that names both a hosted runner and `self-hosted` is refused
-/// rather than resolved in either direction. There is no reading of it
-/// that is more likely than the other, and both readings run somebody's
-/// code somewhere they did not choose — which is exactly the mistake
-/// this key must not make quietly.
+/// A list without `self-hosted` is refused. On GitHub it would name a
+/// machine GitHub hosts, and a pasted Actions file saying
+/// `ubuntu-latest` is the common case: queueing it would leave the run
+/// waiting for a runner nobody is ever going to register, when the fix
+/// is one word the author can make now.
 ///
 /// Labels are lowercased here, once, because routing compares label
 /// *sets*: `GPU` in the file and `gpu` on the runner would otherwise be
@@ -592,7 +565,7 @@ pub fn parse(stem: &str, src: &str) -> Result<Workflow, Refusal> {
 /// Duplicates are dropped and the order the file wrote is kept, because
 /// the order is what the "no runner with labels […]" refusal prints
 /// back, and a reader has to recognise it as the line they wrote.
-fn runs_on(value: &Node, path: &str) -> Result<(Pool, Vec<String>), Refusal> {
+fn runs_on(value: &Node, path: &str) -> Result<Vec<String>, Refusal> {
     let key = format!("{path}.runs-on");
     let entries = scalars(value, &key)?;
     if entries.is_empty() {
@@ -601,10 +574,7 @@ fn runs_on(value: &Node, path: &str) -> Result<(Pool, Vec<String>), Refusal> {
             key.as_str(),
             "`runs-on` is empty, so this job asks for no runner at all",
         )
-        .hint(format!(
-            "name one of: {}, or `[self-hosted, …]` for a runner you registered",
-            RUNS_ON_OK.join(", ")
-        )));
+        .hint("write `runs-on: [self-hosted]` for any runner you registered, or leave it out"));
     }
     // Lowercased once, deduplicated, file order kept.
     let mut labels: Vec<String> = Vec::with_capacity(entries.len());
@@ -617,76 +587,39 @@ fn runs_on(value: &Node, path: &str) -> Result<(Pool, Vec<String>), Refusal> {
         }
     }
 
-    let no_such_runner = |label: &str, line: usize| {
-        Refusal::at(
-            Some(line),
+    let Some(at) = labels.iter().position(|l| l == SELF_HOSTED) else {
+        return Err(Refusal::at(
+            Some(lines[0]),
             key.as_str(),
-            format!("there is no {label:?} runner here"),
+            format!(
+                "`runs-on: {}` names a hosted runner, and this server has none",
+                labels.join(", ")
+            ),
         )
-        .hint(format!(
-            "this forge runs Linux containers; what is: {}, or `[self-hosted, …]` \
-             for a runner you registered. Choose the image with `image:`",
-            RUNS_ON_OK.join(", ")
-        ))
+        .hint(
+            "every job runs on a machine your organisation registered: write \
+             `runs-on: [self-hosted]` for any of them, `[self-hosted, <label>, …]` for \
+             one with those labels, or leave `runs-on` out",
+        ));
     };
-
-    if let Some(at) = labels.iter().position(|l| l == SELF_HOSTED) {
-        // A file that names a hosted runner *and* `self-hosted` has said
-        // two incompatible things, and picking one would run untrusted
-        // code on a fleet its author did not name.
-        if let Some(i) = labels
-            .iter()
-            .position(|l| HOSTED_ONLY.contains(&l.as_str()))
-        {
+    // Every other entry is a free-form label. Only its shape is
+    // constrained — the server has no list of legal labels, because the
+    // whole point is that an operator invents them.
+    for (i, label) in labels.iter().enumerate() {
+        if i != at && !stratum_control::runners::valid_label(label) {
             return Err(Refusal::at(
                 Some(lines[i]),
                 key.as_str(),
-                "`runs-on` names both a hosted runner and `self-hosted`; pick one",
+                format!("{label:?} is not a runner label"),
             )
             .hint(
-                "a hosted job is `runs-on: ubuntu-latest`; a job for a machine you \
-                 registered is `runs-on: [self-hosted, …]`",
+                "a label is lowercase letters, digits, dot, dash or underscore, \
+                 at most 64 characters — the same thing you pass to \
+                 `weft-runner register --labels`",
             ));
         }
-        // Every other entry is a free-form label. Only its shape is
-        // constrained — the server has no list of legal labels, because
-        // the whole point is that an operator invents them.
-        for (i, label) in labels.iter().enumerate() {
-            if i != at && !stratum_control::runners::valid_label(label) {
-                return Err(Refusal::at(
-                    Some(lines[i]),
-                    key.as_str(),
-                    format!("{label:?} is not a runner label"),
-                )
-                .hint(
-                    "a label is lowercase letters, digits, dot, dash or underscore, \
-                     at most 64 characters — the same thing you pass to \
-                     `weft-runner register --labels`",
-                ));
-            }
-        }
-        return Ok((Pool::SelfHosted, labels));
     }
-
-    // No `self-hosted`: this is a hosted job, and a hosted job runs on
-    // exactly one runner. A list of two hosted labels is not a wider
-    // request, it is a file that has not decided.
-    if labels.len() > 1 {
-        return Err(Refusal::at(
-            Some(lines[1]),
-            key.as_str(),
-            "a hosted job names exactly one runner",
-        )
-        .hint(format!(
-            "write one of: {}, or `[self-hosted, …]` to ask for a machine you \
-             registered",
-            RUNS_ON_OK.join(", ")
-        )));
-    }
-    if !RUNS_ON_OK.contains(&labels[0].as_str()) {
-        return Err(no_such_runner(&labels[0], lines[0]));
-    }
-    Ok((Pool::Hosted, labels))
+    Ok(labels)
 }
 
 fn job(id: &str, line: usize, node: &Node) -> Result<Job, Refusal> {
@@ -700,8 +633,7 @@ fn job(id: &str, line: usize, node: &Node) -> Result<Job, Refusal> {
         env: BTreeMap::new(),
         matrix: Matrix::default(),
         timeout_minutes: None,
-        pool: Pool::Hosted,
-        labels: vec![DEFAULT_HOSTED_LABEL.to_string()],
+        labels: vec![SELF_HOSTED.to_string()],
         steps: Vec::new(),
     };
     let mut saw_steps = false;
@@ -770,11 +702,7 @@ fn job(id: &str, line: usize, node: &Node) -> Result<Job, Refusal> {
                     }
                 });
             }
-            "runs-on" => {
-                let (pool, labels) = runs_on(value, &path)?;
-                job.pool = pool;
-                job.labels = labels;
-            }
+            "runs-on" => job.labels = runs_on(value, &path)?,
             "env" => {
                 job.env = string_map(value, &format!("{path}.env"))?;
                 if let Some(what) = mining_in_env(&job.env) {
@@ -974,7 +902,7 @@ jobs:
       - run: cargo test
   lint:
     needs: test
-    runs-on: ubuntu-latest
+    runs-on: [self-hosted, linux]
     steps:
       - run: cargo clippy
 ";
@@ -994,6 +922,7 @@ jobs:
         assert_eq!(test.steps.len(), 2);
         assert_eq!(test.steps[0].name.as_deref(), Some("build"));
         assert_eq!(wf.job("lint").unwrap().needs, vec!["test"]);
+        assert_eq!(wf.job("lint").unwrap().labels, vec!["self-hosted", "linux"]);
     }
 
     /// A file with no `name:` is named after itself, so a run is never
@@ -1155,34 +1084,31 @@ jobs:
         assert_eq!(flipped.on, both.on);
     }
 
-    /// `runs-on` is the one key that bends toward a pasted Actions file,
-    /// and only where the answer is unambiguous.
+    /// There is no hosted fleet here, so a job that says nothing about
+    /// its machine asks for any registered runner, and one that names a
+    /// hosted machine is refused on its line with the fix in the hint.
     #[test]
-    fn runs_on_is_accepted_only_where_it_means_our_runner() {
-        let ok = "on: push\njobs:\n  a:\n    runs-on: ubuntu-latest\n    steps:\n      - run: x\n";
-        let wf = parse("ci", ok).unwrap();
-        assert_eq!(wf.jobs[0].pool, Pool::Hosted);
-        assert_eq!(wf.jobs[0].labels, vec!["ubuntu-latest"]);
-        // Refused, because running a macOS job on Linux is not a
-        // smaller version of what was asked for — it is a different
-        // thing reported green. The hint now offers the honest
-        // alternative — a Mac of their own — as well as `image:`.
-        for label in ["macos-latest", "windows-latest"] {
+    fn every_job_runs_on_a_registered_runner() {
+        let bare = "on: push\njobs:\n  a:\n    steps:\n      - run: x\n";
+        let wf = parse("ci", bare).unwrap();
+        assert_eq!(wf.jobs[0].labels, vec!["self-hosted"]);
+        // What a pasted Actions file says, and each of the other hosted
+        // families. Refused rather than queued: no runner will ever
+        // answer it, and the author can fix it now.
+        for label in ["ubuntu-latest", "linux", "macos-latest", "windows-latest"] {
             let src = format!(
                 "on: push\njobs:\n  a:\n    runs-on: {label}\n    steps:\n      - run: x\n"
             );
-            let r = parse("ci", &src).expect_err("no such runner");
+            let r = parse("ci", &src).expect_err("no hosted runner");
             assert!(r.message.contains(label), "{r:?}");
-            assert!(r.hint.contains("image:"), "{r:?}");
-            assert!(r.hint.contains("[self-hosted, …]"), "{r:?}");
+            assert!(r.message.contains("hosted runner"), "{r:?}");
+            assert_eq!(r.line, Some(4), "{r:?}");
+            assert!(r.hint.contains("[self-hosted]"), "{r:?}");
         }
-        // A job with no `runs-on:` at all still answers "what did you
-        // ask for" — the run JSON shows labels for every job, and a
-        // blank there reads as a job with no runner.
-        let bare = "on: push\njobs:\n  a:\n    steps:\n      - run: x\n";
-        let wf = parse("ci", bare).unwrap();
-        assert_eq!(wf.jobs[0].pool, Pool::Hosted);
-        assert_eq!(wf.jobs[0].labels, vec!["ubuntu-latest"]);
+        // A list of labels with no `self-hosted` is the same request.
+        let r =
+            err("on: push\njobs:\n  a:\n    runs-on: [linux, gpu]\n    steps:\n      - run: x\n");
+        assert!(r.message.contains("linux, gpu"), "{r:?}");
     }
 
     /// The four shapes a self-hosted `runs-on` may take, and what each
@@ -1206,7 +1132,6 @@ jobs:
                 "on: push\njobs:\n  a:\n    runs-on: {written}\n    steps:\n      - run: x\n"
             );
             let wf = parse("ci", &src).unwrap_or_else(|e| panic!("{written}: {e:?}"));
-            assert_eq!(wf.jobs[0].pool, Pool::SelfHosted, "{written}");
             assert_eq!(wf.jobs[0].labels, want, "{written}");
         }
         // Case and repetition are the author's, not the routing's: a
@@ -1223,25 +1148,17 @@ jobs:
     /// The refusals `runs-on` owns, each naming the line it is on.
     #[test]
     fn runs_on_refuses_what_it_cannot_route() {
-        // Both fleets at once. There is no reading of this that is more
-        // likely than the other, and both run somebody's code somewhere
-        // they did not choose.
-        let r = err(
+        // A label that names a hosted image is only a label here, and a
+        // runner registered with `--labels ubuntu-latest` answers it.
+        let wf = parse(
+            "ci",
             "on: push\njobs:\n  a:\n    runs-on: [ubuntu-latest, self-hosted]\n    steps:\n      - run: x\n",
-        );
-        assert_eq!(
-            r.message, "`runs-on` names both a hosted runner and `self-hosted`; pick one",
-            "{r:?}"
-        );
-        // Two hosted labels is a file that has not decided, not a wider
-        // request.
-        let r = err(
-            "on: push\njobs:\n  a:\n    runs-on: [ubuntu-latest, linux]\n    steps:\n      - run: x\n",
-        );
-        assert!(r.message.contains("exactly one runner"), "{r:?}");
-        // A label that is not the shape a label can be. Only checked in
-        // the self-hosted family — there is no list of legal labels,
-        // because the whole point is that an operator invents them.
+        )
+        .unwrap();
+        assert_eq!(wf.jobs[0].labels, vec!["ubuntu-latest", "self-hosted"]);
+        // A label that is not the shape a label can be. There is no list
+        // of legal labels, because the whole point is that an operator
+        // invents them.
         let r = err(
             "on: push\njobs:\n  a:\n    runs-on: [self-hosted, \"has space\"]\n    steps:\n      - run: x\n",
         );
@@ -1298,7 +1215,7 @@ jobs:
         let value = |k: &str| match k {
             "name" | "image" | "container" => "x",
             "needs" => "[]",
-            "runs-on" => "linux",
+            "runs-on" => "self-hosted",
             "env" | "strategy" => "{}",
             "steps" => "[{run: x}]",
             "timeout-minutes" => "30",

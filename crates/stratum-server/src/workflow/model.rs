@@ -101,32 +101,6 @@ impl Matrix {
     }
 }
 
-/// Which fleet a job runs on.
-///
-/// Two, and the difference is who owns the machine. A `hosted` job runs
-/// on ours: we start it, we meter it, and it lives for one job. A
-/// `self_hosted` job runs on a box the organisation registered, which is
-/// why almost every rule that exists to protect *our* fleet — the
-/// minutes budget, the suspension, the concurrency limit — stops at this
-/// enum, and why the ones that protect *theirs* — the group's repository
-/// access, the public-repository lock, the fork gate — do not.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
-pub enum Pool {
-    #[default]
-    Hosted,
-    SelfHosted,
-}
-
-impl Pool {
-    /// The spelling the column, the API and the router all use.
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Pool::Hosted => "hosted",
-            Pool::SelfHosted => "self_hosted",
-        }
-    }
-}
-
 /// One job as written — before any matrix expansion.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Job {
@@ -143,15 +117,13 @@ pub struct Job {
     pub matrix: Matrix,
     /// Wall-clock bound for the whole job.
     pub timeout_minutes: Option<u32>,
-    /// Which fleet `runs-on` asked for. `Hosted` when it said nothing.
-    pub pool: Pool,
-    /// The `runs-on` list, lowercased and deduped, **in file order**.
+    /// The `runs-on` list, lowercased and deduped, **in file order**,
+    /// always holding `self-hosted`: `[self-hosted]` when the file said
+    /// nothing.
     ///
     /// File order rather than sorted because it is what the refusal
     /// sentence prints back — "no runner with labels [self-hosted, gpu]
     /// is registered" has to be recognisable as the line the author
-    /// wrote. A hosted job carries its one hosted label so that every
-    /// job in the run JSON answers the same question the same way.
     pub labels: Vec<String>,
     pub steps: Vec<Step>,
 }
