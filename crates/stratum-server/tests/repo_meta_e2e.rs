@@ -930,7 +930,7 @@ fn a_revalidated_panel_costs_strictly_fewer_store_round_trips() {
     .envs(&[
         ("STRATUM_COMPACT_POLL_SECS", "86400".to_string()),
         ("STRATUM_AUDIT_SHIP_SECS", "86400".to_string()),
-        ("STRATUM_BILLING_ROLLUP_SECS", "86400".to_string()),
+        ("STRATUM_USAGE_ROLLUP_SECS", "86400".to_string()),
         ("STRATUM_STORAGE_SWEEP_SECS", "0".to_string()),
         // The count below is what *one request* costs the store. The
         // process read cache makes that depend on who read the objects

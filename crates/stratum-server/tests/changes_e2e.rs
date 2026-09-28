@@ -2291,43 +2291,24 @@ fn the_conversation_carries_the_review_not_just_the_verdict() {
     let (st, _) = server.get("/v1/orgs/acme/repos/app/changes/Iab5e9999/comments", admin);
     assert_eq!(st, 404);
 
-    // A public repo reads anonymously; its conversations do not. The
-    // refusal names the fix.
-    let (st, _) = server.post(
-        "/v1/orgs/acme/repos",
-        admin,
-        Some(serde_json::json!({"name": "openbook"})),
-    );
-    assert_eq!(st, 201);
-    commit(server, admin, "openbook", "main", "base", &[("a.txt", "1")]);
-    branch(server, admin, "openbook", "feature", "main");
-    commit(
-        server,
-        admin,
-        "openbook",
-        "feature",
-        "public work\n\nChange-Id: I0b11c001\n",
-        &[("b.txt", "2")],
-    );
-    let (st, _) = server.post(
-        "/v1/orgs/acme/repos/openbook/changes",
-        admin,
-        Some(serde_json::json!({"from": "feature"})),
-    );
-    assert_eq!(st, 201);
-    let anon = ureq::post(&format!(
-        "{}/v1/orgs/acme/repos/openbook/changes/I0b11c001/comments",
-        server.base
-    ))
-    .set("Content-Type", "application/json")
-    .send_string(&serde_json::json!({"body": "drive-by"}).to_string());
-    match anon {
-        Err(ureq::Error::Status(st, resp)) => {
-            assert_eq!(st, 401);
-            let text = resp.into_string().unwrap_or_default();
-            assert!(text.contains("sign in to comment"), "{text}");
+    // Nor may anonymous join one. The refusal names the fix — sign in —
+    // and is made at the repository's door, before the change is looked
+    // up, so it is the same for a change that does not exist.
+    for path in [
+        format!("{cp}/comments"),
+        "/v1/orgs/acme/repos/app/changes/Iab5e9999/comments".to_string(),
+    ] {
+        let anon = ureq::post(&format!("{}{path}", server.base))
+            .set("Content-Type", "application/json")
+            .send_string(&serde_json::json!({"body": "drive-by"}).to_string());
+        match anon {
+            Err(ureq::Error::Status(st, resp)) => {
+                assert_eq!(st, 401, "{path}");
+                let text = resp.into_string().unwrap_or_default();
+                assert!(text.contains("authentication required"), "{path}: {text}");
+            }
+            other => panic!("anonymous comment on {path} answered {other:?}"),
         }
-        other => panic!("anonymous comment answered {other:?}"),
     }
 
     // Cross-org masking, and hostile bytes through the body.
@@ -5807,10 +5788,10 @@ fn open_change(
 /// belongs to its author and to nobody else until they submit.
 ///
 /// Asserted through every reader there is — a second signed-in person,
-/// a service token, and an anonymous reader of a *public* repository —
-/// because a leak through any one of them publishes somebody's
-/// half-formed first reaction under their name, in the one place they
-/// cannot take it back from.
+/// a service token, and a viewer who may read and not write — because a
+/// leak through any one of them publishes somebody's half-formed first
+/// reaction under their name, in the one place they cannot take it back
+/// from. Anonymous reads nothing at all.
 #[test]
 fn a_drafted_comment_is_invisible_to_everybody_but_its_author() {
     let minio = Minio::shared();
@@ -5835,6 +5816,7 @@ fn a_drafted_comment_is_invisible_to_everybody_but_its_author() {
     );
     let alice = sign_in(server, "alice@acme.test");
     let dev = sign_in(server, "dev@acme.test");
+    let vic = sign_in(server, "vic@acme.test");
     let cp = open_change(server, admin, &dev, "openbook", "Id7af7001", ("a.txt", "2"));
 
     // One remark drafted, one said out loud.
@@ -5889,10 +5871,19 @@ fn a_drafted_comment_is_invisible_to_everybody_but_its_author() {
         "a second person must not see another person's draft"
     );
     assert_eq!(
-        bodies(server.get(&format!("{cp}/comments"), "")),
+        bodies(as_person(
+            server,
+            &vic,
+            "GET",
+            &format!("{cp}/comments"),
+            None
+        )),
         published,
-        "an anonymous reader of a public repo must not see a draft"
+        "a viewer must not see another person's draft"
     );
+    let (st, out) = server.get(&format!("{cp}/comments"), "");
+    assert_eq!(st, 401, "anonymous read a conversation: {out}");
+    assert!(!out.to_string().contains("not sure"), "{out}");
     let mine = bodies(as_person(
         server,
         &alice,
@@ -5970,29 +5961,31 @@ fn a_drafted_comment_is_invisible_to_everybody_but_its_author() {
     assert_eq!(st, 200, "{out}");
     assert_eq!(out["published"], serde_json::json!(1));
     assert_eq!(
-        bodies(server.get(&format!("{cp}/comments"), "")).len(),
+        bodies(as_person(
+            server,
+            &vic,
+            "GET",
+            &format!("{cp}/comments"),
+            None
+        ))
+        .len(),
         2,
         "submitting is what publishes"
     );
 
-    // Resolution is a person's judgement even where anybody may read.
-    // An anonymous reader of a public repository is told to sign in
+    // Resolution is a person's judgement. Anonymous is told to sign in
     // rather than handed the thread, and the refusal comes before the
-    // comment is looked at.
-    let (_, out) = server.get(&format!("{cp}/comments"), "");
+    // comment is looked at — the same answer for one that does not exist.
+    let (_, out) = server.get(&format!("{cp}/comments"), admin);
     let cid = out["comments"][0]["id"]
         .as_str()
         .expect("a published comment")
         .to_string();
-    let (st, out) = server.post(&format!("{cp}/comments/{cid}/resolve"), "", None);
-    assert_eq!(st, 401, "{out}");
-    assert!(
-        out["error"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("sign in"),
-        "{out}"
-    );
+    for id in [cid.as_str(), "01zzzzzzzzzzzzzzzzzzzzzzzz"] {
+        let (st, out) = server.post(&format!("{cp}/comments/{id}/resolve"), "", None);
+        assert_eq!(st, 401, "{out}");
+        assert!(out.to_string().contains("authentication required"), "{out}");
+    }
     assert!(server.healthy());
 }
 
@@ -6283,25 +6276,27 @@ fn a_missing_table_is_a_failure_on_every_review_route_and_never_an_empty_answer(
     // point: each is the first table on that route that the handler
     // itself reads, which is what makes the 500 that handler's own arm
     // rather than the credential door's.
-    // The author term, asked anonymously — the one shape where nothing
-    // has read `users` before the term resolves, because no credential
-    // was presented to resolve. It is also the sharpest version of the
-    // claim: this caller may read nothing here, so healthy they get an
-    // empty page, and a failure that answered the same empty page would
-    // be indistinguishable from the truth.
+    // The author term, asked anonymously. This used to be the one shape
+    // where nothing read `users` before the term resolved, and healthy it
+    // answered an empty page — so a failure answering the same page would
+    // have been indistinguishable from the truth. Every repository is
+    // private to its organisation now, and anonymous is refused at the
+    // door before any term is read: a 401, healthy or not, and never a
+    // page of any kind. The door needs no `users` to say so.
     let author_page = format!("{org}?q={by_author}");
     let (st, out) = server.get(&author_page, "");
-    assert_eq!(st, 200, "{out}");
-    assert!(keys(&out).is_empty(), "{out}");
+    assert_eq!(st, 401, "{out}");
     let (st, out) = without_table(&db, "users", || server.get(&author_page, ""));
-    assert_eq!(st, 500, "an author term resolved without users: {st} {out}");
+    assert_eq!(
+        st, 401,
+        "an anonymous author query was answered rather than refused: {st} {out}"
+    );
 
-    // The same surgery behind a session cookie fails one step earlier —
-    // resolving who is asking — and that refusal matters more than it
-    // looks. A signed-in person whose session cannot be resolved must
-    // not be quietly demoted to anonymous and handed the public subset:
-    // they would be shown a smaller product than they have, with nothing
-    // anywhere saying why.
+    // The same surgery behind a session cookie fails at resolving who is
+    // asking, and that refusal matters more than it looks. A signed-in
+    // person whose session cannot be resolved must not be quietly
+    // demoted to anonymous and told to sign in on a page they are signed
+    // in on, with nothing anywhere saying why.
     let (st, out) = without_table(&db, "users", || {
         as_person(server, &alice, "GET", &author_page, None)
     });
@@ -7253,7 +7248,7 @@ fn the_org_wide_query_narrows_by_repository_and_masks_what_it_cannot_see() {
     let scratch = Scratch::new("changes-orgquery");
     let w = world(spawn_server(&bucket.base_url, &scratch));
     let (server, admin) = (&w.server, &w.admin);
-    for (name, public) in [("web", true), ("vault", false)] {
+    for name in ["web", "vault"] {
         let (st, out) = server.post(
             "/v1/orgs/acme/repos",
             admin,
@@ -7301,20 +7296,32 @@ fn the_org_wide_query_narrows_by_repository_and_masks_what_it_cannot_see() {
 
     // A repository this caller may not read, and one that does not
     // exist, answer the same empty page — so neither tells the other
-    // apart, and the private one is not confirmed.
+    // apart, and neither is confirmed. Another organisation's token may
+    // read none of acme's repositories, so every one of them is that
+    // page for it.
     let rival = server.bootstrap_org("rival");
-    for token in [rival.as_str(), ""] {
-        let (st, out) = server.get(&q("repo:vault"), token);
+    for repo in ["vault", "web", "nosuchrepo"] {
+        let (st, out) = server.get(&q(&format!("repo:{repo}")), &rival);
         assert_eq!(st, 200, "{out}");
-        assert!(keys(&out).is_empty(), "{out}");
-        let (st, out) = server.get(&q("repo:nosuchrepo"), token);
-        assert_eq!(st, 200, "{out}");
-        assert!(keys(&out).is_empty(), "{out}");
-        // …while the public repository reads exactly as it does for
-        // anybody: the query changed nothing about who may see what.
-        let (_, out) = server.get(&q("repo:web"), token);
-        assert_eq!(keys(&out), vec!["Idd000002"], "{out}");
+        assert!(keys(&out).is_empty(), "repo:{repo} for a rival org: {out}");
     }
+    let (st, out) = server.get(org, &rival);
+    assert_eq!(st, 200, "{out}");
+    assert!(
+        keys(&out).is_empty(),
+        "the whole org for a rival org: {out}"
+    );
+    // Anonymous is told to sign in rather than handed any page, for a
+    // repository that exists and one that does not.
+    for repo in ["vault", "nosuchrepo"] {
+        let (st, out) = server.get(&q(&format!("repo:{repo}")), "");
+        assert_eq!(st, 401, "repo:{repo} anonymously: {out}");
+    }
+    // …while a viewer of the org reads exactly what the per-repo list
+    // shows them: the query changed nothing about who may see what.
+    let vic = sign_in(server, "vic@acme.test");
+    let (_, out) = as_person(server, &vic, "GET", &q("repo:web"), None);
+    assert_eq!(keys(&out), vec!["Idd000002"], "{out}");
 
     // An address that names nobody is an empty page, not everything.
     let (st, out) = server.get(&q("author:nobody@acme.test"), admin);
@@ -7390,11 +7397,12 @@ fn the_org_wide_query_narrows_by_repository_and_masks_what_it_cannot_see() {
     let (st, out) = as_person(server, &stranger, "GET", &q("author:@me"), None);
     assert_eq!(st, 200, "{out}");
     assert!(keys(&out).is_empty(), "{out}");
-    // …and the public repository reads for them exactly as it does for
-    // anybody else, so the identity resolution changed no authority.
+    // …and resolving who they are gave them no authority: acme's
+    // repositories are as empty a page for them as for any other
+    // organisation's credential, while the viewer above reads them.
     let (st, out) = as_person(server, &stranger, "GET", &q("repo:web"), None);
     assert_eq!(st, 200, "{out}");
-    assert_eq!(keys(&out), vec!["Idd000002"], "{out}");
+    assert!(keys(&out).is_empty(), "{out}");
 
     let (st, out) = server.get(&q("assignee:me"), admin);
     assert_eq!(st, 400, "{out}");
@@ -7482,19 +7490,28 @@ fn the_apply_door_masks_what_you_cannot_read_and_404s_a_change_that_is_not_there
     );
     assert_eq!(st, 404, "{out}");
 
-    // Somebody with no credential at all on a private repository is told
-    // the repository is absent, not that they lack write access — the
-    // write sentence would name it.
-    let (st, out) = server.req(
-        "POST",
-        "/v1/orgs/acme/repos/app/changes/I5099ee04/suggestions/apply",
-        "",
-        Some(serde_json::json!({"comments": ["01whatever"]})),
-    );
-    assert!(
-        st == 401 || st == 404,
-        "an unreadable repository must be masked, not refused with a sentence naming it: {st} {out}"
-    );
+    // Somebody with no credential at all is told to authenticate, and
+    // somebody from another organisation that the repository is absent
+    // — never that they lack write access, which would name it. Each is
+    // the answer a repository that does not exist gets.
+    let rival = server.bootstrap_org("rival");
+    for (who, token, expect) in [("anonymous", "", 401), ("a rival org", rival.as_str(), 404)] {
+        let apply = |repo: &str| {
+            server.req(
+                "POST",
+                &format!("/v1/orgs/acme/repos/{repo}/changes/I5099ee04/suggestions/apply"),
+                token,
+                Some(serde_json::json!({"comments": ["01whatever"]})),
+            )
+        };
+        let (st, out) = apply("app");
+        assert_eq!(
+            st, expect,
+            "an unreadable repository must be masked, not refused with a sentence \
+             naming it — {who}: {out}"
+        );
+        assert_eq!((st, out), apply("no-such-repo"), "{who}");
+    }
     assert_eq!(server.get("/healthz", admin).0, 200);
 }
 

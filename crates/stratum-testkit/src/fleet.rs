@@ -39,7 +39,7 @@ const QUIET: [(&str, &str); 6] = [
     ("STRATUM_CDNPACK_POLL_SECS", "0"),
     ("STRATUM_LAND_POLL_SECS", "0"),
     ("STRATUM_GC_SECS", "0"),
-    ("STRATUM_BILLING_ROLLUP_SECS", "0"),
+    ("STRATUM_USAGE_ROLLUP_SECS", "0"),
     ("STRATUM_AUDIT_SHIP_SECS", "0"),
 ];
 

@@ -1161,21 +1161,34 @@ fn the_public_docs_use_no_old_name_identifier() {
     files.push(docs.join("openapi.json"));
     assert!(files.len() > 20, "found only {} docs files", files.len());
 
-    // The published forms of the old name, each one a contract somebody
-    // outside would have copied.
-    let old = [
-        "STRATUM_CI", // job env: the facts a `ci.sh` reads …
-        "STRATUM_JOB\"",
-        "STRATUM_JOB`",
-        "STRATUM_JOB ",
+    // The job environment a `ci.sh` reads, and the variables the examples
+    // tell a reader to set, under their old names — matched as whole
+    // identifiers, because the operator's own settings share the prefix
+    // (`STRATUM_REF_PAGE_SIZE` is a server setting, `STRATUM_REF` was the
+    // job's ref).
+    let old_env = [
+        "STRATUM_CI",
+        "STRATUM_JOB",
         "STRATUM_SHA",
         "STRATUM_REF",
         "STRATUM_EVENT",
         "STRATUM_CHANGE",
         "STRATUM_WORKSPACE",
-        "STRATUM_MATRIX_",
-        "STRATUM_TOKEN", // … and the variables the examples tell a reader to set
+        "STRATUM_TOKEN",
         "STRATUM_URL",
+    ];
+    let is_ident = |c: char| c.is_ascii_alphanumeric() || c == '_';
+    let names_env = |line: &str, name: &str| {
+        line.match_indices(name).any(|(at, _)| {
+            let before = line[..at].chars().next_back();
+            let after = line[at + name.len()..].chars().next();
+            !before.is_some_and(is_ident) && !after.is_some_and(is_ident)
+        })
+    };
+    // The published forms of the old name, each one a contract somebody
+    // outside would have copied.
+    let old = [
+        "STRATUM_MATRIX_", // job env: one per matrix axis
         "X-Stratum-",      // signature, staleness and blob headers
         "x-stratum",       // the same, as a shell would grep for it
         "/stratum-runner", // the installed binary and its paths
@@ -1199,7 +1212,11 @@ fn the_public_docs_use_no_old_name_identifier() {
             if line.contains("-p stratum-runner") || line.contains("crates/stratum-runner") {
                 continue;
             }
-            if let Some(o) = old.iter().find(|o| line.contains(*o)) {
+            let hit = old
+                .iter()
+                .find(|o| line.contains(**o))
+                .or_else(|| old_env.iter().find(|o| names_env(line, o)));
+            if let Some(o) = hit {
                 hits.push(format!(
                     "{}:{}: `{o}` in {}",
                     f.strip_prefix(&docs).unwrap().display(),
@@ -1559,9 +1576,11 @@ fn every_job_that_backgrounds_the_disk_reclaim_waits_for_it_first() {
             }
         }
     }
+    // One per job that installs a Rust toolchain: correctness and chaos.
+    let rust_jobs = WORKFLOW.matches("dtolnay/rust-toolchain").count();
     assert!(
-        backgrounded >= 3,
-        "expected the three Rust jobs to background the reclaim, found {backgrounded}"
+        rust_jobs >= 2 && backgrounded >= rust_jobs,
+        "expected every Rust job ({rust_jobs}) to background the reclaim, found {backgrounded}"
     );
 }
 

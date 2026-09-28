@@ -334,7 +334,10 @@ fn every_self_only_route_refuses_a_stranger_and_an_anonymous_caller() {
         "/v1/users/ada/pins",
         Some(serde_json::json!({ "pins": [] })),
     );
-    assert!(st == 404 || st == 405, "the pins write is still served: {st}");
+    assert!(
+        st == 404 || st == 405,
+        "the pins write is still served: {st}"
+    );
 
     // Hostile handles are settled by shape and never reach a query —
     // for somebody signed in, who gets past the sign-in gate to the
@@ -692,10 +695,7 @@ fn an_org_profile_is_read_by_anybody_signed_in_and_written_by_an_admin() {
     // name is settled before authority is even considered, so an
     // administrator of some *other* org gets the same 404 a signed-in
     // reader does rather than a 403 that would confirm the absence.
-    assert_eq!(
-        mallory.req("GET", "/v1/orgs/nobody/profile", None).0,
-        404
-    );
+    assert_eq!(mallory.req("GET", "/v1/orgs/nobody/profile", None).0, 404);
     let (st, out) = server.req(
         "PATCH",
         "/v1/orgs/nobody/profile",

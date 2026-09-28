@@ -173,7 +173,7 @@ fn metrics_usage_and_prometheus() {
     let server = spawn_server(
         &bucket.base_url,
         &scratch,
-        &[("STRATUM_BILLING_ROLLUP_SECS", "1".into())],
+        &[("STRATUM_USAGE_ROLLUP_SECS", "1".into())],
     );
     let admin = server.bootstrap_org("acme");
     server.req(
@@ -220,9 +220,9 @@ fn metrics_usage_and_prometheus() {
     assert!(csv.starts_with("kind,count,bytes"));
     assert!(csv.contains("clone,"));
 
-    // Usage rollup (billing worker on a 1s interval —
-    // `STRATUM_BILLING_ROLLUP_SECS` is whole seconds, so a tick is the
-    // floor on how soon this can be true).
+    // Usage rollup (on a 1s interval — `STRATUM_USAGE_ROLLUP_SECS` is
+    // whole seconds, so a tick is the floor on how soon this can be
+    // true).
     let u = wait_for(
         "the rollup to fold today's requests",
         Duration::from_secs(10),
@@ -232,7 +232,9 @@ fn metrics_usage_and_prometheus() {
             (u["days"][0]["requests"].as_i64().unwrap_or(0) > 0).then_some(u)
         },
     );
-    assert_eq!(u["plan"], "free");
+    // Usage is a page people read, not an invoice: there is no plan to
+    // report beside it.
+    assert!(u.get("plan").is_none(), "{u}");
     assert!(u["days"][0]["active_repos"].as_i64().unwrap() >= 1);
 
     // Prometheus surface.
@@ -441,66 +443,6 @@ fn gc_worker_sweeps_deleted_repo_storage() {
 }
 
 #[test]
-fn free_tier_quota_and_plan_upgrade() {
-    let minio = Minio::shared();
-    let bucket = minio.bucket("workers-quota");
-    let scratch = Scratch::new("quota");
-    let server = spawn_server(
-        &bucket.base_url,
-        &scratch,
-        &[("STRATUM_FREE_TIER_REPOS", "2".into())],
-    );
-    let admin = server.bootstrap_org("acme");
-    for name in ["a", "b"] {
-        let (st, _) = server.req(
-            "POST",
-            "/v1/orgs/acme/repos",
-            &admin,
-            Some(serde_json::json!({ "name": name })),
-        );
-        assert_eq!(st, 201);
-    }
-    let (st, out) = server.req(
-        "POST",
-        "/v1/orgs/acme/repos",
-        &admin,
-        Some(serde_json::json!({ "name": "c" })),
-    );
-    assert_eq!(st, 402, "{out}");
-    // An organization's way past the cap is a subscription, and the
-    // refusal names it. It used to say "upgrade", the same word a
-    // personal namespace got — and a personal namespace has nothing to
-    // upgrade to (forks_e2e pins that sentence).
-    assert_eq!(
-        out["error"],
-        "quota: the free plan is limited to 2 repositories — subscribe from Billing to create more"
-    );
-
-    // `plan` is a closed vocabulary now, and a word outside it is
-    // refused with the words that exist rather than a database error.
-    let e = server.admin_expect_err(&["admin", "set-plan", "--org", "acme", "--plan", "pro"]);
-    assert!(e.contains("unknown plan"), "{e}");
-    assert!(e.contains("free, paid, past_due"), "{e}");
-    // …and the org is untouched by the refusal.
-    let (st, out) = server.req(
-        "POST",
-        "/v1/orgs/acme/repos",
-        &admin,
-        Some(serde_json::json!({ "name": "c" })),
-    );
-    assert_eq!(st, 402, "{out}");
-
-    server.admin_json(&["admin", "set-plan", "--org", "acme", "--plan", "paid"]);
-    let (st, _) = server.req(
-        "POST",
-        "/v1/orgs/acme/repos",
-        &admin,
-        Some(serde_json::json!({ "name": "c" })),
-    );
-    assert_eq!(st, 201);
-}
-
-#[test]
 fn audit_ships_to_object_storage() {
     let minio = Minio::shared();
     let bucket = minio.bucket("workers-audit");
@@ -556,12 +498,13 @@ fn web_assets_and_openapi_served() {
     let bucket = minio.bucket("workers-web");
     let scratch = Scratch::new("web");
 
-    // Stand-in build outputs: an Astro-shaped site (directory-per-page +
-    // llms.txt) and a Vite-shaped dashboard (hashed bundle + SPA index).
+    // A stand-in build output: a Vite-shaped dashboard (hashed bundle +
+    // SPA index). There is no marketing site to serve beside it — a
+    // self-hosted forge's front door is its dashboard — so a site
+    // directory handed over by an old deployment's environment is
+    // ignored rather than served.
     let site = scratch.path().join("site");
-    std::fs::create_dir_all(site.join("docs")).unwrap();
-    std::fs::write(site.join("index.html"), "<h1>Weft</h1>").unwrap();
-    std::fs::write(site.join("docs/index.html"), "<h1>Docs</h1>").unwrap();
+    std::fs::create_dir_all(&site).unwrap();
     std::fs::write(site.join("llms.txt"), "# Weft\n").unwrap();
     let dash = scratch.path().join("dash");
     std::fs::create_dir_all(dash.join("assets")).unwrap();
@@ -584,13 +527,20 @@ fn web_assets_and_openapi_served() {
         (resp.into_string().unwrap(), ct, cache)
     };
 
-    // Site at `/`, directory pages, agent docs.
-    let (body, ct, _) = get("/");
-    assert!(body.contains("Weft") && ct.starts_with("text/html"));
-    let (body, _, _) = get("/docs/");
-    assert!(body.contains("Docs"));
-    let (body, ct, _) = get("/llms.txt");
-    assert!(body.starts_with("# Weft") && ct.starts_with("text/plain"));
+    // `/` is the dashboard's front door: a redirect to it, not a page.
+    let resp = ureq::builder()
+        .redirects(0)
+        .build()
+        .get(&format!("{}/", server.base))
+        .call()
+        .unwrap();
+    assert_eq!(resp.status(), 303);
+    assert_eq!(resp.header("Location"), Some("/dashboard/"));
+    // And nothing from a site directory leaks out at the root.
+    let err = ureq::get(&format!("{}/llms.txt", server.base))
+        .call()
+        .unwrap_err();
+    assert!(matches!(err, ureq::Error::Status(404, _)), "{err:?}");
 
     // OpenAPI is compiled into the binary — served even with no site dir.
     let (body, ct, _) = get("/openapi.json");
@@ -988,18 +938,22 @@ fn compactor_worker_folds_wal_automatically() {
     assert_closed(&bucket.base_url);
 }
 
-/// Stripe-shaped billing: the rollup worker reports each org's usage to
-/// the configured (fake) endpoint with the secret key, and marks the day
-/// The rollup folds each org's day into `usage_daily` and stamps it.
+/// The rollup folds each org's day into `usage_daily`, which the usage
+/// page reads back.
+///
+/// Was `the_usage_rollup_folds_each_day_and_marks_it_done`: the stamp it
+/// waited for (`reported_at`) recorded that a day had been reported to
+/// the billing meter, and went with billing. What is left is the fold,
+/// and a day that carries nothing a meter would have wanted.
 #[test]
-fn the_usage_rollup_folds_each_day_and_marks_it_done() {
+fn the_usage_rollup_folds_each_day_into_the_usage_page() {
     let minio = Minio::shared();
     let bucket = minio.bucket("workers-rollup");
     let scratch = Scratch::new("rollup");
     let server = spawn_server(
         &bucket.base_url,
         &scratch,
-        &[("STRATUM_BILLING_ROLLUP_SECS", "1".into())],
+        &[("STRATUM_USAGE_ROLLUP_SECS", "1".into())],
     );
     let admin = server.bootstrap_org("acme");
     server.req(
@@ -1010,15 +964,15 @@ fn the_usage_rollup_folds_each_day_and_marks_it_done() {
     );
     commit(&server, &admin, "/v1/orgs/acme/repos/app", 0);
 
-    // The day lands in usage_daily and is stamped as folded. There is no
-    // external meter to report to — what this produces is read by
-    // people, on the dashboard, not invoiced.
+    // The day lands in usage_daily. There is no external meter to report
+    // to — what this produces is read by people, on the dashboard, not
+    // invoiced.
     //
-    // Wait for a stamped day that also *shows the activity generated
-    // above*, not merely for reported_at: the worker's first tick can
-    // legitimately fold and stamp a zero-usage day before the repo and
-    // commit land (it re-folds on the next tick). Breaking on the first
-    // stamp raced exactly that and went red on slow runners.
+    // Wait for a day that *shows the activity generated above*, not
+    // merely for a row: the worker's first tick can legitimately fold a
+    // zero-usage day before the repo and commit land (it re-folds on the
+    // next tick). Breaking on the first row raced exactly that and went
+    // red on slow runners.
     let day = wait_for(
         "a rolled-up day carrying the repo and the commit",
         Duration::from_secs(15),
@@ -1030,14 +984,34 @@ fn the_usage_rollup_folds_each_day_and_marks_it_done() {
                 .unwrap()
                 .iter()
                 .find(|d| {
-                    !d["reported_at"].is_null()
-                        && d["active_repos"].as_u64().unwrap_or(0) >= 1
+                    d["active_repos"].as_u64().unwrap_or(0) >= 1
                         && d["requests"].as_u64().unwrap_or(0) >= 1
                 })
                 .cloned()
         },
     );
     assert!(day["day"].as_str().unwrap().starts_with("20"), "{day}");
+    assert!(day["total_repos"].as_u64().unwrap_or(0) >= 1, "{day}");
+    // What a day is, and nothing a meter wanted: no billing stamp, no
+    // hosted-runner minutes, no private-bytes columns.
+    let mut fields: Vec<&str> = day
+        .as_object()
+        .unwrap()
+        .keys()
+        .map(String::as_str)
+        .collect();
+    fields.sort_unstable();
+    assert_eq!(
+        fields,
+        vec![
+            "active_repos",
+            "bytes_out",
+            "day",
+            "requests",
+            "total_repos"
+        ],
+        "{day}"
+    );
     assert!(server.healthy());
 }
 
@@ -1229,7 +1203,7 @@ fn disabled_workers_and_notify_retry_exhaustion() {
         &scratch,
         &[
             ("STRATUM_COMPACT_POLL_SECS", "0".into()),
-            ("STRATUM_BILLING_ROLLUP_SECS", "0".into()),
+            ("STRATUM_USAGE_ROLLUP_SECS", "0".into()),
             ("STRATUM_AUDIT_SHIP_SECS", "0".into()),
             ("STRATUM_GC_SECS", "0".into()),
         ],

@@ -51,6 +51,23 @@ fn spawn(store_url: &str, scratch: &Scratch, hint: &str, api_base: &str) -> Serv
         .start()
 }
 
+/// Whether a namespace by this name exists — which, for a handle, is
+/// whether an account was made.
+///
+/// Asked of the control plane rather than over HTTP. These tests used to
+/// ask `GET /v1/orgs/{name}/repos` signed out and read a 404 as "no such
+/// namespace" — which only worked because a signed-out caller could tell
+/// a namespace that exists (401) from one that does not (404), and that
+/// difference is exactly what a server with no public repositories must
+/// not tell a stranger. A test should not stand on an oracle the product
+/// is meant to close.
+fn namespace_exists(server: &Server, name: &str) -> bool {
+    let db = stratum_control::ControlDb::open(&server.db_url).expect("the control plane");
+    stratum_control::registry::org_by_name(&db, name)
+        .expect("read orgs")
+        .is_some()
+}
+
 /// A browser holding the session the callback issued.
 fn as_person<'a>(server: &'a Server, session: &str) -> Browser<'a> {
     let mut b = Browser::new(server);
@@ -88,6 +105,9 @@ fn signing_up_with_github_makes_a_proved_account_that_can_create_at_once() {
     assert_eq!(me["handle"], "ada");
     assert_eq!(me["orgs"][0]["name"], "ada");
     assert_eq!(me["orgs"][0]["role"], "owner");
+    // The probe the negatives below rely on answers yes when it should,
+    // so their "no" is a fact rather than a helper that cannot say yes.
+    assert!(namespace_exists(&server, "ada"));
 
     // And the part that would be a lie if `verified_at` were decorative.
     let (st, repo) = person.req(
@@ -132,8 +152,7 @@ fn an_address_github_has_not_proved_makes_no_account() {
     // Neither one left an account behind. `bob` would own the namespace
     // `bob` if it had, so asking for it is asking whether it exists.
     for handle in ["bob", "carol"] {
-        let (st, out) = server.req("GET", &format!("/v1/orgs/{handle}/repos"), "", None);
-        assert_eq!(st, 404, "{handle} exists: {out}");
+        assert!(!namespace_exists(&server, handle), "{handle} exists");
     }
 
     assert!(server.healthy(), "still serving");
@@ -416,8 +435,10 @@ fn an_address_held_as_somebody_elses_secondary_is_refused_plainly() {
 
     // Nothing half-made was left behind: no account, and no namespace
     // holding the name she would have got.
-    let (st, body) = server.req("GET", "/v1/orgs/carol/repos", "", None);
-    assert_eq!(st, 404, "a namespace was claimed anyway: {body}");
+    assert!(
+        !namespace_exists(&server, "carol"),
+        "a namespace was claimed anyway"
+    );
 
     assert!(server.healthy(), "still serving");
 }
@@ -461,8 +482,7 @@ fn a_callback_without_the_browsers_own_state_signs_nobody_in() {
     assert!(out.session.is_none());
 
     // And no account was made by any of it.
-    let (st, body) = server.req("GET", "/v1/orgs/ada/repos", "", None);
-    assert_eq!(st, 404, "{body}");
+    assert!(!namespace_exists(&server, "ada"), "an account was made");
 
     assert!(server.healthy(), "still serving");
 }
@@ -535,8 +555,10 @@ fn a_primary_address_that_is_not_an_address_proves_nothing() {
     assert_eq!(out.outcome, "noemail", "{}", out.location);
     assert!(out.session.is_none());
 
-    let (st, body) = server.req("GET", "/v1/orgs/dave/repos", "", None);
-    assert_eq!(st, 404, "an account was made anyway: {body}");
+    assert!(
+        !namespace_exists(&server, "dave"),
+        "an account was made anyway"
+    );
 
     assert!(server.healthy(), "still serving");
 }

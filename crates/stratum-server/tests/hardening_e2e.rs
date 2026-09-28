@@ -399,7 +399,7 @@ fn store_rtt_budgets() {
         &[
             ("STRATUM_COMPACT_POLL_SECS", "86400".into()),
             ("STRATUM_AUDIT_SHIP_SECS", "86400".into()),
-            ("STRATUM_BILLING_ROLLUP_SECS", "86400".into()),
+            ("STRATUM_USAGE_ROLLUP_SECS", "86400".into()),
             // The storage sweep's first tick fires at boot and reads
             // every repository's manifest; landing inside the create
             // window, it read as a third store op against a budget of
@@ -922,19 +922,17 @@ fn a_check_run_id_is_scoped_to_its_repository_and_its_org() {
     assert_eq!(server.req("GET", "/healthz", "", None).0, 200);
 }
 
-/// FINDING, and this test is red on purpose.
+/// An **unparseable** bearer token must not be an existence oracle for
+/// private repositories, on any repo-scoped REST route.
 ///
-/// An **unparseable** bearer token is an existence oracle for private
-/// repositories, on every repo-scoped REST route in the API — the ones
-/// this branch added and the ones that predate it alike.
-///
-/// The mechanism is the order of two checks in `app::rest_repo_auth`. It
-/// resolves the repository first, through `repo_or_masked`, which for a
-/// repository that is not there answers `authx::masked(headers)` — and
-/// masked, seeing *some* credential on the request, answers **404**. Only
-/// if the repository does resolve does it go on to
-/// `authx::principal_opt`, which rejects a token it cannot parse with a
-/// **401**. So:
+/// This was a finding, and this test was red on purpose until it was
+/// fixed. The mechanism was the order of two checks in
+/// `app::rest_repo_auth`: it resolved the repository first, through
+/// `repo_or_masked`, which for a repository that is not there answered
+/// `authx::masked(headers)` — and masked, seeing *some* credential on the
+/// request, answered **404**. Only if the repository did resolve did it
+/// go on to `authx::principal_opt`, which rejects a token it cannot parse
+/// with a **401**. So:
 ///
 /// * `GET /v1/orgs/alpha/repos/secret` with `Bearer weft_bogus_bogus`
 ///   → 401 "authentication required", and the repository exists;
@@ -943,16 +941,16 @@ fn a_check_run_id_is_scoped_to_its_repository_and_its_org() {
 ///
 /// Anonymously the two are both 401, and with a valid foreign token both
 /// 404, which is the rule `authx::masked` documents. A *malformed* token
-/// is the third posture, and it is the one nothing has to prove to be
-/// in: an attacker enumerating a namespace's private repositories needs
-/// no credential at all, and a made-up one is strictly better than none.
+/// was the third posture, and the one nothing has to prove to be in.
+/// `authx::masked` now asks whether the credential **authenticates**
+/// rather than whether one is present, so a made-up token is told its
+/// token is the problem — 401 — for a repository that exists and one that
+/// does not alike.
 ///
-/// Not fixed here: the fix is in `authx`/`app`, which this track does not
-/// own. The shape of it is that a credential which does not authenticate
-/// should count as no credential *for the purpose of masking* — the 401
-/// has to be decided after the repository has been resolved and found
-/// unreadable, not before, so that "your token is nonsense" cannot also
-/// be a statement about which repositories exist.
+/// Still open, one level up and outside this suite's reach: a missing
+/// *organization* is answered by `org_or_404` before `masked` is asked,
+/// so `…/orgs/ghost/repos/x` is a 404 where `…/orgs/alpha/repos/x` is a
+/// 401, anonymously or with this same made-up token.
 #[test]
 fn an_unparseable_token_tells_a_stranger_whether_a_private_repository_exists() {
     let minio = Minio::shared();

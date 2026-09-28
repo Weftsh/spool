@@ -92,10 +92,7 @@ fn search_finds_a_members_repos_by_name_namespace_and_description() {
     // An empty query browses everything this caller belongs to — and
     // nothing of rival's.
     let out = search("");
-    assert_eq!(
-        names(&out),
-        ["acme/ledger", "acme/secret", "acme/widget"]
-    );
+    assert_eq!(names(&out), ["acme/ledger", "acme/secret", "acme/widget"]);
     assert!(out["next"].is_null(), "one page, so no cursor: {out}");
 
     // Another organisation's token finds none of it, by any word.
@@ -613,7 +610,10 @@ fn a_description_can_be_set_and_cleared_by_the_right_role_and_never_published() 
          organization — omit \"public\" or set it to false"
     );
     let (_, out) = server.req("GET", url, &admin, None);
-    assert!(out["description"].is_null(), "half a refused patch landed: {out}");
+    assert!(
+        out["description"].is_null(),
+        "half a refused patch landed: {out}"
+    );
     // Anonymous search still finds nothing, because it is still refused.
     assert_eq!(
         server.req("GET", "/v1/search/repos?q=widget", "", None).0,
@@ -735,7 +735,11 @@ fn a_description_can_be_set_and_cleared_by_the_right_role_and_never_published() 
                 token,
                 Some(body.clone()),
             );
-            assert_eq!(hidden.0, expect, "{who} patching hidden with {body}: {}", hidden.1);
+            assert_eq!(
+                hidden.0, expect,
+                "{who} patching hidden with {body}: {}",
+                hidden.1
+            );
             assert_eq!(
                 hidden, absent,
                 "{who} told a real repo from an absent one with {body}"

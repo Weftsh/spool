@@ -1469,11 +1469,12 @@ fn quiet_workers() -> Vec<(&'static str, String)> {
         // `locator.hdr` for the job the sync just queued and, under a
         // slow full-suite coverage run, consumes the fault meant for
         // the sync's own read, so the sync succeeds where the test
-        // demanded it fail. Silence it, and the site publisher and the
-        // forker for the same reason: in these tests only the sync may
-        // read the layout.
+        // demanded it fail. Silence it, and the forker for the same
+        // reason: in these tests only the sync may read the layout.
+        // (The site publisher this list also silenced went with Sites;
+        // a variable no worker reads silences nothing, as the GC line
+        // above learned.)
         ("STRATUM_CONTRIB_POLL_SECS", "86400".to_string()),
-        ("STRATUM_SITEPUBLISH_POLL_SECS", "86400".to_string()),
         ("STRATUM_FORK_POLL_SECS", "86400".to_string()),
     ]
 }

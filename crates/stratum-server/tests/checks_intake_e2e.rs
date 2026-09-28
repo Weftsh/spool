@@ -1,14 +1,9 @@
-//! Vendor CI intake and the README badge, end to end against a real
-//! server.
+//! Vendor CI intake, end to end against a real server.
 //!
-//! Two new attack surfaces arrive together here, so this file is half
-//! happy path and half negative suite:
-//!
-//! * a route whose **only** credential is an HMAC over the body, with no
-//!   Authorization header for the usual masking to key off; and
-//! * a route that is *meant* to be fetched anonymously by every reader
-//!   of a README, which makes it the most inviting existence oracle in
-//!   the API.
+//! A route whose **only** credential is an HMAC over the body, with no
+//! Authorization header for the usual masking to key off, is a new
+//! attack surface, so this file is half happy path and half negative
+//! suite.
 //!
 //! Every attack case ends by asserting the server is still healthy and
 //! still serving the thing it was serving before — a server that survives
@@ -31,8 +26,8 @@ fn spawn_server(store_url: &str, scratch: &Scratch, hint: &str) -> Server {
     Server::builder(env!("CARGO_BIN_EXE_stratum-server"), store_url)
         .db_hint(hint)
         .data_dir(scratch.path().join("data"))
-        // The lander polls every second so the badge's "what landed"
-        // question has an answer within the test's patience.
+        // The lander polls every second so a change landed on a green
+        // check lands within the test's patience.
         .env("STRATUM_LAND_POLL_SECS", "1")
         .start()
 }
@@ -93,31 +88,6 @@ fn post_signed(
         status,
         serde_json::from_str(&text).unwrap_or(serde_json::Value::String(text)),
     )
-}
-
-/// A GET whose body is not JSON — the badge. Returns status, body and
-/// headers, because for this route the headers *are* half the contract.
-fn get_raw(
-    server: &Server,
-    path: &str,
-    token: Option<&str>,
-) -> (u16, String, std::collections::HashMap<String, String>) {
-    let mut r = ureq::get(&format!("{}{path}", server.base));
-    if let Some(t) = token {
-        r = r.set("Authorization", &format!("Bearer {t}"));
-    }
-    let resp = match r.call() {
-        Ok(x) => x,
-        Err(ureq::Error::Status(_, x)) => x,
-        Err(e) => panic!("transport GET {path}: {e}"),
-    };
-    let status = resp.status();
-    let headers: std::collections::HashMap<String, String> = resp
-        .headers_names()
-        .into_iter()
-        .filter_map(|n| resp.header(&n).map(|v| (n.to_lowercase(), v.to_string())))
-        .collect();
-    (status, resp.into_string().unwrap_or_default(), headers)
 }
 
 fn as_person(server: &Server, cookie: &str, method: &str, path: &str) -> (u16, serde_json::Value) {
@@ -182,9 +152,9 @@ fn branch(server: &Server, token: &str, repo: &str, name: &str, from: &str) {
     assert_eq!(st, 201, "branch {name} from {from}: {out}");
 }
 
-/// One org, one public repo `app` with a root OWNERS naming Alice, and
-/// one private repo `vault`. Public because a badge that nobody may
-/// fetch anonymously is not a badge.
+/// One org, one repo `app` with a root OWNERS naming Alice, and a second
+/// repo `vault` beside it — so a secret for one pointed at the other is
+/// a real repository's door and not an absent one.
 fn world(server: Server) -> World {
     let admin = server.bootstrap_org("acme");
     server
@@ -207,7 +177,7 @@ fn world(server: Server) -> World {
     assert_eq!(b.login("alice@acme.test", PASSWORD), 200);
     let alice = b.cookie.clone().expect("a session cookie");
 
-    for (name, public) in [("app", true), ("vault", false)] {
+    for name in ["app", "vault"] {
         let (st, out) = server.post(
             "/v1/orgs/acme/repos",
             &admin,
@@ -566,176 +536,76 @@ fn every_provider_snippet_is_the_verified_shell_line_for_line() {
     }
 }
 
-/// The badge: what it reports, what it caches, and what it refuses to
-/// admit about a private repository.
+/// A check reported again — a re-run, which is the most ordinary thing
+/// CI does — updates the row it names rather than accumulating a second
+/// one, and says so: **200, not 201**. A second row under one name would
+/// leave every reader picking between two answers with nothing to say
+/// which is current. This is the only path that reaches the intake's
+/// `OK` arm; every other test here posts a name for the first time.
+///
+/// It used to live inside the status-badge test, as the step that turned
+/// a red badge green again. Badges are gone; the intake's rule is not,
+/// and a post-merge run against a change that has landed is still where
+/// CI most often reports the same check twice.
 #[test]
-fn the_badge_reports_what_landed_and_masks_a_private_repo() {
+fn a_re_reported_check_updates_its_row_and_says_so() {
     let minio = Minio::shared();
-    let bucket = minio.bucket("ci-intake-badge");
-    let scratch = Scratch::new("ci-intake-badge");
-    let w = world(spawn_server(&bucket.base_url, &scratch, "ci-intake-badge"));
+    let bucket = minio.bucket("ci-intake-rerun");
+    let scratch = Scratch::new("ci-intake-rerun");
+    let w = world(spawn_server(&bucket.base_url, &scratch, "ci-intake-rerun"));
     let (server, admin) = (&w.server, &w.admin);
     let secret = mint_secret(server, admin, "app");
-    let path = "/v1/orgs/acme/repos/app/badge.svg";
+    let route = "/v1/orgs/acme/repos/app/ci/checks";
 
-    // Nothing has landed. Grey, and never green: an empty check list is
-    // byte-identical to "everything passed", and reading it as passing
-    // is how a badge comes to certify a repository nobody has built.
-    let (st, svg, headers) = get_raw(server, path, None);
-    assert_eq!(st, 200, "{svg}");
-    assert!(svg.contains(">no status</text>"), "{svg}");
-    assert!(!svg.contains(">passing</text>"), "{svg}");
-    assert_eq!(
-        headers.get("content-type").map(String::as_str),
-        Some("image/svg+xml; charset=utf-8"),
-        "{headers:?}"
-    );
-    // A badge that caches for a day is a badge that lies.
-    let cache = headers.get("cache-control").expect("a cache header");
-    assert!(cache.contains("max-age=60"), "{cache}");
-    assert_eq!(
-        headers.get("x-content-type-options").map(String::as_str),
-        Some("nosniff")
-    );
-
-    // An open change with a green check still does not colour the
-    // branch: it is not on the branch yet.
+    // A green check, and the change lands on it.
     let (key, tip) = open_change(
         server,
         admin,
         "app",
         "Ibadd0001",
-        "badge-feature",
+        "rerun-feature",
         ("src/b.rs", "fn b() {}"),
     );
     let body = intake_body(&key, &tip, "ci/tests", "passing", now_ms());
-    let sig = doc_signature(&secret, &body);
-    let (st, out) = post_signed(
-        server,
-        "/v1/orgs/acme/repos/app/ci/checks",
-        Some(&sig),
-        &body,
-    );
+    let (st, out) = post_signed(server, route, Some(&doc_signature(&secret, &body)), &body);
     assert_eq!(st, 201, "{out}");
-    let (_, svg, _) = get_raw(server, path, None);
-    assert!(
-        svg.contains(">no status</text>"),
-        "an open change coloured trunk's badge: {svg}"
-    );
-
-    // Landing puts it on the branch, and the badge follows.
     land(&w, "app", &key);
-    let (st, svg, _) = get_raw(server, path, None);
-    assert_eq!(st, 200);
-    assert!(svg.contains(">passing</text>"), "{svg}");
-    assert!(svg.contains("<svg xmlns="), "{svg}");
 
-    // A post-merge run finding trunk broken turns it red. This is the
-    // only way red is reachable at all — landing already refuses a
-    // change whose checks are failing — and it is the case a README
-    // badge exists for.
+    // A post-merge run finds it broken: a new name, so a new row.
     let body = intake_body(&key, &tip, "ci/nightly", "failing", now_ms());
-    let sig = doc_signature(&secret, &body);
-    let (st, out) = post_signed(
-        server,
-        "/v1/orgs/acme/repos/app/ci/checks",
-        Some(&sig),
-        &body,
-    );
+    let (st, out) = post_signed(server, route, Some(&doc_signature(&secret, &body)), &body);
     assert_eq!(st, 201, "{out}");
-    let (_, svg, _) = get_raw(server, path, None);
-    assert!(svg.contains(">failing</text>"), "{svg}");
 
-    // The same check reported again — a re-run, which is the most
-    // ordinary thing CI does. **200, not 201**, and it must *update*
-    // rather than accumulate: a second row under one name would leave
-    // the badge picking between two answers, and nothing says which is
-    // current. This is the only path that reaches the `OK` arm; every
-    // other test here posts a name for the first time.
+    // The same check reported again, green.
     let body = intake_body(&key, &tip, "ci/nightly", "passing", now_ms());
-    let sig = doc_signature(&secret, &body);
-    let (st, out) = post_signed(
-        server,
-        "/v1/orgs/acme/repos/app/ci/checks",
-        Some(&sig),
-        &body,
-    );
+    let (st, out) = post_signed(server, route, Some(&doc_signature(&secret, &body)), &body);
     assert_eq!(
         st, 200,
         "a re-run of an existing check answered {st} rather than updating it: {out}"
     );
-    let (_, svg, _) = get_raw(server, path, None);
-    assert!(
-        svg.contains(">passing</text>"),
-        "a green re-run left the badge red: {svg}"
-    );
 
-    // A branch nothing landed on is grey, not the default branch's
-    // answer under another name.
-    let (st, svg, _) = get_raw(server, &format!("{path}?branch=release-9"), None);
-    assert_eq!(st, 200);
-    assert!(svg.contains(">no status</text>"), "{svg}");
-
-    // A change that landed with **no CI at all** is grey, not green.
-    //
-    // This case was missing until a mutation found it: with the
-    // assertions above, turning the empty-check verdict into `passing`
-    // left the whole suite green, because the only grey answer being
-    // exercised was "nothing has landed here" — which returns before the
-    // aggregation is ever reached. The dangerous read is the other one:
-    // a project with no CI wired up would have been certified passing by
-    // its own README, which is the single worst thing a badge can do.
-    let (unchecked, _) = open_change(
-        server,
+    // One row under the name, holding the newest verdict.
+    let (st, checks) = server.get(
+        &format!("/v1/orgs/acme/repos/app/changes/{key}/checks"),
         admin,
-        "app",
-        "Ibadd0002",
-        "unchecked-feature",
-        ("src/e.rs", "fn e() {}"),
     );
-    land(&w, "app", &unchecked);
-    let (st, svg, _) = get_raw(server, path, None);
-    assert_eq!(st, 200);
-    assert!(
-        svg.contains(">no status</text>"),
-        "a change that landed with no checks reported green: {svg}"
+    assert_eq!(st, 200, "{checks}");
+    let nightly: Vec<&serde_json::Value> = checks["checks"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{checks}"))
+        .iter()
+        .filter(|c| c["name"] == "ci/nightly")
+        .collect();
+    assert_eq!(
+        nightly.len(),
+        1,
+        "a re-run accumulated a second row: {checks}"
     );
-
-    // The branch is compared, never drawn. Git ref names may legally
-    // contain `<`, `>` and `&`, so a badge that echoed one would be
-    // stored XSS reachable from any README on the internet.
-    let hostile = "%3Cscript%3Ealert(1)%3C/script%3E";
-    let (st, svg, _) = get_raw(server, &format!("{path}?branch={hostile}"), None);
-    assert_eq!(st, 200);
-    assert!(!svg.contains("<script"), "{svg}");
-    assert!(!svg.contains("alert"), "{svg}");
-    assert!(svg.contains(">no status</text>"), "{svg}");
-
-    // Masking. A stranger asking about the private repo must not be able
-    // to tell it apart from one that does not exist, and must never get
-    // a badge that says "private" — that badge is the confirmation.
-    let private = "/v1/orgs/acme/repos/vault/badge.svg";
-    let absent = "/v1/orgs/acme/repos/no-such-repo/badge.svg";
-    let (st_private, body_private, _) = get_raw(server, private, None);
-    let (st_absent, body_absent, _) = get_raw(server, absent, None);
-    assert_eq!(st_private, st_absent, "the two answers differ by status");
-    assert_eq!(body_private, body_absent, "the two answers differ by body");
-    assert!(!body_private.contains("<svg"), "{body_private}");
-    assert!(!body_private.to_lowercase().contains("private"));
-
-    // Same again for somebody holding a credential that is not for this
-    // org: masked, and masked identically.
-    let other = server.bootstrap_org("rival");
-    let (st_private, body_private, _) = get_raw(server, private, Some(&other));
-    let (st_absent, body_absent, _) = get_raw(server, absent, Some(&other));
-    assert_eq!(st_private, 404);
-    assert_eq!(st_private, st_absent);
-    assert_eq!(body_private, body_absent);
-
-    // A member may of course see their own repo's badge.
-    let (st, svg, _) = get_raw(server, private, Some(admin));
-    assert_eq!(st, 200, "{svg}");
-    assert!(svg.contains(">no status</text>"), "{svg}");
+    assert_eq!(
+        nightly[0]["state"],
+        serde_json::json!("passing"),
+        "a green re-run left the check red: {checks}"
+    );
 
     assert!(server.healthy());
 }
@@ -1060,8 +930,8 @@ fn the_intake_refuses_every_attack_and_keeps_serving() {
 
     // Still serving, and still serving *this*.
     assert!(server.healthy());
-    let (st, svg, _) = get_raw(server, "/v1/orgs/acme/repos/app/badge.svg", None);
-    assert_eq!(st, 200, "{svg}");
+    let (st, out) = server.get("/v1/orgs/acme/repos/app", admin);
+    assert_eq!(st, 200, "{out}");
 }
 
 /// The intake secret is an authorization fact about the repository, so
@@ -2290,8 +2160,8 @@ fn the_commit_scoped_intake_refuses_every_bad_body_and_keeps_serving() {
     // Nothing moved, and the server is still serving the thing it was.
     assert_eq!(count(), 1);
     assert!(server.healthy());
-    let (st, svg, _) = get_raw(server, "/v1/orgs/acme/repos/app/badge.svg", None);
-    assert_eq!(st, 200, "{svg}");
+    let (st, out) = server.get("/v1/orgs/acme/repos/app", admin);
+    assert_eq!(st, 200, "{out}");
 }
 
 /// A spent rate budget is a normal state, and the poll survives it.
@@ -2361,38 +2231,31 @@ fn a_rate_limited_poll_backs_off_and_comes_back_rather_than_failing() {
     assert!(w.server.healthy());
 }
 
-/// The poller's state has two audiences, and a stranger is one of them.
+/// The poller's state has two audiences inside the organization, and
+/// nobody outside it.
 ///
-/// `RepoRead` on a public mirror is anybody at all. What they may have
-/// is the *shape* of the problem — connected, polled, denied — none of
-/// which says anything a visitor could not infer from the empty tab in
-/// front of them, and all of which the tab needs in order to say "this
+/// A reader who may not write — a viewer, a read-only token — may have
+/// the *shape* of the problem: connected, polled, denied. None of that
+/// says anything they could not infer from the empty tab in front of
+/// them, and all of it is what the tab needs in order to say "this
 /// installation cannot read Actions" instead of drawing nothing.
 ///
 /// What they may not have is the operator text. `error` is GitHub's raw
 /// response body or a `GET {url}: {e}` carrying the full
 /// `api.github.com` URL, which names the origin `owner/repo` this
-/// mirror pulls from; `resuming_from` is a raw upstream page URL. A
-/// repository mirrored from a private upstream would otherwise publish
-/// that upstream's name to every anonymous reader.
+/// mirror pulls from; `resuming_from` is a raw upstream page URL.
+///
+/// This used to be about an anonymous reader of a public mirror. There
+/// are no public repositories, so somebody outside the organization gets
+/// nothing at all — the answer a repository that does not exist gets.
 ///
 /// Asserted against the **JSON**, not against what a page renders. A
 /// client that merely declines to draw the field has still shipped it,
 /// and anybody who opens devtools reads it out of the response.
 #[test]
-fn the_poll_state_gives_a_stranger_the_shape_and_an_operator_the_detail() {
+fn the_poll_state_gives_a_reader_the_shape_and_an_operator_the_detail() {
     let w = polling_world("checks-poll-audience", "5");
     mirror(&w.server, &w.admin, "locked", "noperm/widget");
-    // Public, which is the posture that makes this reachable: an
-    // anonymous GET of a private repo is masked long before it gets
-    // here, so a private-only test would pass against the leak.
-    let (st, out) = w.server.req(
-        "PATCH",
-        "/v1/orgs/acme/repos/locked",
-        &w.admin,
-        Some(serde_json::json!({"public": true})),
-    );
-    assert_eq!(st, 200, "{out}");
     await_job(&w, &enqueue_poll(&w, "locked"));
 
     // The operator, who may write, gets everything.
@@ -2402,18 +2265,25 @@ fn the_poll_state_gives_a_stranger_the_shape_and_an_operator_the_detail() {
     let detail = mine["error"].as_str().unwrap_or_default();
     assert!(detail.contains("actions: read"), "{mine}");
 
-    // The stranger, with no credential at all, gets the shape and not
+    // A reader, holding read and nothing more, gets the shape and not
     // the detail — and `error` is *present and null* rather than
     // missing, so a client cannot read "we will not tell you" as "there
     // is no error".
-    let (st, theirs) = w.server.get("/v1/orgs/acme/repos/locked/ci/poll", "");
+    let (st, minted) = w.server.post(
+        "/v1/orgs/acme/tokens",
+        &w.admin,
+        Some(serde_json::json!({ "scopes": ["repo:read"], "label": "reader" })),
+    );
+    assert_eq!(st, 201, "{minted}");
+    let reader = minted["token"].as_str().unwrap().to_string();
+    let (st, theirs) = w.server.get("/v1/orgs/acme/repos/locked/ci/poll", &reader);
     assert_eq!(st, 200, "{theirs}");
     assert_eq!(theirs["connected"], serde_json::json!(true), "{theirs}");
     assert_eq!(theirs["polled"], serde_json::json!(false), "{theirs}");
     assert_eq!(
         theirs["denied"],
         serde_json::json!(true),
-        "a stranger must still be told the checks cannot be read, or the \
+        "a reader must still be told the checks cannot be read, or the \
          tab is back to rendering a permission problem as an empty list: \
          {theirs}"
     );
@@ -2422,16 +2292,37 @@ fn the_poll_state_gives_a_stranger_the_shape_and_an_operator_the_detail() {
     assert_eq!(theirs["resuming_from"], serde_json::Value::Null, "{theirs}");
 
     // The whole body, not just the fields we thought to name: nothing
-    // anywhere in a stranger's response mentions the upstream.
+    // anywhere in a reader's response mentions the upstream.
     let text = theirs.to_string();
     assert!(
         !text.contains("noperm"),
-        "the origin's name reached an anonymous reader: {text}"
+        "the origin's name reached a reader who may not write: {text}"
     );
     assert!(
         !text.contains("api.github.com") && !text.contains("actions: read"),
-        "operator text reached an anonymous reader: {text}"
+        "operator text reached a reader who may not write: {text}"
     );
+
+    // Outside the organization there is no shape either: anonymous is
+    // told to authenticate and another org is told nothing is there,
+    // exactly as for a mirror that does not exist.
+    let rival = w.server.bootstrap_org("rival");
+    for (who, token, expect) in [("anonymous", "", 401), ("a rival org", rival.as_str(), 404)] {
+        let locked = w.server.get("/v1/orgs/acme/repos/locked/ci/poll", token);
+        let absent = w
+            .server
+            .get("/v1/orgs/acme/repos/no-such-repo/ci/poll", token);
+        assert_eq!(locked.0, expect, "{who}: {}", locked.1);
+        assert_eq!(
+            locked, absent,
+            "{who} told a real mirror from an absent one"
+        );
+        assert!(
+            !locked.1.to_string().contains("noperm"),
+            "{who}: {}",
+            locked.1
+        );
+    }
 
     assert!(w.server.healthy());
 }

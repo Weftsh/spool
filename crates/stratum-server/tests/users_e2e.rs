@@ -3010,9 +3010,8 @@ fn the_activity_feed_reads_newest_first_and_exports_as_csv() {
 ///
 /// It exists because the dashboard had no way to ask it. `viewer_admin`
 /// is a different and stricter question, so the tab used neither and
-/// simply drew the form for everybody: a signed-out stranger reading a
-/// public repository was offered "Start a review", filled it in, and was
-/// then told that opening a change needs write access and that they
+/// simply drew the form for everybody: a reader who could not push was
+/// offered "Start a review", filled it in, and was then told that opening a change needs write access and that they
 /// should pass a `source` field — a REST parameter with nothing on
 /// screen corresponding to it.
 ///
@@ -3033,7 +3032,7 @@ fn viewer_write_predicts_whether_a_change_needs_a_fork() {
                 "POST",
                 "/v1/orgs/acme/repos",
                 &admin_token,
-                Some(serde_json::json!({ "name": "app", "public": true })),
+                Some(serde_json::json!({ "name": "app" })),
             )
             .0,
         201
@@ -3063,7 +3062,7 @@ fn viewer_write_predicts_whether_a_change_needs_a_fork() {
         .unwrap()
         .to_string();
 
-    // A viewer on a public repository: may read it, may not push to it.
+    // A viewer: may read the repository, may not push to it.
     let (st, app) = vic.req("GET", "/v1/orgs/acme/repos/app", None);
     assert_eq!(st, 200, "{app}");
     assert_eq!(
@@ -3083,12 +3082,10 @@ fn viewer_write_predicts_whether_a_change_needs_a_fork() {
         "viewer_write said no and the change was not refused: {body}"
     );
 
-    // A stranger with no account at all is told `false` rather than
-    // nothing, so a client has nothing to distinguish "no" from "not
-    // told" and cannot end up guessing.
+    // Nobody signed out is shown the repository at all, so there is no
+    // form to draw and no flag to read: told to sign in.
     let (st, anon) = server.req("GET", "/v1/orgs/acme/repos/app", "", None);
-    assert_eq!(st, 200, "{anon}");
-    assert_eq!(anon["viewer_write"], false, "{anon}");
+    assert_eq!(st, 401, "{anon}");
 
     // Raise Vic to a writer on this repository only.
     let mut owner = Browser::new(&server);

@@ -678,7 +678,10 @@ fn contributors_are_ranked_with_their_totals_for_a_member_and_nobody_else() {
     assert_eq!(st, 401, "{out}");
     assert_eq!((st, out), server.req("GET", absent, "", None));
     let (st, out) = ada.req("GET", path, None);
-    assert_eq!(st, 404, "a contributor who is not a member read the rail: {out}");
+    assert_eq!(
+        st, 404,
+        "a contributor who is not a member read the rail: {out}"
+    );
     assert_eq!((st, out), ada.req("GET", absent, None));
 
     // `?limit=` is passed through: one asked for is one returned, and
@@ -783,7 +786,11 @@ fn a_private_repositorys_contributors_are_masked_exactly_as_the_repository_is() 
     let mut dave = signup(&server, &mail, "dave", "dave@example.com");
 
     // Hers, in an organization she runs.
-    let (st, body) = ada.req("POST", "/v1/orgs", Some(serde_json::json!({ "name": "acme" })));
+    let (st, body) = ada.req(
+        "POST",
+        "/v1/orgs",
+        Some(serde_json::json!({ "name": "acme" })),
+    );
     assert_eq!(st, 201, "{body}");
     let (st, body) = ada.req(
         "POST",
@@ -874,7 +881,10 @@ fn a_private_repositorys_contributors_are_masked_exactly_as_the_repository_is() 
     // an endpoint that only ever answers its owner.
     let (st, theirs) = dave.req("GET", private, None);
     assert_eq!(st, 200, "{theirs}");
-    assert_eq!(theirs, mine, "a viewer reads a different rail from the owner");
+    assert_eq!(
+        theirs, mine,
+        "a viewer reads a different rail from the owner"
+    );
 
     // The server is still serving after every refusal above. A server
     // that wedges and refuses everything would pass every masking
