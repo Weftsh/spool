@@ -1166,20 +1166,19 @@ fn a_runner_that_takes_a_job_and_goes_quiet_is_replaced_then_given_up_on() {
     assert!(w.server.healthy());
 }
 
-/// **Pending a product fix — fails today.** A machine whose job was
-/// handed on while it was quiet learns so from its next call, and stops.
+/// A machine whose job was handed on while it was quiet learns so from
+/// its next call, and stops.
 ///
 /// `take_one` retires the quiet machine's token when it hands the job to
-/// the next one, and says why in so many words: "the old runner learns it
-/// is over from the 410 its next call gets". It does not. `dead_job_token`
-/// answers 410 only to *the job's current* token once the job has
-/// stopped; the job now carries the new attempt's token and is still
-/// running, so the old machine is told 401 — which the runner does not
-/// treat as "stop" — and carries on running the steps of a build another
-/// machine is also running, until its own timeout (six hours by default).
-/// Two machines running the same job's steps at once is the thing the
-/// hosted fleet's `StopTask` on reclaim existed to prevent; a deploy step
-/// would run twice.
+/// the next one, on the promise that "the old runner learns it is over
+/// from the 410 its next call gets". It did not: `dead_job_token`
+/// answered 410 only to *the job's current* token once the job had
+/// stopped, and the job now carried the new attempt's token and was
+/// still running, so the old machine was told 401 — which the runner
+/// does not treat as "stop" — and carried on running the steps of a
+/// build another machine was also running, until its own timeout. A
+/// deploy step would have run twice. An earlier attempt's token is now
+/// answered 410 `reassigned`.
 #[test]
 fn a_runner_whose_job_was_handed_on_is_told_to_stop_when_it_calls_again() {
     let mut w = world_with("runner-handed-on", &[], &["first"]);
@@ -1208,7 +1207,7 @@ fn a_runner_whose_job_was_handed_on_is_told_to_stop_when_it_calls_again() {
     while step_alive(step.pid) {
         assert!(
             Instant::now() < deadline,
-            "PENDING PRODUCT FIX: the machine whose job was handed on is still running \
+            "the machine whose job was handed on is still running \
              its step (pid {}) {REACH:?} after it came back. Its revoked token is answered \
              401 rather than 410 by `runner_api::dead_job_token`, because the job has a \
              newer attempt's token and is still running — so the runner never learns \
@@ -1232,19 +1231,18 @@ fn a_runner_whose_job_was_handed_on_is_told_to_stop_when_it_calls_again() {
     assert!(w.server.healthy());
 }
 
-/// **Pending a product fix — fails today.** A machine restarted in the
-/// middle of a build takes work again once the build's lease has lapsed.
+/// A machine restarted in the middle of a build takes work again once
+/// the build's lease has lapsed.
 ///
-/// `systemctl restart`, a reboot, an OOM kill: the agent ends the job it
-/// was in without a verdict, and comes back with the same `.runner`. The
-/// claim answers it **409 busy** for as long as a `running` row names it
-/// — `workflows::running_job_for_runner` does not look at the lease — and
-/// the only thing that clears that row is another machine reclaiming the
-/// job or the overdue sweep. In an organisation with one machine that is
-/// the job's timeout plus the slack: six hours and five minutes of every
-/// build queued behind a machine that is idle and asking. The agent's own
-/// comment on 409 says the condition "clears when the old lease expires";
-/// the server's never does.
+/// `systemctl restart`, a reboot, a crash: the job the machine was in
+/// ends without a verdict, and the machine comes back with the same
+/// `.runner`. The claim used to answer it **409 busy** for as long as a
+/// `running` row named it — `workflows::running_job_for_runner` did not
+/// look at the lease — and the only thing that cleared that row was
+/// another machine reclaiming the job or the overdue sweep. In an
+/// organisation with one machine that was the job's timeout plus the
+/// slack: six hours and five minutes of every build queued behind a
+/// machine that was idle and asking. Busy now means a live lease.
 #[test]
 fn a_restarted_runner_takes_work_again_once_its_old_lease_lapses() {
     let mut w = world_with("runner-restart", &[], &["box-1"]);
@@ -1257,8 +1255,16 @@ fn a_restarted_runner_takes_work_again_once_its_old_lease_lapses() {
 
     // SIGTERM, and the same `.runner` comes back: the first life ends
     // the job as a stop — the step killed, no verdict sent — and exits 0.
-    w.agents[0].restart();
+    let first_life = w.agents[0].restart();
     let agent = w.agent("box-1");
+    // 0: a stop is not a failure, so a supervisor with
+    // `Restart=on-failure` does not count it as one.
+    assert_eq!(
+        first_life.and_then(|s| s.code()),
+        Some(0),
+        "the first life exited {first_life:?}:\n{}",
+        agent.said()
+    );
     wait_until("the first life's step to be killed", REACH, || {
         !step_alive(step.pid)
     });
@@ -1303,7 +1309,7 @@ fn a_restarted_runner_takes_work_again_once_its_old_lease_lapses() {
                 .to_string();
             let answer = w.server.post("/v1/runners/claim", &credential, None);
             panic!(
-                "PENDING PRODUCT FIX: the restarted machine never took the lapsed job back \
+                "the restarted machine never took the lapsed job back \
                  ({REACH:?} after the lease lapsed). `POST /v1/runners/claim` answers it \
                  {answer:?} for as long as a running row names it — \
                  `workflows::running_job_for_runner` ignores the lease — so a one-machine \

@@ -519,18 +519,29 @@ pub fn claim_self_hosted(
     Ok(row.as_ref().map(row_to_job))
 }
 
-/// Whether this runner already holds a job that is running.
+/// Whether this runner already holds a job that is running **and whose
+/// lease is live**.
 ///
 /// Asked before a claim, and answered with a 409 rather than a second
 /// job: a runner executes one job at a time, and a `run` loop that
 /// somehow asked twice would otherwise be handed work it will never
 /// report on, which reads to everybody else as a job that hung.
+///
+/// The lease is part of the question. A machine restarted mid-build —
+/// a reboot, `systemctl restart` — comes back with the same credential
+/// while its old job's row still says `running` under its name. Nobody
+/// is renewing that lease; once it lapses the job is anybody's to take,
+/// this machine's included, which is exactly what [`claim_self_hosted`]
+/// does with it. Counting the row regardless answered the machine 409
+/// until another machine or the overdue sweep got to it: in an
+/// organisation with one machine, the job's whole timeout.
 pub fn running_job_for_runner(db: &ControlDb, runner_id: &str) -> Result<Option<String>, String> {
     let row = db
         .lock()
         .query_opt(
-            "SELECT id FROM workflow_jobs WHERE runner_id = $1 AND state = 'running' LIMIT 1",
-            &[&runner_id],
+            "SELECT id FROM workflow_jobs \
+             WHERE runner_id = $1 AND state = 'running' AND lease_until >= $2 LIMIT 1",
+            &[&runner_id, &now_ms()],
         )
         .map_err(|e| format!("read running job for runner: {e}"))?;
     Ok(row.map(|r| r.get("id")))
@@ -1306,6 +1317,44 @@ mod tests {
             .find(|j| j.key == key)
             .unwrap_or_else(|| panic!("no job {key:?}"))
             .state
+    }
+
+    /// A runner is busy only while it holds a job whose lease is live.
+    ///
+    /// A machine restarted mid-build comes back with the same credential
+    /// and a `running` row still under its name. Once that row's lease
+    /// lapses nobody is renewing it, and the machine must be free to take
+    /// work — that job included — rather than answered 409 until the
+    /// overdue sweep runs, which in a one-machine organisation is the
+    /// job's whole timeout.
+    #[test]
+    fn a_runner_is_busy_only_while_its_jobs_lease_is_live() {
+        let (db, org, repo, _, _) = world("wf-busy-lease");
+        create_run(&db, &org, &repo, &newrun("c1"), &[newjob("build", &[])]).unwrap();
+        assert_eq!(running_job_for_runner(&db, "test-runner").unwrap(), None);
+        let job = claim(&db, 60_000).unwrap().expect("build is ready");
+        assert_eq!(
+            running_job_for_runner(&db, "test-runner").unwrap(),
+            Some(job.id.clone()),
+            "a live lease is a busy runner"
+        );
+        assert_eq!(running_job_for_runner(&db, "another-runner").unwrap(), None);
+
+        db.lock()
+            .execute(
+                "UPDATE workflow_jobs SET lease_until = $2 WHERE id = $1",
+                &[&job.id, &(now_ms() - 1)],
+            )
+            .unwrap();
+        assert_eq!(
+            running_job_for_runner(&db, "test-runner").unwrap(),
+            None,
+            "a lapsed lease left a runner busy"
+        );
+        // …and the job it lapsed on is this runner's to take back.
+        let again = claim(&db, 60_000).unwrap().expect("the lapsed job");
+        assert_eq!(again.id, job.id);
+        assert_eq!(again.attempts, 2);
     }
 
     /// A job is not claimable until everything it needs has passed, and

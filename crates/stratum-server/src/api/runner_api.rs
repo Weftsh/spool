@@ -147,17 +147,20 @@ fn authed_job(
 /// cancelled when it tried to report: exactly the compute superseding
 /// exists to save.
 ///
-/// So a dead token gets one question asked of it: is it the token this
-/// job was claimed with, and has the job stopped running? Both, and
-/// the caller is the runner we have been trying to stop, so tell it.
-/// Anything else — a stranger's token, an unknown one, this job's token
-/// while the job is still running (a lapsed expiry, not a
-/// cancellation) — stays 401, and the ladder is unchanged for every
-/// credential that is not this job's own.
+/// So a dead token gets one question asked of it: was it minted for
+/// this job? Either it is the token the job was claimed with and the
+/// job has stopped running, or it is an earlier attempt's — the job was
+/// handed to another machine when this one's lease lapsed — and either
+/// way the caller is a runner we need to stop, so tell it: 410, with the
+/// state, or `reassigned`. Anything else — a stranger's token, an
+/// unknown one, a composed member's, this job's current token while the
+/// job is still running (a lapsed expiry, not a cancellation) — stays
+/// 401, and the ladder is unchanged for every credential that is not
+/// this job's own.
 ///
-/// The disclosure is a job's state to the holder of that job's own
-/// token, proven by the secret rather than by the id. That is
-/// information it already had.
+/// The disclosure is a job's state to a holder of that job's own token,
+/// proven by the secret rather than by the id. That is information it
+/// already had.
 fn dead_job_token(state: &SharedState, token: &str, job_id: &str) -> Response {
     let refused = || {
         json_error(
@@ -171,10 +174,32 @@ fn dead_job_token(state: &SharedState, token: &str, job_id: &str) -> Response {
     let Ok(Some(job)) = workflows::job(&state.db, job_id) else {
         return refused();
     };
-    if job.token_id.as_deref() != Some(token_id.as_str()) || job.state == "running" {
-        return refused();
+    if job.token_id.as_deref() == Some(token_id.as_str()) {
+        if job.state == "running" {
+            return refused();
+        }
+        return gone(&job.state);
     }
-    gone(&job.state)
+    // Not the job's current token — but it may be an earlier attempt's.
+    // When a lease lapses and the job is handed to another machine, the
+    // quiet one's token is revoked and the job carries the new one. If
+    // that machine comes back, it must be told to stop: a 401 is what
+    // its runner retries, and it would go on running the steps of a
+    // build another machine is running too — a deploy step, twice.
+    //
+    // Only a token minted for *this* job, as a whole: `ci:<job>`. A
+    // composed job's member tokens are `ci:<job>:<repo>` and a token
+    // for another job is somebody else's business entirely.
+    match auth::label_of(&state.db, &token_id) {
+        Ok(Some(label)) if label == format!("ci:{}", job.id) => {
+            gone(if job.state == "running" {
+                "reassigned"
+            } else {
+                &job.state
+            })
+        }
+        _ => refused(),
+    }
 }
 
 /// The runner's signal to stop. The state rides along so a container log

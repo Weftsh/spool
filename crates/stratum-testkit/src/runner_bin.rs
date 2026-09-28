@@ -367,9 +367,11 @@ impl Agent {
     /// Stop it and start it again from the same directory — the same
     /// `.runner`, so the same machine as far as the server knows. What a
     /// service manager does on `restart`, or a box does when it reboots.
-    pub fn restart(&mut self) {
-        self.stop();
+    /// The status the first life exited with.
+    pub fn restart(&mut self) -> Option<ExitStatus> {
+        let status = self.stop();
         self.spawn();
+        status
     }
 }
 
