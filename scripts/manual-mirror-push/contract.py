@@ -129,7 +129,7 @@ def b64url(b):
 def _pem_path():
     if "-----BEGIN" not in APP_KEY:
         return APP_KEY
-    fd, path = tempfile.mkstemp(prefix="weft-app-key-", suffix=".pem")
+    fd, path = tempfile.mkstemp(prefix="spool-app-key-", suffix=".pem")
     with os.fdopen(fd, "w") as f:
         f.write(APP_KEY if APP_KEY.endswith("\n") else APP_KEY + "\n")
     os.chmod(path, 0o600)
@@ -168,7 +168,7 @@ def call(method, path, auth, body=None):
     req = urllib.request.Request(API + path, method=method)
     req.add_header("Authorization", auth)
     req.add_header("Accept", "application/vnd.github+json")
-    req.add_header("User-Agent", "weft-manual-mirror-push")
+    req.add_header("User-Agent", "spool-manual-mirror-push")
     data = None
     if body is not None:
         data = json.dumps(body).encode()
@@ -245,15 +245,15 @@ def new_commit(seed, parent, message):
     rc, tree, err = git(seed, "rev-parse", f"{parent}^{{tree}}")
     if rc != 0:
         die(f"tree of {parent}: {err.strip()}")
-    env_author = f"weft manual <manual@weft.test>"
+    env_author = "spool manual <manual@spool.test>"
     p = subprocess.run(
         ["git", "-C", seed, "commit-tree", tree.strip(), "-p", parent, "-m", message],
         capture_output=True,
         text=True,
         env={
             **{k: v for k, v in os.environ.items() if k == "PATH"},
-            "GIT_AUTHOR_NAME": "weft manual", "GIT_AUTHOR_EMAIL": "manual@weft.test",
-            "GIT_COMMITTER_NAME": "weft manual", "GIT_COMMITTER_EMAIL": "manual@weft.test",
+            "GIT_AUTHOR_NAME": "spool manual", "GIT_AUTHOR_EMAIL": "manual@spool.test",
+            "GIT_COMMITTER_NAME": "spool manual", "GIT_COMMITTER_EMAIL": "manual@spool.test",
             "HOME": "/nonexistent", "GIT_CONFIG_NOSYSTEM": "1",
         },
     )
@@ -318,8 +318,8 @@ def step_push(st):
     say("push — a new branch with the dispatcher's flags, then its deletion")
     seed = seed_for(INSTALLATION, MIRROR_REPO)
     base = head_of(seed, "HEAD")
-    branch = f"refs/heads/weft-manual-{int(time.time())}"
-    commit = new_commit(seed, base, "weft manual: forwarded push")
+    branch = f"refs/heads/spool-manual-{int(time.time())}"
+    commit = new_commit(seed, base, "spool manual: forwarded push")
     exit_ok, out, err = forward(seed, [(ZERO, commit, branch)])
     record(st, "push", exit_ok, out, err, [(ZERO, commit, branch)])
     rows = porcelain_lines(out)
@@ -338,13 +338,13 @@ def step_stale(st):
     say("stale — the same push with a lease the origin does not hold (belief 4)")
     seed = seed_for(INSTALLATION, MIRROR_REPO)
     base = head_of(seed, "HEAD")
-    branch = f"refs/heads/weft-manual-stale-{int(time.time())}"
-    c1 = new_commit(seed, base, "weft manual: first")
+    branch = f"refs/heads/spool-manual-stale-{int(time.time())}"
+    c1 = new_commit(seed, base, "spool manual: first")
     exit_ok, out, err = forward(seed, [(ZERO, c1, branch)])
     if not exit_ok:
         die(f"could not create {branch}: {err.strip()}")
     # The mirror advertised "absent" (the empty lease) but the origin has c1.
-    c2 = new_commit(seed, base, "weft manual: stale")
+    c2 = new_commit(seed, base, "spool manual: stale")
     exit_ok, out, err = forward(seed, [(ZERO, c2, branch)])
     record(st, "stale", exit_ok, out, err, [(ZERO, c2, branch)])
     rows = porcelain_lines(out)
@@ -358,13 +358,13 @@ def step_nonff(st):
     say("nonff — a non-fast-forward under a matching lease is forced (belief 4)")
     seed = seed_for(INSTALLATION, MIRROR_REPO)
     base = head_of(seed, "HEAD")
-    branch = f"refs/heads/weft-manual-nonff-{int(time.time())}"
-    c1 = new_commit(seed, base, "weft manual: first")
+    branch = f"refs/heads/spool-manual-nonff-{int(time.time())}"
+    c1 = new_commit(seed, base, "spool manual: first")
     exit_ok, out, err = forward(seed, [(ZERO, c1, branch)])
     if not exit_ok:
         die(f"could not create {branch}: {err.strip()}")
     # c2 does not descend from c1 (both descend from base): a rewrite.
-    c2 = new_commit(seed, base, "weft manual: rewritten")
+    c2 = new_commit(seed, base, "spool manual: rewritten")
     exit_ok, out, err = forward(seed, [(c1, c2, branch)])
     record(st, "nonff", exit_ok, out, err, [(c1, c2, branch)])
     rows = porcelain_lines(out)
@@ -385,7 +385,7 @@ def step_protected(st):
     if not tip:
         fail(f"{ref} does not exist on {MIRROR_REPO}")
         return
-    c = new_commit(seed, tip, "weft manual: onto a protected branch")
+    c = new_commit(seed, tip, "spool manual: onto a protected branch")
     exit_ok, out, err = forward(seed, [(tip, c, ref)])
     record(st, "protected", exit_ok, out, err, [(tip, c, ref)])
     rows = porcelain_lines(out)
@@ -399,8 +399,8 @@ def step_protected(st):
     check(BELIEVED_PROTECTED_REMOTE in err,
           f"belief 1: the remote explains itself with `{BELIEVED_PROTECTED_REMOTE}`", err.strip()[:300])
     # Beside a sibling the origin has no objection to.
-    sibling = f"refs/heads/weft-manual-sibling-{int(time.time())}"
-    c2 = new_commit(seed, tip, "weft manual: the sibling")
+    sibling = f"refs/heads/spool-manual-sibling-{int(time.time())}"
+    c2 = new_commit(seed, tip, "spool manual: the sibling")
     exit_ok, out, err = forward(seed, [(tip, c, ref), (ZERO, c2, sibling)])
     record(st, "protected-atomic", exit_ok, out, err, [(tip, c, ref), (ZERO, c2, sibling)])
     rows = porcelain_lines(out)
@@ -430,8 +430,8 @@ def step_denied(st):
         return
     seed = seed_for(DENIED_INSTALLATION, DENIED_REPO)
     base = head_of(seed, "HEAD")
-    branch = f"refs/heads/weft-manual-denied-{int(time.time())}"
-    c = new_commit(seed, base, "weft manual: without the permission")
+    branch = f"refs/heads/spool-manual-denied-{int(time.time())}"
+    c = new_commit(seed, base, "spool manual: without the permission")
     exit_ok, out, err = forward(seed, [(ZERO, c, branch)])
     tok = _TOKENS.get(DENIED_INSTALLATION) or ""
     err = err.replace(tok, "<token>") if tok else err

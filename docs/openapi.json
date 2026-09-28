@@ -347,7 +347,7 @@
           },
           "viewer_member": {
             "type": "boolean",
-            "description": "Whether the caller holds a role on this repository \u2014 an organization membership or a per-repo grant \u2014 as opposed to reading it because it is public. The distinction only exists on a public repository and is what the Insights tab turns on: a repository's traffic belongs to the people who own it. Weaker than `viewer_write`: the `viewer` role is a member who may not push. false for an anonymous reader and for a signed-in stranger alike."
+            "description": "Whether the caller holds a role on this repository — an organization membership or a per-repo grant — as opposed to reading it because it is public. The distinction only exists on a public repository and is what the Insights tab turns on: a repository's traffic belongs to the people who own it. Weaker than `viewer_write`: the `viewer` role is a member who may not push. false for an anonymous reader and for a signed-in stranger alike."
           },
           "viewer_write": {
             "type": "boolean",
@@ -553,137 +553,6 @@
     }
   },
   "paths": {
-    "/v1/cache/twirp/github.actions.results.api.v1.CacheService/GetCacheEntryDownloadURL": {
-      "post": {
-        "summary": "actions/cache asks whether an archive is saved (cache service v2)",
-        "description": "Not a route a person calls. The credential is the job's **cache token** (`github:cache`), handed to a runner with its registration and carried by the cache proxy in the container; it names the job, the job names the repository, and the repository is the scope. From anywhere else — a GitHub-hosted runner, via `weftsh/cache` — the credential is a **`repo:cache` token** minted like any other, and the repository is named in the `X-Weft-Repository` header as `owner/name`; the scope is the same (org, GitHub full name), so a save from either kind of runner is a hit for the other. Refusals are ordered 401 (no or unknown token), 403 (a token of another kind, or a repo:cache token restricted to one Weft repository), 400 (a repo:cache token with no usable header), 410 (the job is over). The body is `{key, version, restore_keys?}` as the client sends it (snake_case); the answer is `{ok, signed_download_url, matched_key}` — the exact key if a ready entry has it, else the newest under a restore-key prefix, else `ok: false`, which the client reads as a miss.",
-        "responses": {
-          "200": {
-            "description": "{ ok, signed_download_url, matched_key }"
-          },
-          "400": {
-            "description": "Malformed body"
-          },
-          "401": {
-            "description": "No token, or one that does not authenticate"
-          },
-          "403": {
-            "description": "A token not minted for the cache"
-          },
-          "410": {
-            "description": "The job this token was minted for is over"
-          }
-        }
-      }
-    },
-    "/v1/cache/twirp/github.actions.results.api.v1.CacheService/CreateCacheEntry": {
-      "post": {
-        "summary": "actions/cache starts a save",
-        "description": "Not a route a person calls. The credential is the job's **cache token** (`github:cache`), handed to a runner with its registration and carried by the cache proxy in the container; it names the job, the job names the repository, and the repository is the scope. From anywhere else — a GitHub-hosted runner, via `weftsh/cache` — the credential is a **`repo:cache` token** minted like any other, and the repository is named in the `X-Weft-Repository` header as `owner/name`; the scope is the same (org, GitHub full name), so a save from either kind of runner is a hit for the other. Refusals are ordered 401 (no or unknown token), 403 (a token of another kind, or a repo:cache token restricted to one Weft repository), 400 (a repo:cache token with no usable header), 410 (the job is over). `{key, version}` reserves the entry for this repository and answers `{ok, signed_upload_url}`; a key already saved or being saved answers `ok: false`, which the client reads as \"already exists\" and skips its save.",
-        "responses": {
-          "200": {
-            "description": "{ ok, signed_upload_url }"
-          },
-          "400": {
-            "description": "Malformed body"
-          },
-          "401": {
-            "description": "No token"
-          },
-          "403": {
-            "description": "A token not minted for the cache"
-          },
-          "410": {
-            "description": "The job is over"
-          }
-        }
-      }
-    },
-    "/v1/cache/twirp/github.actions.results.api.v1.CacheService/FinalizeCacheEntryUpload": {
-      "post": {
-        "summary": "actions/cache finishes a save",
-        "description": "Not a route a person calls. The credential is the job's **cache token** (`github:cache`), handed to a runner with its registration and carried by the cache proxy in the container; it names the job, the job names the repository, and the repository is the scope. From anywhere else — a GitHub-hosted runner, via `weftsh/cache` — the credential is a **`repo:cache` token** minted like any other, and the repository is named in the `X-Weft-Repository` header as `owner/name`; the scope is the same (org, GitHub full name), so a save from either kind of runner is a hit for the other. Refusals are ordered 401 (no or unknown token), 403 (a token of another kind, or a repo:cache token restricted to one Weft repository), 400 (a repo:cache token with no usable header), 410 (the job is over). `{key, version, size_bytes}` closes the reservation: the size must equal what the blob route received, and the entry becomes restorable.",
-        "responses": {
-          "200": {
-            "description": "{ ok, entry_id }"
-          },
-          "400": {
-            "description": "Nothing uploaded, or the size disagrees with what arrived"
-          },
-          "404": {
-            "description": "No upload in progress under that key and version"
-          },
-          "409": {
-            "description": "Already finalized"
-          },
-          "401": {
-            "description": "No token"
-          },
-          "403": {
-            "description": "A token not minted for the cache"
-          },
-          "410": {
-            "description": "The job is over"
-          }
-        }
-      }
-    },
-    "/v1/cache/blob/{entry}": {
-      "put": {
-        "summary": "The signed upload URL: the archive's bytes",
-        "description": "Not a route a person calls. The credential is the job's **cache token** (`github:cache`), handed to a runner with its registration and carried by the cache proxy in the container; it names the job, the job names the repository, and the repository is the scope. From anywhere else — a GitHub-hosted runner, via `weftsh/cache` — the credential is a **`repo:cache` token** minted like any other, and the repository is named in the `X-Weft-Repository` header as `owner/name`; the scope is the same (org, GitHub full name), so a save from either kind of runner is a hit for the other. Refusals are ordered 401 (no or unknown token), 403 (a token of another kind, or a repo:cache token restricted to one Weft repository), 400 (a repo:cache token with no usable header), 410 (the job is over). What the client's Azure block-blob upload sends: one PUT for an archive up to 128 MiB, or blocks (`?comp=block&blockid=…`) followed by a block list (`?comp=blocklist`, Azure's XML) giving the archive's order. Only while the entry is reserving.",
-        "responses": {
-          "201": {
-            "description": "Stored"
-          },
-          "400": {
-            "description": "An empty body, a block list naming a block that never arrived, or an unsupported `comp`"
-          },
-          "404": {
-            "description": "No such entry for this repository"
-          },
-          "409": {
-            "description": "The entry is already finalized"
-          },
-          "401": {
-            "description": "No token"
-          },
-          "403": {
-            "description": "A token not minted for the cache"
-          },
-          "410": {
-            "description": "The job is over"
-          }
-        }
-      },
-      "get": {
-        "summary": "The signed download URL: the archive's bytes",
-        "description": "Not a route a person calls. The credential is the job's **cache token** (`github:cache`), handed to a runner with its registration and carried by the cache proxy in the container; it names the job, the job names the repository, and the repository is the scope. From anywhere else — a GitHub-hosted runner, via `weftsh/cache` — the credential is a **`repo:cache` token** minted like any other, and the repository is named in the `X-Weft-Repository` header as `owner/name`; the scope is the same (org, GitHub full name), so a save from either kind of runner is a hit for the other. Refusals are ordered 401 (no or unknown token), 403 (a token of another kind, or a repo:cache token restricted to one Weft repository), 400 (a repo:cache token with no usable header), 410 (the job is over). Streams the archive's blocks in order; honours `Range` (206 with `Content-Range`), because the client downloads a large archive in concurrent ranged GETs.",
-        "responses": {
-          "200": {
-            "description": "The archive"
-          },
-          "206": {
-            "description": "The requested range"
-          },
-          "416": {
-            "description": "A range outside the archive"
-          },
-          "404": {
-            "description": "No such ready entry for this repository"
-          },
-          "401": {
-            "description": "No token"
-          },
-          "403": {
-            "description": "A token not minted for the cache"
-          },
-          "410": {
-            "description": "The job is over"
-          }
-        }
-      }
-    },
     "/v1/orgs/{org}/runner-policy": {
       "get": {
         "summary": "What kinds of runner this organisation allows (org:read)",
@@ -1196,156 +1065,6 @@
         }
       }
     },
-    "/v1/users/{handle}/contributions": {
-      "get": {
-        "summary": "Somebody's contribution graph",
-        "description": "One square per day, derived from the commits themselves rather than from activity on this platform — which is what makes a migrated history show up the moment it mirrors over. A commit counts only on one of two grounds: **email-verified**, the author address is a *proved* address on the account, or **pushed-by**, the credential that pushed it was that person's. An address nobody has proved counts for nothing, because anybody can write any string into `git config user.email`. Commit signatures are out of scope. A commit carrying a `Co-Authored-By` trailer is agent-assisted and counts for nobody.\n\nPrivate work appears only as a **number**, and only when its owner has opted in: `count` includes it, `repos` never names it, and there is no field holding it separately. `private_included` is false both for somebody opted out and for somebody with no private work — deliberately the same answer, since telling those apart would publish the existence of private work.\n\nAnonymous, and the same for every reader: a public page that says different things to different people is one nobody can quote. `from`/`to` are `YYYY-MM-DD` and default to the year ending today; at most 3653 days.",
-        "security": [],
-        "parameters": [
-          {
-            "name": "from",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "format": "date"
-            }
-          },
-          {
-            "name": "to",
-            "in": "query",
-            "schema": {
-              "type": "string",
-              "format": "date"
-            }
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "{ from, to, total, private_included, days: [{ day, date, count, repos: [{ org, name, count }] }] } — only days with something on them"
-          },
-          "400": {
-            "description": "A date that is not YYYY-MM-DD, a range that ends before it starts, or one longer than 3653 days"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      }
-    },
-    "/v1/users/{handle}/follow": {
-      "get": {
-        "summary": "Follower and following counts, and your own edge",
-        "description": "Anonymous readers are welcome and see `you_follow: false`. The counts are counts of a public act.",
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "{ followers, following, you_follow }"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      },
-      "put": {
-        "summary": "Follow this person",
-        "description": "Following twice is following once. Following yourself is refused in a sentence rather than reaching the table's CHECK, which would surface as a 500.",
-        "responses": {
-          "200": {
-            "description": "The counts as they now read"
-          },
-          "400": {
-            "description": "You cannot follow yourself"
-          },
-          "401": {
-            "description": "Following is a person's act — not signed in, or a service token"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      },
-      "delete": {
-        "summary": "Unfollow this person",
-        "description": "Unfollowing somebody you never followed is a request for the state you are already in, not an error.",
-        "responses": {
-          "200": {
-            "description": "The counts as they now read"
-          },
-          "401": {
-            "description": "Following is a person's act — not signed in, or a service token"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      }
-    },
-    "/v1/users/{handle}/followers": {
-      "get": {
-        "summary": "Who follows this person",
-        "description": "Newest first, at most 100. Suspended accounts are absent — their public page is down, so naming them would link to a 404.",
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "{ people: [{ handle, display_name }] }"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      }
-    },
-    "/v1/users/{handle}/following": {
-      "get": {
-        "summary": "Who this person follows",
-        "description": "Newest first, at most 100. Suspended accounts are absent.",
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "{ people: [{ handle, display_name }] }"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      }
-    },
-    "/v1/users/{handle}/pins": {
-      "get": {
-        "summary": "The repositories pinned to a profile",
-        "description": "Filtered to what the caller may see. A pinned repository that has since been made private, or deleted, is absent: `public` is a flag its owner can flip after pinning, so a write-time refusal alone could never cover it.",
-        "security": [],
-        "responses": {
-          "200": {
-            "description": "{ pins: [{ kind, org, name, description, public }] }"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      },
-      "put": {
-        "summary": "Replace your pin list (at most 6)",
-        "description": "Body: { pins: [{ org, repo, kind? }] }; only `repo` may be pinned. A private repository can never be pinned. Repositories are resolved through the caller's own visibility first, so naming one they cannot see answers “no such repository” — the same thing a name that does not exist answers — rather than turning the pin form into an existence oracle for every private repository on the platform.",
-        "responses": {
-          "200": {
-            "description": "The pin list as it now reads"
-          },
-          "400": {
-            "description": "Over the cap, a duplicate, a private repository, an unknown repository, or a kind other than repo"
-          },
-          "401": {
-            "description": "Not signed in"
-          },
-          "403": {
-            "description": "This is somebody else's account"
-          },
-          "404": {
-            "description": "No such handle"
-          }
-        }
-      }
-    },
     "/v1/users/{handle}/emails": {
       "get": {
         "summary": "The addresses on your own account, proved or not",
@@ -1667,109 +1386,6 @@
           },
           "409": {
             "description": "that name is taken or reserved"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/billing": {
-      "get": {
-        "summary": "What this organization costs and where it stands (org:admin). `billable_seats` is what we would charge for now; `paid_seats` is what the provider has been told. They differ between a membership change and the push that follows it.",
-        "responses": {
-          "200": {
-            "description": "{ org, plan: \"free\" | \"paid\" | \"past_due\", billable_seats, paid_seats, status, period_start, current_period_end, may_create_public, may_create_private, may_add_people, packages_refusal, price_per_seat_cents, paid_minutes_per_seat, paid_egress_gb_per_seat, paid_storage_gb_per_seat, paid_packages_gb_per_seat, free_minutes, meters: { minutes, egress_gb, storage_gb, packages_gb }, overage_estimated_cents, spend_limit_cents, may_raise_spend_limit, metering: \"on\" | \"off\" | \"resubscribe\", rates: { cents_per_1000_minutes, cents_per_gb_egress, cents_per_gb_month_storage, cents_per_gb_month_packages }, ci_minutes_limit, ci_minutes_used, ci_minutes_remaining, ci_suspended_reason, ci_suspended_at, private_repos }. Each of the four `meters` is `{ included, used, remaining, overage, estimated_cents, refusing }`: `included` is the org-wide pool for the period \u2014 seats \u00d7 the per-seat figure \u2014 and is `null` where the meter is not metered at all, never `0`; \"0 left\" and \"no limit\" are opposite facts, and the zero that means metered-and-out is `remaining: 0`. `refusing` is true while that meter is turning work away (pool spent and spend limit reached); pages read the flag, never the refusal sentence. `estimated_cents` and `overage_estimated_cents` are estimates \u2014 the invoice is what counts. `spend_limit_cents` starts at 0 and is raised with PATCH \u2026/billing/spend-limit; `may_raise_spend_limit` is what a screen shows the button from (org admin, paid, metering on). `metering` is `off` on a deployment without metered prices, where the limit is pinned at 0 and the pool is a hard cap, and `resubscribe` for a subscription opened before metered prices existed. `price_per_seat_cents`, `paid_*_per_seat` and `rates` are null where nothing is for sale \u2014 a personal namespace, or a deployment with no payment provider \u2014 and the three `may_*` flags are true there. `packages_refusal` is the sentence a publish to this organization's registry would be refused with \u2014 a free plan, a personal namespace, a failed payment, or the package pool and spend limit spent \u2014 or `null` when it may publish; installing is never refused. `null` in either `ci_minutes_*` field is unlimited, not zero; those three say the minutes meter the older way and remain for clients that read them. A running job counts toward minutes from the moment it starts, so the number moves while builds run. On a paid org the meters follow the billing period, `period_start` to `current_period_end`; on a free namespace minutes are a rolling thirty days and `period_start` is null. `private_repos` counts the active private repositories here, and is read together with `plan`: `free` is where a cancelled subscription lands, private repositories and all, so a page that says the first private repository starts a subscription, to an organization already holding three of them, is wrong twice \u2014 they exist, and subscribing is the only way to write to them again."
-          },
-          "404": {
-            "description": "no such org, or not yours"
-          }
-        }
-      },
-      "post": {
-        "summary": "Open the provider's billing portal (org:admin), where cards, invoices and cancellation live — building that here would mean handling card details. There is nothing to manage until a subscription exists: the card arrives with it, on the provider's subscription page. The browser is sent back to this deployment's own billing screen — a page that can be told where to land afterwards is an open redirect wearing a payment flow.",
-        "responses": {
-          "200": {
-            "description": "{ url, kind: \"portal\" }"
-          },
-          "402": {
-            "description": "`card: nothing to manage yet … subscribe first` — no subscription has been opened"
-          },
-          "400": {
-            "description": "a personal namespace is free and has nothing to subscribe"
-          },
-          "404": {
-            "description": "no such org, or not yours"
-          },
-          "502": {
-            "description": "the payment provider could not be reached"
-          },
-          "503": {
-            "description": "billing is not configured on this deployment"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/billing/spend-limit": {
-      "patch": {
-        "summary": "Raise or lower what this organization may be invoiced past its pool this period (org:admin). Body `{ spend_limit_cents }`, a whole non-negative number of cents. A new organization's limit is 0, so nothing past the pool is billable until an owner or admin asks for it here; at the limit hosted jobs wait, clones of private repositories are refused, and a push that would take private storage past it is refused, each with a sentence saying why. The change applies at once — a job that was waiting is dispatched on the next poll, and lowering it below what has already been used refuses new work without unwinding anything.",
-        "requestBody": {
-          "required": true,
-          "content": {
-            "application/json": {
-              "schema": {
-                "type": "object",
-                "required": [
-                  "spend_limit_cents"
-                ],
-                "properties": {
-                  "spend_limit_cents": {
-                    "type": "integer",
-                    "minimum": 0,
-                    "description": "The most the organization agrees to be invoiced past the pool in a billing period, in cents. 0 means the pool is a hard cap."
-                  }
-                }
-              }
-            }
-          }
-        },
-        "responses": {
-          "200": {
-            "description": "the billing view, as GET returns it, with the new `spend_limit_cents` in it"
-          },
-          "400": {
-            "description": "`spend_limit_cents` is negative, fractional, or missing"
-          },
-          "402": {
-            "description": "a free organization has no pool to be past; subscribe first"
-          },
-          "404": {
-            "description": "no such org, or not yours — including a member who is not an owner or admin, masked like every other organization-admin route"
-          },
-          "503": {
-            "description": "this deployment carries no metered prices (`metering: \"off\"`), so nothing could charge the amount; the limit stays pinned at 0"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/billing/subscribe": {
-      "post": {
-        "summary": "Send the person to the provider's subscription page (org:admin). This is the paid plan's front door and it is a redirect rather than a confirmation, because a promotion code can only be redeemed on the provider's own page: the Checkout carries the seat price for the seats in use today, the saved card already on it, and a promotion-code box. Nothing is written here — the subscription the page opens arrives on the provider's `customer.subscription.created` webhook, which moves the plan to `paid`; the page comes back to `…/dashboard/settings/billing?subscribed=done` (or `?subscribed=cancelled`), and a repository creation refused with 402 succeeds once the webhook has landed. An org already paying gets its billing view back rather than a page. No idempotency key: a key would hand an expired session back for a day, so a second click before finishing is a second harmless page.",
-        "responses": {
-          "200": {
-            "description": "`{ url, kind: \"checkout\" }` — the provider's subscription page to send the browser to; or, for an org already paying, the billing view as GET returns it with `plan: \"paid\"`"
-          },
-          "400": {
-            "description": "a personal namespace is free and has nothing to subscribe"
-          },
-          "402": {
-            "description": "`card: …` — no card on file yet; add one from Billing first. A card is accepted or declined on the provider's page now, never here"
-          },
-          "404": {
-            "description": "no such org, or not yours"
-          },
-          "502": {
-            "description": "the payment provider could not be reached"
-          },
-          "503": {
-            "description": "billing is not configured on this deployment"
           }
         }
       }
@@ -3208,34 +2824,6 @@
         }
       }
     },
-    "/v1/orgs/{org}/repos/{repo}/badge.svg": {
-      "get": {
-        "summary": "Status badge as SVG, rendered here (no external request). Reports the checks on the most recent change landed on the branch",
-        "parameters": [
-          {
-            "name": "branch",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "Defaults to the repo's default branch. Compared, never rendered into the SVG"
-          }
-        ],
-        "responses": {
-          "200": {
-            "description": "image/svg+xml, Cache-Control: max-age=60. Public repos answer anonymously; a private repo is masked exactly as the repo is — never a badge that says \"private\"",
-            "content": {
-              "image/svg+xml": {
-                "schema": {
-                  "type": "string"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/orgs/{org}/repos/{repo}/changes/{change}/workflows/approve": {
       "post": {
         "summary": "Let a fork's workflows run at this change's current tip (repo:write — the same authorization landing needs). A change from a fork is `blocked` rather than run, because its workflow file was written by the contributor and running it hands a stranger a repo:read token and a machine. Approval is **per tip**: a new patchset from the fork is blocked again, like GitHub's \"Approve and run\". The blocked placeholder run and its check row are replaced by the real run for the same commit and file.",
@@ -4142,7 +3730,7 @@
     },
     "/v1/orgs/{org}/repos/{repo}/metrics": {
       "get": {
-        "summary": "Serving metrics: counts, bytes, p50/p99 per kind (clone/fetch/push/api/freshness). Members only \u2014 a role on this repository, an org membership or a per-repo grant \u2014 including on a public repository: publishing the code does not publish how the code is used. An anonymous or non-member caller is refused whatever the visibility.",
+        "summary": "Serving metrics: counts, bytes, p50/p99 per kind (clone/fetch/push/api/freshness). Members only — a role on this repository, an org membership or a per-repo grant — including on a public repository: publishing the code does not publish how the code is used. An anonymous or non-member caller is refused whatever the visibility.",
         "parameters": [
           {
             "name": "from",
@@ -4488,70 +4076,6 @@
         }
       }
     },
-    "/v1/orgs/{org}/github-jobs": {
-      "get": {
-        "summary": "GitHub Actions jobs that asked for this organization's hosted runners (membership)",
-        "description": "Newest first, up to 100. A job GitHub is holding queued because it was **refused** here looks, on GitHub, like a job nobody has picked up; its `refusal` is only here, and `cancelled_on_github` says whether the run was cancelled there for you (it needs the App's `Actions: write`). `state` is one of `refused`, `queued`, `launching`, `running`, `completed`, `failed`, `abandoned`; `minutes` is what the job has cost the pool so far, rounded up and multiplied by the size's `multiplier`. `sizes` lists the labels a workflow may name (`weft`, `weft-2x`, `weft-4x`) with what each buys.",
-        "responses": {
-          "200": {
-            "description": "{ jobs: [{ id, repo, private, github_job_id, github_run_id, run_attempt, name, html_url, labels, size, multiplier, state, refusal, cancelled_on_github, error, conclusion, runner_name, minutes, queued_at, launched_at, started_at, completed_at }], sizes: [{ label, multiplier, cpu, memory_mib }] }"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/github-jobs/{id}": {
-      "get": {
-        "summary": "One GitHub Actions job (membership)",
-        "responses": {
-          "200": {
-            "description": "The same shape as one entry of the list"
-          },
-          "404": {
-            "description": "No such job of this organization's"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/github-jobs/{id}/stop": {
-      "post": {
-        "summary": "Stop a hosted GitHub Actions runner (org:admin)",
-        "description": "Stops the job's runner now: the task, the runner GitHub still lists, and the token that could collect its configuration \u2014 the same teardown the sweeps run. The job reads as **failed** on GitHub rather than cancelled: the runner reports `Canceled` and GitHub settles it as a failure, because nothing cancelled the run on GitHub's side and there is no per-job cancel \u2014 the only cancel GitHub offers takes the whole run and would end the job's siblings. Until this existed there was no way to stop one at all: a runner that outlived its job held its slot until the fleet's cap expired it, and because a running row counts against the organization's concurrency cap, a few of them stopped the whole queue behind it. Answers **409** if the job is already over.",
-        "responses": {
-          "204": {
-            "description": "Stopped; the row is closed and the task is going away"
-          },
-          "404": {
-            "description": "No such job of this organization's"
-          },
-          "409": {
-            "description": "That job is already over"
-          }
-        }
-      }
-    },
-    "/v1/github-runner/jobs/{id}/jitconfig": {
-      "get": {
-        "summary": "A booting GitHub Actions runner collects its registration, once",
-        "description": "Not a route a person calls. The credential is a **runner token**: minted for one launch of one job with the `github:jit` scope and nothing else, and recorded on the job row. The answer is the `encoded_jit_config` GitHub minted for this runner, and the read nulls it, so a second call — a retried boot, a stranger with the token — answers **410**. Refusals are ordered 401 (no or unknown token), 404 (no such job), 403 (not this job's token), 410 (the job has moved on, or the configuration was already collected), so a job's state is only ever disclosed to the credential that owns it.",
-        "responses": {
-          "200": {
-            "description": "{ encoded_jit_config, runner_name }"
-          },
-          "401": {
-            "description": "No token, or one that does not authenticate"
-          },
-          "403": {
-            "description": "A real token that was not minted for this runner"
-          },
-          "404": {
-            "description": "No such job"
-          },
-          "410": {
-            "description": "{ error, state } — the job is no longer launching, or the configuration was already collected"
-          }
-        }
-      }
-    },
     "/webhooks/{provider}": {
       "post": {
         "summary": "Inbound origin webhook (github | generic); X-Hub-Signature-256 required. For `github`, `X-GitHub-Event` selects the path: `push` (or no header) syncs matching mirrors; `workflow_job` is the GitHub Actions runner intake — a `queued` job whose `runs-on` names a Weft size is recorded for the organization the installation is connected to (or recorded as refused, with the reason), `in_progress` and `completed` move the job the named runner is running; every other event is acknowledged and ignored",
@@ -4590,7 +4114,7 @@
     },
     "/v1/github/setup": {
       "get": {
-        "summary": "GitHub sends a browser here after an App install or an edit to one. Two proofs, for two questions. Whose installation: the `code` GitHub appends when the App requests user authorization during installation is exchanged for that person's token, and the installation must be among the ones `GET /user/installations` lists for them \u2014 otherwise `connect=notyours` and nothing is bound. Which organization: the single-use `state` minted by `POST /v1/orgs/{org}/github/install`; without one (GitHub sends none after an edit, and an install begun on GitHub or from the Marketplace never had one) the signed-in person's own single pending connect stands in; otherwise the installation, already proved theirs, is parked and the browser is sent to `connect=claim` with a claim cookie, and `POST /v1/orgs/{org}/github/install/claim` binds it after sign-in. Answers a redirect back into the dashboard either way, carrying `connect=ok|claim|notyours|missing|expired|taken|error` \u2014 every dead state is `expired`, so a callback cannot be used to learn which flows exist.",
+        "summary": "GitHub sends a browser here after an App install or an edit to one. Two proofs, for two questions. Whose installation: the `code` GitHub appends when the App requests user authorization during installation is exchanged for that person's token, and the installation must be among the ones `GET /user/installations` lists for them — otherwise `connect=notyours` and nothing is bound. Which organization: the single-use `state` minted by `POST /v1/orgs/{org}/github/install`; without one (GitHub sends none after an edit, and an install begun on GitHub or from the Marketplace never had one) the signed-in person's own single pending connect stands in; otherwise the installation, already proved theirs, is parked and the browser is sent to `connect=claim` with a claim cookie, and `POST /v1/orgs/{org}/github/install/claim` binds it after sign-in. Answers a redirect back into the dashboard either way, carrying `connect=ok|claim|notyours|missing|expired|taken|error` — every dead state is `expired`, so a callback cannot be used to learn which flows exist.",
         "parameters": [
           {
             "name": "app",
@@ -4598,48 +4122,12 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["runners"]
+              "enum": [
+                "runners"
+              ]
             },
             "description": "Set when the Runners App's setup URL query survives; the Runners App's own callback path `/v1/github/setup/runners` sets it, and a redirect carrying a `state` is read for the App that state was minted for."
           },
-          {
-            "name": "installation_id",
-            "in": "query",
-            "required": true,
-            "schema": {
-              "type": "string"
-            }
-          },
-          {
-            "name": "state",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "The single-use state from `POST /v1/orgs/{org}/github/install`. GitHub sends none after an installation is edited; the signed-in person's own pending connect then names the organization."
-          },
-          {
-            "name": "code",
-            "in": "query",
-            "required": false,
-            "schema": {
-              "type": "string"
-            },
-            "description": "GitHub's user-authorization code, appended when the App requests user authorization during installation. Exchanged for the person's token to check the installation is theirs; required when the deployment has an OAuth client configured."
-          }
-        ],
-        "responses": {
-          "303": {
-            "description": "redirect to the dashboard with the outcome in `connect`"
-          }
-        }
-      }
-    },
-    "/v1/github/setup/runners": {
-      "get": {
-        "summary": "The Runners App's install callback: `GET /v1/github/setup` for that App. Its own path because GitHub keeps a callback URL's path and drops its query, so `?app=runners` cannot be relied on when the App requests user authorization during installation. Same proofs, same outcomes; binds under the Runners App's provider.",
-        "parameters": [
           {
             "name": "installation_id",
             "in": "query",
@@ -4713,7 +4201,9 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["runners"]
+              "enum": [
+                "runners"
+              ]
             }
           }
         ],
@@ -4737,7 +4227,9 @@
             "required": false,
             "schema": {
               "type": "string",
-              "enum": ["runners"]
+              "enum": [
+                "runners"
+              ]
             }
           }
         ],
@@ -4791,25 +4283,6 @@
           },
           "404": {
             "description": "no such installation"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/repos/{repo}/site": {
-      "get": {
-        "summary": "What this repository publishes as a static site, and the address it is served at. Requires repo:read. `config_state` reports `.weft/site.yml` as it parses **right now**, which is deliberately not the config the current deploy went out under — the two differ exactly when somebody has just broken the file, and that is the moment the answer matters: the site keeps serving the last good deploy, and `config_error` carries the refusal, with its line, that says why nothing new has appeared. `url` is null on a deployment that does not host sites, because reporting an address that resolves nowhere is worse than reporting none — somebody would send it to a colleague.",
-        "responses": {
-          "200": {
-            "description": "{ enabled, host, url, branch, config_state, config_error, config, current, deploys } — `config_state` is one of `ok`, `absent`, `refused`. `deploys` is newest first and at most 20, each { id, commit, tree, publish, spa, not_found, created_at }; `current` names the one being served, or is null when a site exists but nothing has published yet. A no-build deploy stores no bytes: `tree` points at a directory already in the repository."
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "403": {
-            "description": "the token or member cannot read this repository"
-          },
-          "404": {
-            "description": "no such org or repository, or it is not visible to this caller"
           }
         }
       }
@@ -5332,38 +4805,6 @@
           },
           "404": {
             "description": "No such repository, or none you may write to"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/repos/{repo}/star": {
-      "get": {
-        "summary": "Star counts for this repository. Readable by anyone who may read the repo, a signed-out visitor included. `stars` is this forge's own count; `origin` is what the upstream reported when the mirror last read it, or `null` when there is no imported number — the two are never summed.",
-        "responses": {
-          "200": {
-            "description": "{ stars, starred, origin: { stars, at, url } | null }"
-          }
-        }
-      },
-      "put": {
-        "summary": "Star this repository. Idempotent: starring twice is starring once. A person's act — a service token is refused 401.",
-        "responses": {
-          "200": {
-            "description": "{ stars, starred, origin }"
-          },
-          "401": {
-            "description": "not a person (no session, or a service token)"
-          }
-        }
-      },
-      "delete": {
-        "summary": "Unstar this repository. Unstarring something you never starred is not an error.",
-        "responses": {
-          "200": {
-            "description": "{ stars, starred, origin }"
-          },
-          "401": {
-            "description": "not a person (no session, or a service token)"
           }
         }
       }
@@ -5932,7 +5373,7 @@
       },
       "/v2/": {
         "get": {
-          "summary": "The OCI distribution API's version probe, which every container client makes first. Answers 200 with `Docker-Distribution-API-Version: registry/2.0` to a caller with a credential, and 401 with a `WWW-Authenticate: Basic` challenge to one without \u2014 which is what makes `docker login` work. This API lives at the host root and not under `/v1/` because it has to: a container client parses `host/path/image` as registry `host` and repository `path/image`, so there is nowhere to put a base path. The organization is therefore the first component of the repository name: `docker push weft.sh/acme/service:v1`.",
+          "summary": "The OCI distribution API's version probe, which every container client makes first. Answers 200 with `Docker-Distribution-API-Version: registry/2.0` to a caller with a credential, and 401 with a `WWW-Authenticate: Basic` challenge to one without — which is what makes `docker login` work. This API lives at the host root and not under `/v1/` because it has to: a container client parses `host/path/image` as registry `host` and repository `path/image`, so there is nowhere to put a base path. The organization is therefore the first component of the repository name: `docker push weft.sh/acme/service:v1`.",
           "responses": {
             "200": {
               "description": "{}"
@@ -5962,7 +5403,7 @@
           "summary": "The same lookups without the body, which is how a client checks whether it needs to push a layer at all."
         },
         "post": {
-          "summary": "`<name>/blobs/uploads/` \u2014 open an upload session. Requires package:write. Answers 202 with a `Location` to PATCH into and a `Docker-Upload-UUID`. The repository row is created here, so a push against a name the organization's policy forbids is refused before a single byte moves.",
+          "summary": "`<name>/blobs/uploads/` — open an upload session. Requires package:write. Answers 202 with a `Location` to PATCH into and a `Docker-Upload-UUID`. The repository row is created here, so a push against a name the organization's policy forbids is refused before a single byte moves.",
           "responses": {
             "202": {
               "description": "session opened"
@@ -5976,7 +5417,7 @@
           }
         },
         "patch": {
-          "summary": "Write to an upload session. The body is read as a **stream** and cut into blocks as it arrives, so a layer never becomes resident \u2014 `ObjectStore::put` takes a slice, and `docker push` sends a layer as one body. Requires package:write.",
+          "summary": "Write to an upload session. The body is read as a **stream** and cut into blocks as it arrives, so a layer never becomes resident — `ObjectStore::put` takes a slice, and `docker push` sends a layer as one body. Requires package:write.",
           "responses": {
             "202": {
               "description": "accepted, with the session's byte range so far"
@@ -5990,7 +5431,7 @@
           }
         },
         "put": {
-          "summary": "Finish an upload (`?digest=sha256:\u2026`, which may carry the last chunk), or push a manifest. A manifest is refused unless **every blob it names is already here** \u2014 otherwise this registry serves an image nobody can pull and the client's error is about the missing layer rather than about the push that was wrong. An upload's digest is checked by re-reading its blocks: a session may be finished on a different node than opened it, so no hasher is carried across requests. A tag **moves** \u2014 that is what a tag is for, and it is the one place the \u201ca version never changes\u201d rule does not apply, because what never changes is the manifest, addressed by its digest.",
+          "summary": "Finish an upload (`?digest=sha256:…`, which may carry the last chunk), or push a manifest. A manifest is refused unless **every blob it names is already here** — otherwise this registry serves an image nobody can pull and the client's error is about the missing layer rather than about the push that was wrong. An upload's digest is checked by re-reading its blocks: a session may be finished on a different node than opened it, so no hasher is carried across requests. A tag **moves** — that is what a tag is for, and it is the one place the “a version never changes” rule does not apply, because what never changes is the manifest, addressed by its digest.",
           "responses": {
             "201": {
               "description": "stored; `Docker-Content-Digest` names it"
@@ -6023,7 +5464,7 @@
       },
       "/v1/registry/maven/{org}/{path}": {
         "get": {
-          "summary": "The Maven repository. `{path}` is a coordinate laid out the way Maven lays one out \u2014 `groupId/as/directories/artifactId/version/filename` \u2014 read from the right, because a groupId has any number of segments and reading it from the left is ambiguous. `{group}/{artifact}/maven-metadata.xml` and its `.sha1` are generated from our own rows and never stored. Requires package:read; a Basic challenge is sent to an anonymous caller, because that is the dialect `mvn` speaks.",
+          "summary": "The Maven repository. `{path}` is a coordinate laid out the way Maven lays one out — `groupId/as/directories/artifactId/version/filename` — read from the right, because a groupId has any number of segments and reading it from the left is ambiguous. `{group}/{artifact}/maven-metadata.xml` and its `.sha1` are generated from our own rows and never stored. Requires package:read; a Basic challenge is sent to an anonymous caller, because that is the dialect `mvn` speaks.",
           "responses": {
             "200": {
               "description": "the file, or the generated maven-metadata.xml"
@@ -6037,7 +5478,7 @@
           }
         },
         "put": {
-          "summary": "Deploy one file of one release. Requires package:write. `mvn deploy` sends each file of a release as its own request in an order nobody promises, so the first file creates the version and each later one is added to it \u2014 with a second upload of a filename that is already there refused rather than overwritten. **SNAPSHOT versions are refused**: a snapshot is a version whose bytes are meant to change, which is the opposite of the invariant this registry rests on. An uploaded `maven-metadata.xml` is accepted and discarded, because we generate that document ourselves.",
+          "summary": "Deploy one file of one release. Requires package:write. `mvn deploy` sends each file of a release as its own request in an order nobody promises, so the first file creates the version and each later one is added to it — with a second upload of a filename that is already there refused rather than overwritten. **SNAPSHOT versions are refused**: a snapshot is a version whose bytes are meant to change, which is the opposite of the invariant this registry rests on. An uploaded `maven-metadata.xml` is accepted and discarded, because we generate that document ourselves.",
           "responses": {
             "201": {
               "description": "stored"
@@ -6059,7 +5500,7 @@
       },
       "/v1/registry/pypi/{org}": {
         "post": {
-          "summary": "twine's upload: `multipart/form-data` with `:action=file_upload`, the artifact in the `content` field and the metadata in fields beside it. Requires package:write. If twine sends a `sha256_digest` it is checked against the bytes that arrived, because a mismatch is a truncated upload rather than a policy question. The licence is read from PEP 639's `License-Expression` first, then from a trove classifier, and only then from the free-text `License` field \u2014 and only through an exact table, so an unmapped spelling is `unknown` rather than a guess. `twine upload dist/*` posts the sdist and the wheel separately; both land on one version.",
+          "summary": "twine's upload: `multipart/form-data` with `:action=file_upload`, the artifact in the `content` field and the metadata in fields beside it. Requires package:write. If twine sends a `sha256_digest` it is checked against the bytes that arrived, because a mismatch is a truncated upload rather than a policy question. The licence is read from PEP 639's `License-Expression` first, then from a trove classifier, and only then from the free-text `License` field — and only through an exact table, so an unmapped spelling is `unknown` rather than a guess. `twine upload dist/*` posts the sdist and the wheel separately; both land on one version.",
           "responses": {
             "200": {
               "description": "stored"
@@ -6083,7 +5524,7 @@
       },
       "/v1/registry/pypi/{org}/{path}": {
         "get": {
-          "summary": "pip's Simple API and the files it links to. `simple/` is the root index, `simple/{name}/` is one project's page \u2014 PEP 503, with a `#sha256=` fragment on every link, which is what pip verifies a download against \u2014 and `files/{name}/{filename}` is one artifact. Asking for `simple/{name}` without the trailing slash answers 301: pip resolves a link relative to the page it read, so without the slash every filename would resolve one directory up. Requires package:read. A project nobody has published is an **empty page**, not a 404, because pip has read a 404 from an index as the index being broken.",
+          "summary": "pip's Simple API and the files it links to. `simple/` is the root index, `simple/{name}/` is one project's page — PEP 503, with a `#sha256=` fragment on every link, which is what pip verifies a download against — and `files/{name}/{filename}` is one artifact. Asking for `simple/{name}` without the trailing slash answers 301: pip resolves a link relative to the page it read, so without the slash every filename would resolve one directory up. Requires package:read. A project nobody has published is an **empty page**, not a 404, because pip has read a 404 from an index as the index being broken.",
           "responses": {
             "200": {
               "description": "the index page as text/html, or the artifact as application/octet-stream"
@@ -6105,7 +5546,7 @@
           "summary": "`cargo publish`. The body is framed rather than JSON: a little-endian u32 length, the metadata document, a second length, and the `.crate` bytes. Every length is checked against what is actually left before it is used. Requires package:write. Cargo sends its credential as a **bare** `Authorization` value with no scheme, which this registry reads; `license` in the metadata is already an SPDX expression by Cargo's own rule, so it is stored as it stands. A published version is immutable.",
           "responses": {
             "200": {
-              "description": "{ warnings: { invalid_categories, invalid_badges, other } } \u2014 Cargo prints whatever is in here, so an empty set is the quiet success"
+              "description": "{ warnings: { invalid_categories, invalid_badges, other } } — Cargo prints whatever is in here, so an empty set is the quiet success"
             },
             "400": {
               "description": "a malformed frame, metadata that is not what cargo sends, or a crate name that cannot be stored"
@@ -6121,7 +5562,7 @@
       },
       "/v1/registry/cargo/{org}/api/v1/crates/{name}/{version}/{verb}": {
         "get": {
-          "summary": "`{verb}` is `download`: the `.crate` bytes, at the URL Cargo builds by appending `/{crate}/{version}/download` to the `dl` in config.json. Requires package:read. A yanked version still downloads \u2014 a yank means \u201cdo not resolve to this unless a lockfile already names it\u201d, and removing the bytes would break every build that pinned it.",
+          "summary": "`{verb}` is `download`: the `.crate` bytes, at the URL Cargo builds by appending `/{crate}/{version}/download` to the `dl` in config.json. Requires package:read. A yanked version still downloads — a yank means “do not resolve to this unless a lockfile already names it”, and removing the bytes would break every build that pinned it.",
           "responses": {
             "200": {
               "description": "the .crate file"
@@ -6165,7 +5606,7 @@
       },
       "/v1/registry/cargo/{org}/{path}": {
         "get": {
-          "summary": "Cargo's sparse index. `index/config.json` names the download and API bases and sets `auth-required`, without which Cargo never sends a credential and every request arrives anonymous. `index/{prefix}/{name}` is one crate as newline-delimited JSON, one object per version, in publication order \u2014 and the prefix must be the one Cargo's own length rule produces (`1/a`, `2/ab`, `3/a/abc`, `ab/cd/abcd`), so one crate has exactly one URL. Requires package:read.",
+          "summary": "Cargo's sparse index. `index/config.json` names the download and API bases and sets `auth-required`, without which Cargo never sends a credential and every request arrives anonymous. `index/{prefix}/{name}` is one crate as newline-delimited JSON, one object per version, in publication order — and the prefix must be the one Cargo's own length rule produces (`1/a`, `2/ab`, `3/a/abc`, `ab/cd/abcd`), so one crate has exactly one URL. Requires package:read.",
           "responses": {
             "200": {
               "description": "config.json, or the crate's index file as text/plain"
@@ -6181,10 +5622,10 @@
       },
       "/v1/registry/npm/{org}/{path}": {
         "get": {
-          "summary": "The npm registry. `{path}` is the package \u2014 a scoped name arrives as two segments or percent-encoded, and both reach the same package \u2014 or, when it contains npm's `/-/` marker, the tarball the packument named. Requires package:read, which org:read carries. A 401 here carries a `WWW-Authenticate: Basic` challenge, unlike the rest of this API, because a registry client has no other way to learn it should send the token from its `.npmrc`. An organization that has not switched npm on answers 404 for everything, indistinguishably from one that does not exist.",
+          "summary": "The npm registry. `{path}` is the package — a scoped name arrives as two segments or percent-encoded, and both reach the same package — or, when it contains npm's `/-/` marker, the tarball the packument named. Requires package:read, which org:read carries. A 401 here carries a `WWW-Authenticate: Basic` challenge, unlike the rest of this API, because a registry client has no other way to learn it should send the token from its `.npmrc`. An organization that has not switched npm on answers 404 for everything, indistinguishably from one that does not exist.",
           "responses": {
             "200": {
-              "description": "the packument \u2014 `{ name, _id, versions, dist-tags }`, where each version is the manifest as published with a `dist` block naming a tarball URL, its sha1 `shasum` and its `sha512-` `integrity`, both computed from the stored bytes \u2014 or, for a tarball path, the artifact as `application/octet-stream`."
+              "description": "the packument — `{ name, _id, versions, dist-tags }`, where each version is the manifest as published with a `dist` block naming a tarball URL, its sha1 `shasum` and its `sha512-` `integrity`, both computed from the stored bytes — or, for a tarball path, the artifact as `application/octet-stream`."
             },
             "401": {
               "description": "no credential, with a Basic challenge"
@@ -6195,7 +5636,7 @@
           }
         },
         "put": {
-          "summary": "Publish one version, in npm's publish-document shape: the version manifest under `versions` and the tarball base64 in `_attachments`. Requires package:write, which repo:write deliberately does **not** carry. A published version is immutable \u2014 republishing one answers 409 and changes nothing \u2014 and the attachment's declared `length` and `dist.shasum` are checked against the decoded bytes before anything is stored.",
+          "summary": "Publish one version, in npm's publish-document shape: the version manifest under `versions` and the tarball base64 in `_attachments`. Requires package:write, which repo:write deliberately does **not** carry. A published version is immutable — republishing one answers 409 and changes nothing — and the attachment's declared `length` and `dist.shasum` are checked against the decoded bytes before anything is stored.",
           "responses": {
             "201": {
               "description": "{ ok, id, rev }"
@@ -6220,10 +5661,10 @@
       },
       "/v1/orgs/{org}/packages/ecosystems": {
         "get": {
-          "summary": "Which package ecosystems this organization admits. Requires org:read. Always returns a row for every ecosystem the deployment knows, including the ones nobody has configured \u2014 those read `off`, which is the default and means the registry answers for nothing.",
+          "summary": "Which package ecosystems this organization admits. Requires org:read. Always returns a row for every ecosystem the deployment knows, including the ones nobody has configured — those read `off`, which is the default and means the registry answers for nothing.",
           "responses": {
             "200": {
-              "description": "{ ecosystems: [{ ecosystem, label, mode, license_unknown }], registry_base } \u2014 `mode` is one of `off`, `private`, `proxy`; `license_unknown` says what to do with a package whose licence cannot be determined, and is per ecosystem because most container images declare none. `registry_base` is the URL a client configures against."
+              "description": "{ ecosystems: [{ ecosystem, label, mode, license_unknown }], registry_base } — `mode` is one of `off`, `private`, `proxy`; `license_unknown` says what to do with a package whose licence cannot be determined, and is per ecosystem because most container images declare none. `registry_base` is the URL a client configures against."
             },
             "401": {
               "description": "no credential"
@@ -6253,10 +5694,10 @@
       },
       "/v1/orgs/{org}/packages/policy": {
         "get": {
-          "summary": "The admission policy: what may enter this organization's builds from an upstream registry, and what happens when something may not. Requires org:read \u2014 a developer whose install was refused has to be able to read why without an admin in the room. The optional `ecosystem` query parameter selects which reserved-namespace list is returned and defaults to `npm`.",
+          "summary": "The admission policy: what may enter this organization's builds from an upstream registry, and what happens when something may not. Requires org:read — a developer whose install was refused has to be able to read why without an admin in the room. The optional `ecosystem` query parameter selects which reserved-namespace list is returned and defaults to `npm`.",
           "responses": {
             "200": {
-              "description": "{ ecosystem, mode, cooldown_days, license_mode, license_rules: [{ spdx_id, disposition }], reserved: [pattern] } \u2014 `mode` is `audit` (record what would have been refused and serve anyway) or `block`; `cooldown_days` holds an upstream release younger than that many days, with 0 disabling it; `license_mode` is `allow_list` (only what is listed enters) or `deny_list` (everything except)."
+              "description": "{ ecosystem, mode, cooldown_days, license_mode, license_rules: [{ spdx_id, disposition }], reserved: [pattern] } — `mode` is `audit` (record what would have been refused and serve anyway) or `block`; `cooldown_days` holds an upstream release younger than that many days, with 0 disabling it; `license_mode` is `allow_list` (only what is listed enters) or `deny_list` (everything except)."
             },
             "401": {
               "description": "no credential"
@@ -6305,7 +5746,7 @@
       },
       "/v1/orgs/{org}/packages/policy/namespaces": {
         "post": {
-          "summary": "Claim a name prefix that is never fetched from an upstream registry. Requires org:admin. Body is { ecosystem, pattern }. This closes the hole the \u201cprivate always wins\u201d rule leaves: that rule protects a name already published here, so without a reservation somebody who registers `@acme/new-service` upstream first answers for it. Matched on a segment boundary, so `@acme` covers `@acme/widget` and not `@acmecorp/widget`.",
+          "summary": "Claim a name prefix that is never fetched from an upstream registry. Requires org:admin. Body is { ecosystem, pattern }. This closes the hole the “private always wins” rule leaves: that rule protects a name already published here, so without a reservation somebody who registers `@acme/new-service` upstream first answers for it. Matched on a segment boundary, so `@acme` covers `@acme/widget` and not `@acmecorp/widget`.",
           "responses": {
             "200": {
               "description": "the policy, as GET /packages/policy returns it"
@@ -6322,7 +5763,7 @@
           }
         },
         "delete": {
-          "summary": "Release a reserved prefix, named by the `ecosystem` and `pattern` query parameters. Requires org:admin \u2014 this is the widening direction, since the name becomes proxyable again.",
+          "summary": "Release a reserved prefix, named by the `ecosystem` and `pattern` query parameters. Requires org:admin — this is the widening direction, since the name becomes proxyable again.",
           "responses": {
             "204": {
               "description": "released"
@@ -6344,7 +5785,7 @@
           "summary": "What the admission policy has caught, most recent first. Requires org:read. Deduplicated to one row per (ecosystem, name, version) with a hit count, so a CI run resolving eight hundred dependencies does not write eight hundred rows. `limit` is an optional query parameter, clamped to 500.",
           "responses": {
             "200": {
-              "description": "{ findings: [{ ecosystem, name, version, disposition, rule, reason, hits, first_at, last_at }] } \u2014 `disposition` is `blocked` when the package was refused and `would_block` when audit mode served it anyway; `rule` is `reserved`, `cooldown` or `license`; `reason` is the sentence the client printed."
+              "description": "{ findings: [{ ecosystem, name, version, disposition, rule, reason, hits, first_at, last_at }] } — `disposition` is `blocked` when the package was refused and `would_block` when audit mode served it anyway; `rule` is `reserved`, `cooldown` or `license`; `reason` is the sentence the client printed."
             },
             "401": {
               "description": "no credential"
@@ -6355,7 +5796,7 @@
           }
         },
         "delete": {
-          "summary": "Forget one finding, named by the `ecosystem`, `name` and `version` query parameters. Requires org:admin. This does not admit the package \u2014 the rule that produced the row is still in force and the next fetch writes it again. Allowing something is a change to the rule, and clearing the row afterwards is what makes a cleared row mean somebody acted rather than somebody tidied.",
+          "summary": "Forget one finding, named by the `ecosystem`, `name` and `version` query parameters. Requires org:admin. This does not admit the package — the rule that produced the row is still in force and the next fetch writes it again. Allowing something is a change to the rule, and clearing the row afterwards is what makes a cleared row mean somebody acted rather than somebody tidied.",
           "responses": {
             "204": {
               "description": "forgotten"
@@ -6377,7 +5818,7 @@
           "summary": "What this organization holds, newest activity first. Requires package:read. `ecosystem`, `limit` and `offset` are optional query parameters.",
           "responses": {
             "200": {
-              "description": "{ packages: [{ id, ecosystem, name, private, origin, created_at, updated_at }] } \u2014 `origin` is `local` for a package published here and `proxied` for one cached from an upstream registry."
+              "description": "{ packages: [{ id, ecosystem, name, private, origin, created_at, updated_at }] } — `origin` is `local` for a package published here and `proxied` for one cached from an upstream registry."
             },
             "400": {
               "description": "unknown ecosystem"
@@ -6407,7 +5848,7 @@
           }
         },
         "delete": {
-          "summary": "Take the whole package down. Requires org:admin, not package:write \u2014 unpublishing something everybody depends on is the one irreversible act here, and a CI token that may publish should not also be able to do it. The bytes stay until the collector has proved nothing else references them.",
+          "summary": "Take the whole package down. Requires org:admin, not package:write — unpublishing something everybody depends on is the one irreversible act here, and a CI token that may publish should not also be able to do it. The bytes stay until the collector has proved nothing else references them.",
           "responses": {
             "204": {
               "description": "gone"
@@ -6423,10 +5864,10 @@
       },
       "/v1/orgs/{org}/packages/{package}/versions/{version}/yank": {
         "post": {
-          "summary": "Hide a version from resolution, or put it back \u2014 `{ yanked, reason }`. Requires package:write. Not a delete, and there is no delete: a yanked version still downloads by exact version, so a lockfile that already names it keeps building. Removing it outright would break every pipeline that pinned it.",
+          "summary": "Hide a version from resolution, or put it back — `{ yanked, reason }`. Requires package:write. Not a delete, and there is no delete: a yanked version still downloads by exact version, so a lockfile that already names it keeps building. Removing it outright would break every pipeline that pinned it.",
           "responses": {
             "200": {
-              "description": "the version, as `GET \u2026/packages/{package}` returns it"
+              "description": "the version, as `GET …/packages/{package}` returns it"
             },
             "400": {
               "description": "that is not a version string this registry could have stored"
@@ -6463,516 +5904,6 @@
           },
           "410": {
             "description": "{ error, state } — the job is no longer running; stop and exit"
-          }
-        }
-      }
-    },
-    "/v2/": {
-      "get": {
-        "summary": "The OCI distribution API's version probe, which every container client makes first. Answers 200 with `Docker-Distribution-API-Version: registry/2.0` to a caller with a credential, and 401 with a `WWW-Authenticate: Basic` challenge to one without \u2014 which is what makes `docker login` work. This API lives at the host root and not under `/v1/` because it has to: a container client parses `host/path/image` as registry `host` and repository `path/image`, so there is nowhere to put a base path. The organization is therefore the first component of the repository name: `docker push weft.sh/acme/service:v1`.",
-        "responses": {
-          "200": {
-            "description": "{}"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          }
-        }
-      }
-    },
-    "/v2/{path}": {
-      "get": {
-        "summary": "Pull. `{path}` is one of `<name>/manifests/<tag-or-digest>`, `<name>/blobs/<digest>` or `<name>/tags/list`. A repository name may contain slashes, so the marker that ends it is found from the right. Requires package:read. A layer is served block by block, so a five-hundred-megabyte pull holds one block in memory rather than the layer.",
-        "responses": {
-          "200": {
-            "description": "the manifest, the blob, or the tags document; `Docker-Content-Digest` names what was served"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such org, containers are not enabled for it, or no such repository, manifest or blob"
-          }
-        }
-      },
-      "head": {
-        "summary": "The same lookups without the body, which is how a client checks whether it needs to push a layer at all."
-      },
-      "post": {
-        "summary": "`<name>/blobs/uploads/` \u2014 open an upload session. Requires package:write. Answers 202 with a `Location` to PATCH into and a `Docker-Upload-UUID`. The repository row is created here, so a push against a name the organization's policy forbids is refused before a single byte moves.",
-        "responses": {
-          "202": {
-            "description": "session opened"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "409": {
-            "description": "the name is cached from an upstream registry and cannot be pushed to"
-          }
-        }
-      },
-      "patch": {
-        "summary": "Write to an upload session. The body is read as a **stream** and cut into blocks as it arrives, so a layer never becomes resident \u2014 `ObjectStore::put` takes a slice, and `docker push` sends a layer as one body. Requires package:write.",
-        "responses": {
-          "202": {
-            "description": "accepted, with the session's byte range so far"
-          },
-          "404": {
-            "description": "no such upload"
-          },
-          "413": {
-            "description": "over the blob ceiling"
-          }
-        }
-      },
-      "put": {
-        "summary": "Finish an upload (`?digest=sha256:\u2026`, which may carry the last chunk), or push a manifest. A manifest is refused unless **every blob it names is already here** \u2014 otherwise this registry serves an image nobody can pull and the client's error is about the missing layer rather than about the push that was wrong. An upload's digest is checked by re-reading its blocks: a session may be finished on a different node than opened it, so no hasher is carried across requests. A tag **moves** \u2014 that is what a tag is for, and it is the one place the \u201ca version never changes\u201d rule does not apply, because what never changes is the manifest, addressed by its digest.",
-        "responses": {
-          "201": {
-            "description": "stored; `Docker-Content-Digest` names it"
-          },
-          "400": {
-            "description": "no digest, a digest that is not the bytes', or a document that is not a manifest"
-          },
-          "404": {
-            "description": "no such upload, or a blob the manifest names has not been pushed"
-          }
-        }
-      },
-      "delete": {
-        "summary": "Cancel an upload session, or delete a **tag**. A manifest by digest is refused: it may be referenced by tags the caller cannot see, and the spec permits a registry to refuse. Requires package:write.",
-        "responses": {
-          "202": {
-            "description": "the tag is gone"
-          },
-          "204": {
-            "description": "the upload session is cancelled"
-          },
-          "404": {
-            "description": "no such tag or upload"
-          },
-          "405": {
-            "description": "a manifest addressed by digest"
-          }
-        }
-      }
-    },
-    "/v1/registry/maven/{org}/{path}": {
-      "get": {
-        "summary": "The Maven repository. `{path}` is a coordinate laid out the way Maven lays one out \u2014 `groupId/as/directories/artifactId/version/filename` \u2014 read from the right, because a groupId has any number of segments and reading it from the left is ambiguous. `{group}/{artifact}/maven-metadata.xml` and its `.sha1` are generated from our own rows and never stored. Requires package:read; a Basic challenge is sent to an anonymous caller, because that is the dialect `mvn` speaks.",
-        "responses": {
-          "200": {
-            "description": "the file, or the generated maven-metadata.xml"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such org, Maven is not enabled for it, the path is not a coordinate, or no such file"
-          }
-        }
-      },
-      "put": {
-        "summary": "Deploy one file of one release. Requires package:write. `mvn deploy` sends each file of a release as its own request in an order nobody promises, so the first file creates the version and each later one is added to it \u2014 with a second upload of a filename that is already there refused rather than overwritten. **SNAPSHOT versions are refused**: a snapshot is a version whose bytes are meant to change, which is the opposite of the invariant this registry rests on. An uploaded `maven-metadata.xml` is accepted and discarded, because we generate that document ourselves.",
-        "responses": {
-          "201": {
-            "description": "stored"
-          },
-          "200": {
-            "description": "a maven-metadata.xml upload, accepted and discarded"
-          },
-          "400": {
-            "description": "not a coordinate, a snapshot version, or a version string that cannot be stored"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "409": {
-            "description": "that file is already deployed at that version, or the name is a proxied package"
-          }
-        }
-      }
-    },
-    "/v1/registry/pypi/{org}": {
-      "post": {
-        "summary": "twine's upload: `multipart/form-data` with `:action=file_upload`, the artifact in the `content` field and the metadata in fields beside it. Requires package:write. If twine sends a `sha256_digest` it is checked against the bytes that arrived, because a mismatch is a truncated upload rather than a policy question. The licence is read from PEP 639's `License-Expression` first, then from a trove classifier, and only then from the free-text `License` field \u2014 and only through an exact table, so an unmapped spelling is `unknown` rather than a guess. `twine upload dist/*` posts the sdist and the wheel separately; both land on one version.",
-        "responses": {
-          "200": {
-            "description": "stored"
-          },
-          "400": {
-            "description": "not a multipart upload, not a file_upload, a filename that is not a distribution filename, or bytes that do not match the digest twine sent"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "409": {
-            "description": "that filename is already uploaded for that version, or the name is a proxied package"
-          }
-        }
-      }
-    },
-    "/v1/registry/pypi/{org}/": {
-      "post": {
-        "summary": "The same upload, for a `.pypirc` whose `repository` carries a trailing slash. Registered rather than redirected, because a client does not re-POST a body after a redirect."
-      }
-    },
-    "/v1/registry/pypi/{org}/{path}": {
-      "get": {
-        "summary": "pip's Simple API and the files it links to. `simple/` is the root index, `simple/{name}/` is one project's page \u2014 PEP 503, with a `#sha256=` fragment on every link, which is what pip verifies a download against \u2014 and `files/{name}/{filename}` is one artifact. Asking for `simple/{name}` without the trailing slash answers 301: pip resolves a link relative to the page it read, so without the slash every filename would resolve one directory up. Requires package:read. A project nobody has published is an **empty page**, not a 404, because pip has read a 404 from an index as the index being broken.",
-        "responses": {
-          "200": {
-            "description": "the index page as text/html, or the artifact as application/octet-stream"
-          },
-          "301": {
-            "description": "a project page asked for without its trailing slash"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such org, PyPI is not enabled for it, or no such file"
-          }
-        }
-      }
-    },
-    "/v1/registry/cargo/{org}/api/v1/crates/new": {
-      "put": {
-        "summary": "`cargo publish`. The body is framed rather than JSON: a little-endian u32 length, the metadata document, a second length, and the `.crate` bytes. Every length is checked against what is actually left before it is used. Requires package:write. Cargo sends its credential as a **bare** `Authorization` value with no scheme, which this registry reads; `license` in the metadata is already an SPDX expression by Cargo's own rule, so it is stored as it stands. A published version is immutable.",
-        "responses": {
-          "200": {
-            "description": "{ warnings: { invalid_categories, invalid_badges, other } } \u2014 Cargo prints whatever is in here, so an empty set is the quiet success"
-          },
-          "400": {
-            "description": "a malformed frame, metadata that is not what cargo sends, or a crate name that cannot be stored"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "409": {
-            "description": "that version is already uploaded, or the name is a proxied package"
-          }
-        }
-      }
-    },
-    "/v1/registry/cargo/{org}/api/v1/crates/{name}/{version}/{verb}": {
-      "get": {
-        "summary": "`{verb}` is `download`: the `.crate` bytes, at the URL Cargo builds by appending `/{crate}/{version}/download` to the `dl` in config.json. Requires package:read. A yanked version still downloads \u2014 a yank means \u201cdo not resolve to this unless a lockfile already names it\u201d, and removing the bytes would break every build that pinned it.",
-        "responses": {
-          "200": {
-            "description": "the .crate file"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such org, Cargo is not enabled for it, no such crate or version, or a verb other than download"
-          }
-        }
-      },
-      "delete": {
-        "summary": "`cargo yank`. `{verb}` is `yank`. Requires package:write. The index is assembled from rows on every read, so this is visible to the next resolve rather than after something rewrites a file.",
-        "responses": {
-          "200": {
-            "description": "{ ok: true }"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such crate or version"
-          }
-        }
-      },
-      "put": {
-        "summary": "`cargo yank --undo`. `{verb}` is `unyank`. Requires package:write.",
-        "responses": {
-          "200": {
-            "description": "{ ok: true }"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such crate or version"
-          }
-        }
-      }
-    },
-    "/v1/registry/cargo/{org}/{path}": {
-      "get": {
-        "summary": "Cargo's sparse index. `index/config.json` names the download and API bases and sets `auth-required`, without which Cargo never sends a credential and every request arrives anonymous. `index/{prefix}/{name}` is one crate as newline-delimited JSON, one object per version, in publication order \u2014 and the prefix must be the one Cargo's own length rule produces (`1/a`, `2/ab`, `3/a/abc`, `ab/cd/abcd`), so one crate has exactly one URL. Requires package:read.",
-        "responses": {
-          "200": {
-            "description": "config.json, or the crate's index file as text/plain"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such org, Cargo is not enabled for it, no such crate, or a prefix that is not the one Cargo would ask for"
-          }
-        }
-      }
-    },
-    "/v1/registry/npm/{org}/{path}": {
-      "get": {
-        "summary": "The npm registry. `{path}` is the package \u2014 a scoped name arrives as two segments or percent-encoded, and both reach the same package \u2014 or, when it contains npm's `/-/` marker, the tarball the packument named. Requires package:read, which org:read carries. A 401 here carries a `WWW-Authenticate: Basic` challenge, unlike the rest of this API, because a registry client has no other way to learn it should send the token from its `.npmrc`. An organization that has not switched npm on answers 404 for everything, indistinguishably from one that does not exist.",
-        "responses": {
-          "200": {
-            "description": "the packument \u2014 `{ name, _id, versions, dist-tags }`, where each version is the manifest as published with a `dist` block naming a tarball URL, its sha1 `shasum` and its `sha512-` `integrity`, both computed from the stored bytes \u2014 or, for a tarball path, the artifact as `application/octet-stream`."
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such org, npm is not enabled for it, or no such package or tarball"
-          }
-        }
-      },
-      "put": {
-        "summary": "Publish one version, in npm's publish-document shape: the version manifest under `versions` and the tarball base64 in `_attachments`. Requires package:write, which repo:write deliberately does **not** carry. A published version is immutable \u2014 republishing one answers 409 and changes nothing \u2014 and the attachment's declared `length` and `dist.shasum` are checked against the decoded bytes before anything is stored.",
-        "responses": {
-          "201": {
-            "description": "{ ok, id, rev }"
-          },
-          "400": {
-            "description": "the document is malformed, names a different package than the URL, carries more than one version or attachment, or the attachment disagrees with its own declared length or shasum"
-          },
-          "401": {
-            "description": "no credential, with a Basic challenge"
-          },
-          "404": {
-            "description": "no such org, or npm is not enabled for it"
-          },
-          "409": {
-            "description": "that version is already published, or the name is one this org caches from an upstream registry"
-          },
-          "413": {
-            "description": "the artifact is over the size limit"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages/ecosystems": {
-      "get": {
-        "summary": "Which package ecosystems this organization admits. Requires org:read. Always returns a row for every ecosystem the deployment knows, including the ones nobody has configured \u2014 those read `off`, which is the default and means the registry answers for nothing.",
-        "responses": {
-          "200": {
-            "description": "{ ecosystems: [{ ecosystem, label, mode, license_unknown }], registry_base } \u2014 `mode` is one of `off`, `private`, `proxy`; `license_unknown` says what to do with a package whose licence cannot be determined, and is per ecosystem because most container images declare none. `registry_base` is the URL a client configures against."
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or it is not visible to this caller"
-          }
-        }
-      },
-      "put": {
-        "summary": "Switch one ecosystem on or off. Requires org:admin, and deliberately not package:write: this changes what an organization's builds may reach. Omitting `license_unknown` leaves the existing disposition alone, so enabling an ecosystem does not quietly reset a policy somebody set.",
-        "responses": {
-          "200": {
-            "description": "{ ecosystem, label, mode, license_unknown }"
-          },
-          "400": {
-            "description": "unknown ecosystem, mode, or disposition"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or the caller is not an admin of it"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages/policy": {
-      "get": {
-        "summary": "The admission policy: what may enter this organization's builds from an upstream registry, and what happens when something may not. Requires org:read \u2014 a developer whose install was refused has to be able to read why without an admin in the room. The optional `ecosystem` query parameter selects which reserved-namespace list is returned and defaults to `npm`.",
-        "responses": {
-          "200": {
-            "description": "{ ecosystem, mode, cooldown_days, license_mode, license_rules: [{ spdx_id, disposition }], reserved: [pattern] } \u2014 `mode` is `audit` (record what would have been refused and serve anyway) or `block`; `cooldown_days` holds an upstream release younger than that many days, with 0 disabling it; `license_mode` is `allow_list` (only what is listed enters) or `deny_list` (everything except)."
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or it is not visible to this caller"
-          }
-        }
-      },
-      "put": {
-        "summary": "Set the mode, the cooldown and the licence mode. Requires org:admin. New organizations start at `audit` with no cooldown and a deny list, which admits everything and records nothing: a policy that blocks from day one meets a deadline in week one and gets switched off.",
-        "responses": {
-          "200": {
-            "description": "the policy, as GET returns it"
-          },
-          "400": {
-            "description": "unknown mode or licence mode, or a cooldown outside 0..=3650 days"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or the caller is not an admin of it"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages/policy/licenses": {
-      "put": {
-        "summary": "Add, change or remove one licence rule. Requires org:admin. Body is { spdx_id, disposition } where `disposition` is `allow`, `deny`, or absent to remove the rule. Removing is not the same as denying: under a deny list an absent rule admits, and under an allow list it refuses. Identifiers are compared case-insensitively, as SPDX defines them.",
-        "responses": {
-          "200": {
-            "description": "the policy, as GET /packages/policy returns it"
-          },
-          "400": {
-            "description": "an empty identifier, or a disposition other than allow or deny"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or the caller is not an admin of it"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages/policy/namespaces": {
-      "post": {
-        "summary": "Claim a name prefix that is never fetched from an upstream registry. Requires org:admin. Body is { ecosystem, pattern }. This closes the hole the \u201cprivate always wins\u201d rule leaves: that rule protects a name already published here, so without a reservation somebody who registers `@acme/new-service` upstream first answers for it. Matched on a segment boundary, so `@acme` covers `@acme/widget` and not `@acmecorp/widget`.",
-        "responses": {
-          "200": {
-            "description": "the policy, as GET /packages/policy returns it"
-          },
-          "400": {
-            "description": "unknown ecosystem, or an empty or over-long prefix"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or the caller is not an admin of it"
-          }
-        }
-      },
-      "delete": {
-        "summary": "Release a reserved prefix, named by the `ecosystem` and `pattern` query parameters. Requires org:admin \u2014 this is the widening direction, since the name becomes proxyable again.",
-        "responses": {
-          "204": {
-            "description": "released"
-          },
-          "400": {
-            "description": "unknown ecosystem"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, the caller is not an admin of it, or that prefix was never reserved"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages/findings": {
-      "get": {
-        "summary": "What the admission policy has caught, most recent first. Requires org:read. Deduplicated to one row per (ecosystem, name, version) with a hit count, so a CI run resolving eight hundred dependencies does not write eight hundred rows. `limit` is an optional query parameter, clamped to 500.",
-        "responses": {
-          "200": {
-            "description": "{ findings: [{ ecosystem, name, version, disposition, rule, reason, hits, first_at, last_at }] } \u2014 `disposition` is `blocked` when the package was refused and `would_block` when audit mode served it anyway; `rule` is `reserved`, `cooldown` or `license`; `reason` is the sentence the client printed."
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or it is not visible to this caller"
-          }
-        }
-      },
-      "delete": {
-        "summary": "Forget one finding, named by the `ecosystem`, `name` and `version` query parameters. Requires org:admin. This does not admit the package \u2014 the rule that produced the row is still in force and the next fetch writes it again. Allowing something is a change to the rule, and clearing the row afterwards is what makes a cleared row mean somebody acted rather than somebody tidied.",
-        "responses": {
-          "204": {
-            "description": "forgotten"
-          },
-          "400": {
-            "description": "unknown ecosystem"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, the caller is not an admin of it, or there is no such finding"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages": {
-      "get": {
-        "summary": "What this organization holds, newest activity first. Requires package:read. `ecosystem`, `limit` and `offset` are optional query parameters.",
-        "responses": {
-          "200": {
-            "description": "{ packages: [{ id, ecosystem, name, private, origin, created_at, updated_at }] } \u2014 `origin` is `local` for a package published here and `proxied` for one cached from an upstream registry."
-          },
-          "400": {
-            "description": "unknown ecosystem"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, or it is not visible to this caller"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages/{package}": {
-      "get": {
-        "summary": "One package, its versions and its tags. Requires package:read. Each version carries the repository, commit and job that produced it, which is the question asked during an incident and the reason this registry sits beside the code.",
-        "responses": {
-          "200": {
-            "description": "the package, plus `versions: [{ id, version, yanked, yank_reason, license, license_source, size_bytes, repo_id, commit_sha, job_id, published_by, published_at }]` and `tags: [{ tag, version }]`. `license_source` is `declared`, `detected` or `unknown`."
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org or package, or it is not visible to this caller"
-          }
-        }
-      },
-      "delete": {
-        "summary": "Take the whole package down. Requires org:admin, not package:write \u2014 unpublishing something everybody depends on is the one irreversible act here, and a CI token that may publish should not also be able to do it. The bytes stay until the collector has proved nothing else references them.",
-        "responses": {
-          "204": {
-            "description": "gone"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org or package, or the caller is not an admin of it"
-          }
-        }
-      }
-    },
-    "/v1/orgs/{org}/packages/{package}/versions/{version}/yank": {
-      "post": {
-        "summary": "Hide a version from resolution, or put it back \u2014 `{ yanked, reason }`. Requires package:write. Not a delete, and there is no delete: a yanked version still downloads by exact version, so a lockfile that already names it keeps building. Removing it outright would break every pipeline that pinned it.",
-        "responses": {
-          "200": {
-            "description": "the version, as `GET \u2026/packages/{package}` returns it"
-          },
-          "400": {
-            "description": "that is not a version string this registry could have stored"
-          },
-          "401": {
-            "description": "no credential"
-          },
-          "404": {
-            "description": "no such org, package or version, or it is not visible to this caller"
           }
         }
       }

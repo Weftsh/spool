@@ -56,7 +56,7 @@
 #   STRATUM_GITHUB_APP_KEY_PEM             its private key: a path to the PEM, or the PEM itself
 #   STRATUM_GITHUB_INSTALLATION_ID         an installation of that App that holds Contents: write
 #   STRATUM_GITHUB_MIRROR_REPO             owner/name of a repository it covers; branches named
-#                                          weft-manual-<timestamp> are pushed to it and deleted again
+#                                          spool-manual-<timestamp> are pushed to it and deleted again
 #   STRATUM_GITHUB_PROTECTED_BRANCH        (optional) a branch of that repository protected against
 #                                          direct pushes; without it `protected` is a NOTE
 #   STRATUM_GITHUB_DENIED_INSTALLATION_ID  (optional) an installation of the same App that genuinely

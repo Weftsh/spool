@@ -1,4 +1,4 @@
-# Working in stratum-core
+# Working in spool
 
 This file is the operating discipline: what a change has to survive
 before it lands, what the thresholds actually are, and what to do the
@@ -14,40 +14,33 @@ test that fails without it.**
 
 ## The gates
 
-Fifteen things stand between a change and `main`. Six are CI jobs; nine
+Nine things stand between a change and `main`. Four are CI jobs; five
 are a person, with real credentials, against something we do not control.
 None of them is optional, and none of them is "usually fine".
 
 | Gate | What it proves | Where |
 |---|---|---|
 | **correctness** | `cargo fmt --all --check`, `clippy -D warnings`, `cargo test --workspace --release` | CI job `correctness-gate` |
-| **coverage** | 100% of coverable lines, ledger exact in both directions | CI job `coverage` |
 | **chaos** | the server survives a SIGKILL at every compaction boundary, and a seeded fault storm loses no acknowledged write | CI job `chaos` |
-| **web** | the site builds, the design-system contract holds over the *built* HTML, dashboard unit tests, Playwright e2e | CI job `web` |
-| **deploy** | the production image and both runner images build, the prod-parity stack comes up, and the **real `git` CLI** clones, `fsck`s and pushes through it over HTTP *and* SSH — with no container runtime, on our own fleet (`deploy/proot`) | CI job `deploy-validation` |
-| **terraform** | `fmt -check`, `validate` on the root, the bootstrap and the env-lock module, and the env-lock module's own test, all credential-free | CI job `terraform-validation` |
+| **web** | dashboard unit tests, the production build, Playwright e2e | CI job `web` |
+| **terraform** | `fmt -check` and `validate` on the AWS reference deployment, credential-free | CI job `terraform-validation` |
 | **manual browser pass** | a person's-eye view of every screen the change touches, reporting **0 problems** | `web/dashboard/tools/walkthrough.mjs` |
-| **manual S3 contract** | the conditional-PUT semantics I9 rests on hold on the backend we actually deploy on, under the role we actually deploy with | `scripts/manual-s3.sh check --both-addressing-styles` |
+| **manual S3 contract** | the conditional-PUT semantics I9 rests on hold on the backend a deployment actually uses, under the role it actually uses | `scripts/manual-s3.sh check --both-addressing-styles` |
 | **manual CI contract** | real GitHub answers the refusals our poller classifies, every `status`/`conclusion` pair it emits is one we map, and a real non-GitHub CI's verdict reaches the intake | `scripts/manual-ci.sh all`, plus `intake watch` |
-| **manual ECS contract** | real ECS accepts the `RunTask` the dispatcher sends, every refusal it answers lands on the side of `Capacity`/`Refused` we meant, and a `StopTask` really stops a runner | `scripts/manual-ecs.sh all`, plus `stop <task-arn>` |
-| **manual Stripe contract** | real Stripe accepts the bodies `billing/stripe.rs` sends under the restricted key we deploy with, and every webhook body it delivers is read by `parse_event` where we read it | `scripts/manual-stripe.sh all`, then `fixtures` |
-| **manual GitHub-runner contract** | real GitHub mints a just-in-time runner for the body the dispatcher sends under the App we deploy, on a personal account *and* an organisation, every refusal it answers lands on the row we meant, and a real `actions/runner` takes the job and reports it | `scripts/manual-github-runners.sh all`, then `fixtures` |
-| **manual registry contract** | real `npm`, `mvn`, `twine`/`pip`, `cargo` and `docker` publish to and install from the registry, and the licence gate refuses a real package fetched from real npmjs | `scripts/manual-registry.sh all`, then `fixtures`; against the live fleet, with a Weft runner publishing every ecosystem, `gh workflow run registry-e2e.yml` |
 | **manual GitHub-sign-in contract** | real GitHub answers `GET /user/emails` in the shape the sign-in reads, and the `verified` flag on the `primary` entry — the single fact that lets a GitHub sign-up skip our confirmation mail — is really there | `scripts/manual-github-signin.sh all`, then `fixtures` |
-| **manual mirror-push contract** | real GitHub takes the exact `git push` a forwarded mirror push sends under the installation we deploy with, and every refusal it prints — a protected branch, a stale lease, a missing `Contents: write` — lands on the answer `classify` gives it | `scripts/manual-mirror-push.sh all`, then `fixtures` |
+| **manual mirror-push contract** | real GitHub takes the exact `git push` a forwarded mirror push sends under the App installation, and every refusal it prints — a protected branch, a stale lease, a missing `Contents: write` — lands on the answer `classify` gives it | `scripts/manual-mirror-push.sh all`, then `fixtures` |
 
-The last eight are manual for the same reason the browser pass is: they
-need credentials for a real bucket, a real App, a real AWS account and a
-real Stripe account — or, for the registry, five package managers and a
-docker daemon — and none of that belongs in CI. Do not
-mistake the MinIO run inside `correctness-gate` for it. I9 — the manifest
-is the only ref truth and changes only by CAS — is not a property of our
-code, it is a property of the store, and it had only ever been checked
-against MinIO. Real S3 answers **409 ConditionalRequestConflict** when two
-conditional writes to one key overlap, where MinIO only answers 412; the
-store client mapped 409 to a generic error, so on the multi-node fleet we
-actually run, the loser of a manifest CAS fell out of the retry loop and
-failed a user's push. No MinIO test could have caught it.
+The manual ones are manual for the same reason the browser pass is: they
+need credentials for a real bucket and a real GitHub App, and none of
+that belongs in CI. Do not mistake the MinIO run inside
+`correctness-gate` for the S3 contract. I9 — the manifest is the only ref
+truth and changes only by CAS — is not a property of our code, it is a
+property of the store, and it had only ever been checked against MinIO.
+Real S3 answers **409 ConditionalRequestConflict** when two conditional
+writes to one key overlap, where MinIO only answers 412; the store
+client mapped 409 to a generic error, so on a multi-node deployment the
+loser of a manifest CAS fell out of the retry loop and failed a user's
+push. No MinIO test could have caught it.
 
 Run it under the **deployment's IAM policy**, not an admin key — the
 404-not-403 case exists to catch a least-privilege policy turning absence
@@ -56,7 +49,7 @@ into `AccessDenied`, and an admin key can never fail it — and against
 from the URL's shape.
 
 The CI contract is the same argument about a different provider, and it
-has already cost us the same way. `get_page` treated a refusal as
+has already cost the same way. `get_page` treated a refusal as
 rate-limited only when `Retry-After` was present; GitHub sends that on
 **secondary** limits, while a **primary** budget exhaustion is a 403 with
 `x-ratelimit-remaining: 0` and no `Retry-After`. We classified that as
@@ -68,10 +61,10 @@ attached `Retry-After`. **A fake encodes what we believe the provider
 does, and a suite built on a fake that is wrong is green precisely where
 the product is broken.**
 
-So: run it with the **App installation and Stratum token you deploy
-with**. `scripts/manual-ci.sh denied` needs a second installation of the
-same App that genuinely lacks `actions: read`, and it cannot fail under
-an installation that holds every permission. Point
+So: run it with a real **App installation and Spool token**.
+`scripts/manual-ci.sh denied` needs a second installation of the same App
+that genuinely lacks `actions: read`, and it cannot fail under an
+installation that holds every permission. Point
 `STRATUM_GITHUB_ACTIONS_REPO` at a repository with a **varied** run
 history — cancelled, timed out, skipped, awaiting approval — or the
 mapping check confirms only that `completed/success` works.
@@ -80,148 +73,37 @@ and is the only way to observe the refusal we got wrong; without it the
 script prints a NOTE and does not claim that case, the same way a
 single-addressing-style S3 run does not claim the other.
 
-The ECS contract is the third of these, and the argument is now familiar:
-`FakeEcs` in `stratum-testkit` and `deploy/fake-ecs/fake-ecs.py` are
-things we wrote, and what they cannot be wrong about is the only thing
-`workflow/executor.rs` really needs to get right. A refusal classified
-`Capacity` goes back on the queue without counting an attempt — right for
-a full region, and a silent infinite retry for a policy edit that took
-`ecs:RunTask` away. `scripts/manual-ecs.sh refusals` sends four real
-malformed `RunTask`s and asserts each lands on `Refused`; with a second
-credential that genuinely lacks `ecs:RunTask` in `STRATUM_ECS_DENIED_*`
-it adds the AccessDenied case, which is the one an operator actually
-meets and cannot fail under a key that holds the permission. Run all of
-it with the **dispatch credential the app boots with**: half of what is
-being checked is that the least-privilege policy in
-`deploy/terraform/modules/runner` still admits the body the dispatcher
-sends, and an admin key cannot fail that.
-
-The capacity family — `RESOURCE:MEMORY`, `AGENT`, `ThrottlingException`
-— is printed as NOTEs and never claimed: a busy region cannot be ordered
-up, and spending the account's API budget to see a throttle is abuse of
-it, the same reason `manual-ci.sh` declines to provoke a secondary rate
-limit. So is the ending that matters most: `scripts/manual-ecs.sh stop`
-with no argument checks only that `StopTask` is accepted and that the
-255-character reason `Ecs::stop` truncates to is legal. To claim that a
-stopped runner exits 0 without reporting a verdict — inside `stopTimeout`
-rather than being SIGKILLed at the end of it — you need a task that is
-running a real job, so trigger a hosted workflow with a slow step and
-pass its ARN: `scripts/manual-ecs.sh stop <task-arn>`.
-
-The Stripe contract is the fourth, and by now the argument writes itself:
-`FakeStripe` says what we believe a webhook body looks like, and three of
-those beliefs were wrong at once — the billing period moved onto the
-subscription *item*, an invoice's subscription moved under `parent`, and
-a setup-mode Checkout never had `line_items` on the wire — so a test
-named for each case passed against a parser that read none of them.
-`scripts/manual-stripe.sh` sends the bodies `stripe.rs` sends, observes
-what a real test-mode account delivers through `stripe listen`, and
-`fixtures` makes those bodies the suite's evidence: the ordinary test
-`stripe_fixtures_parse_like_the_fake` fails the moment the fake and the
-recorded wire disagree. Run it under the **restricted key you deploy
-with** — half of what is checked is that its permissions admit every
-call — never a live key, which the script refuses. `setup` needs a
-person at a browser to finish a Checkout; `--no-browser` prints a NOTE
-and does not claim that body. Making it truer has already paid once: a
-subscription event that names an org this fleet does not have — a
-staging and a production fleet share one Stripe account and both hear
-everything — used to 500, and Stripe retries a 5xx until it disables the
-endpoint.
-
-The GitHub-runner contract is the fifth, and it is the CI contract's
-argument pointed at a different half of the same App. The fake in
-`stratum-testkit` answers `generate-jitconfig`, the `workflow_job`
-deliveries and the cancel with what we *believe* GitHub does, and the
-first real run of `scripts/manual-github-runners.sh` (2026-09-07) found
-two of those beliefs false. The fake gave every just-in-time runner the
-default labels `self-hosted`, `linux` and `x64` beside the one we asked
-for; real GitHub attaches **only what you ask for**, lowercased. The
-dispatcher registered runners with the size label alone, so a workflow
-saying `runs-on: [self-hosted, weft]` — the form GitHub's own docs
-recommend — would never have matched, and the job would have sat queued
-for a day. The dispatcher now registers with the job's own label list,
-which GitHub accepts `self-hosted` and all. The fake's 422 bodies also
-carried an `errors` list GitHub does not send, and refused a label with
-a space that GitHub accepts. What did hold: cancelling a run that has
-already finished answers **409**, which is the difference between a
-refused job's cancel being "done" and being retried every hour forever.
-`fixtures` makes the recorded bodies the suite's evidence, and the
-fixture test pins the fake to them. Run it under the **App and installations you deploy with** — it
-uses the App's JWT and the tokens minted from it and nothing else,
-because half of what is checked is that the App's permissions admit
-every call the server makes. `denied` needs a second installation of
-the same App that genuinely lacks `Administration: write`, the refusal
-every existing installation meets until its owner re-approves the App;
-the script refuses to claim it under one that holds the permission.
-Run it against a **personal-account installation and an organisation
-one** (`STRATUM_GITHUB_ORG_INSTALLATION_ID`, `…_RUNNER_ORG_REPO`):
-the dispatcher registers on the repository with `runner_group_id: 1`
-for both account types, which the docs state and the fake merely
-repeats, and a personal-account run does not claim the organisation
-half. `run` prints the workflow to commit and, with `--runner-dir`
-pointing at an unpacked `actions/runner`, boots the agent on a minted
-configuration and watches the job complete; without it the end-to-end
-case is a NOTE, and so is a live run's 202 without `--live-run`.
-
-The registry contract is the sixth, and it is the same argument aimed at
-five providers at once. Every automated test of the registry sends
-bodies **we** built, from what we believe npm, Maven, twine, cargo and
-docker send, and reads them back with assertions written from the same
-belief — which is the shape of all three failures above. So
-`scripts/manual-registry.sh` drives the real clients: `npm publish` and
-`npm install`, `mvn deploy` and a resolve from an *empty* local
-repository, `twine upload` and `pip install` from the simple index,
-`cargo publish` and a build that resolves against the sparse index,
-`docker push` and `docker pull` of an image whose layer is larger than
-the block size. The assertions are on what came back **through the
-client**: `npm view`'s output, not our own HTTP — an assertion made with
-`urllib` against our own server proves what we already believe.
-
-`proxy` is the stage that matters most, and it is the only one that
-leaves the machine: it installs a package from real npmjs through the
-licence gate, and then sets a ten-year cooldown and checks the same
-install is refused — which is the only way to know npmjs's own publish
-date was read at all. `fixtures` records what npmjs served into
-`stratum-testkit/fixtures/registry`, and
-`upstream_fixtures_parse_like_the_fake` fails the moment the fake and
-the recorded wire disagree. A missing client is a **NOTE** and claims
-nothing: a machine with no `mvn` has not proved the Maven contract, and
-the failure this gate exists to catch is a belief nobody tested.
-The mirror-push contract is the seventh, and it is the runner contract's
-argument pointed at the other half of the App. A push to a mirror is
-forwarded to its origin by `mirror/forward.rs`, and what the origin
-prints back — `--porcelain` lines and `remote:` lines — is read by
-`classify` to say *which* command was refused and *why*, in a report
-`git push` shows the person. Every hermetic test of it pushes to a bare
-repository on disk whose refusals are a `pre-receive` hook we wrote to
-sound like GitHub. So the reason phrase for a protected branch, the
-`GH006` line, what the sibling of a refused command reports under
-`--atomic`, and the transport's 403 for an installation that never
-approved `Contents: write` are all beliefs, and
+The mirror-push contract is the same argument pointed at the other half
+of the App. A push to a mirror is forwarded to its origin by
+`mirror/forward.rs`, and what the origin prints back — `--porcelain`
+lines and `remote:` lines — is read by `classify` to say *which* command
+was refused and *why*, in a report `git push` shows the person. Every
+hermetic test of it pushes to a bare repository on disk whose refusals
+are a hook we wrote to sound like GitHub. So the reason phrase for a
+protected branch, the `GH006` line, what the sibling of a refused command
+reports under `--atomic`, and the transport's 403 for an installation
+that never approved `Contents: write` are all beliefs, and
 `crates/stratum-testkit/fixtures/mirror-push/provenance.json` says
-`observed: false` until the script has run. Run it under the **App and
-installation you deploy with**; `denied` needs a second installation
-that genuinely lacks `Contents: write` — which is every installation
-made before the permission was added — and refuses to claim the case
-under one that holds it; `protected` needs
-`STRATUM_GITHUB_PROTECTED_BRANCH` naming a branch GitHub really
-protects, or the atomic sibling is a NOTE. `fixtures` writes the wire
-into the suite, and `mirror_push_fixtures_classify_like_the_fake` holds
-the classifier and the e2e hook to it.
+`observed: false` until the script has run. `denied` needs a second
+installation that genuinely lacks `Contents: write`, and refuses to claim
+the case under one that holds it; `protected` needs
+`STRATUM_GITHUB_PROTECTED_BRANCH` naming a branch GitHub really protects,
+or the atomic sibling is a NOTE. `fixtures` writes the wire into the
+suite, and `mirror_push_fixtures_classify_like_the_fake` holds the
+classifier and the e2e hook to it.
 
 One command reproduces those CI jobs, in CI's order, from CI's own
 commands:
 
 ```sh
 scripts/ci-local.sh            # everything this machine can run
-scripts/ci-local.sh --fast     # skip coverage (~4 min) and deploy
+scripts/ci-local.sh --fast     # skip chaos
 scripts/ci-local.sh --only web # one job
 ```
 
 It exports `CI=true` for Playwright so that step is a reproduction and
-not an approximation. Anything it cannot run — `deploy-validation` needs
-Linux for PRoot, or a docker daemon for the Fargate model box — is
-printed as a **SKIP**, and the summary
+not an approximation. Anything it cannot run — a missing toolchain, a
+browser that is not installed — is printed as a **SKIP**, and the summary
 refuses to say "good to push". A skip is not a pass.
 `docs_e2e::the_local_ci_script_covers_every_job_the_workflow_declares`
 fails if the workflow grows a job the script has not been taught, because
@@ -234,38 +116,12 @@ trust it, and it lies.
 
 Not "high coverage". Not "good test hygiene". These are the lines.
 
-**Coverage: 100% of coverable lines, and the ledger is exact.**
-Every product line is either executed by the suite or listed in
-`coverage-ledger.toml` with a reason. The gate is **two-way**: an
-unledgered uncovered line fails, *and* a ledger entry whose line is now
-covered fails as stale. Budget for ledger edits in the same commit as
-the tests.
-
-A ledger reason must say **why the line cannot run**, not that covering
-it is inconvenient. These are reasons:
-
-- an error-propagation region on a multi-line call whose Err branch needs
-  a Postgres failure the surrounding transaction would hit first
-- a 500 arm behind input that is shape-checked before it arrives
-- a guard asserting an invariant its only caller already enforces, kept
-  because it sits on a security boundary
-
-These are not: "hard to test", "needs a network", "only in production".
-If it needs a network, that is usually a sign the seam is in the wrong
-place — see *Split at the seam the gate points at* below.
-
-**A chaos test may never be the sole cover for a product line.**
+**A chaos test may never be the sole cover for a behaviour.**
 Everything in `crates/stratum-server/tests/chaos_e2e.rs` is `#[ignore]`d,
-so `cargo test --workspace --release` and `cargo llvm-cov --workspace`
-both skip it: the chaos suite contributes **zero** lines to the lcov and
-cannot move `coverage-ledger.toml` in either direction. That is the whole
-enforcement mechanism, and it costs nothing — if a product line is
-reachable only by killing the server mid-fold, the deterministic coverage
-run reports it uncovered and the gate demands a deterministic sibling
-test. (It would be unenforceable the other way round in any case: a
-SIGKILLed child never writes its `LLVM_PROFILE_FILE` profraw, so a killed
-process is invisible to coverage even under instrumentation.) The `chaos`
-CI job runs them with `-- --ignored` and no llvm-cov. A red run prints
+so `cargo test --workspace --release` skips it, and the `chaos` CI job
+runs it on its own with `-- --ignored`. A behaviour reachable only by
+killing the server mid-fold is one the ordinary suite never checks: give
+it a deterministic sibling test. A red chaos run prints
 `STRATUM_CHAOS_SEED=<n>` and the tail of the fault trace; re-running with
 that seed replays the same verdicts, request for request.
 
@@ -334,7 +190,7 @@ uses those exact URLs.
 That bug was in the product, not the test, and only the *inconsistent*
 failure pointed at it.
 
-A second worked example, this time in the harness. A coverage run failed
+A second worked example, this time in the harness. A slow instrumented run failed
 with `postgres never became ready` in one e2e test; the same suite passed
 alone, and passed on a re-run. Two hypotheses were named and one was
 eliminated by experiment: the disk was 92% full, so a release re-link
@@ -384,37 +240,21 @@ what made it deterministic.
 ## Habits that keep the gates green
 
 **Don't push half an increment.** A module nobody calls is not
-shippable, and both clippy (`dead_code`) and the coverage gate will say
-so. They are right. Either finish the slice — wire it up, test it
+shippable, and clippy (`dead_code`) will say so. It is right. Either finish the slice — wire it up, test it
 through its route — or keep it local until you can. A red commit on the
 branch costs a CI cycle and the next person's trust in the signal.
 
-**Split at the seam the gate points at.** When coverage says a function
-cannot be reached hermetically, that is usually a design note, not an
-obstacle. The origin probe was one function doing URL parsing, a security
-guard, a subprocess call and output classification; coverage could reach
-none of it without the internet. Split four ways, the guard is tested
+**Split at the seam the test points at.** When a function cannot be
+reached hermetically, that is usually a design note, not an obstacle.
+The origin probe was one function doing URL parsing, a security guard, a
+subprocess call and output classification; no test could reach any of
+it without the internet. Split four ways, the guard is tested
 exhaustively with no network at all, the subprocess path is tested
-against a real local repository the guard would correctly refuse, and only
-the three-line composition is exempt. That is a better design *and* an
-honest 100%.
+against a real local repository the guard would correctly refuse, and
+only the three-line composition is left untested. That is a better
+design *and* an honest suite.
 
 A guard whose tests need the internet is a guard that gets tested once.
-
-**Remap the ledger, do not re-derive it.** Editing a file shifts every
-entry below the edit, which the gate reports as a stale entry *plus* an
-unledgered line — the same exemption, twice, in two places. A large
-increment produces dozens.
-
-```sh
-python3 scripts/remap_ledger.py <last-green-commit> --dry-run
-python3 scripts/remap_ledger.py <last-green-commit>
-```
-
-It walks the diff and moves each entry to where its line went. Entries
-whose source line was deleted or rewritten are **dropped and named** —
-those need a decision. Pasting a plausible reason next to a line nobody
-looked at is precisely the failure the ledger exists to prevent.
 
 **Run the manual pass against a fully configured stack**, and build it
 with the script rather than by hand:
@@ -427,9 +267,9 @@ cd web/dashboard && BASE=http://127.0.0.1:8080 \
 scripts/manual-stack.sh down
 ```
 
-The `eval` is not optional. The walkthrough reads `RUNNER_BIN`,
-`RUNNER_ECS_URL` and `CI_RUNNER_URL` from the environment to decide
-whether the self-hosted, hosted-runner and CI stages can prove anything;
+The `eval` is not optional. The walkthrough reads `RUNNER_BIN` and
+`CI_RUNNER_URL` from the environment to decide whether the runner and CI
+stages can prove anything;
 without them each reports a **harness** problem rather than skipping,
 which is right — but the instructions the stack printed used to leave
 the `eval` out, so following them to the letter produced a red pass.
@@ -488,12 +328,12 @@ on the pinned Chromium. Pointing it at whichever Chrome a machine happens
 to have reintroduces exactly the "passes here, fails there" class that
 `workers: 1` is pinned to prevent.
 
-**Take the stack down before running `deploy-validation`.** Both bind
-`:8080` and `:2222`, so a running manual stack makes the deployment smoke
-test talk to the wrong server and fail at the first REST call with a bare
-404 — a failure that says nothing about what is actually wrong.
+**Take the stack down before running `deploy/smoke.sh` locally.** Both
+bind `:8080` and `:2222`, so a running manual stack makes the deployment
+smoke test talk to the wrong server and fail at the first REST call with
+a bare 404 — a failure that says nothing about what is actually wrong.
 
-It must have Postgres, MinIO, the built site and dashboard, *and* the SSH
+The stack must have Postgres, MinIO, the built dashboard, *and* the SSH
 front door (`STRATUM_SSH_BIND`, `STRATUM_SSH_HOST_KEY` — the PEM itself,
 not a path — and `STRATUM_SSH_PUBLIC_URL`). Without SSH the dashboard
 correctly hides the SSH clone row, and the pass silently becomes a
@@ -536,8 +376,6 @@ repo:
 - **Playwright, against a mocked API** — client methods passing
   `JSON.stringify(...)` as a request body that the transport then
   stringified again. Every team call would have arrived double-encoded.
-- **The coverage gate** — a module written and wired to nothing; a
-  duplicated membership guard left behind by an edit.
 - **The manual browser pass** — a per-repo grant that could not raise a
   personal token, only lower it; an authorization seam that ignored
   grants entirely, letting an admin held down to viewer still delete the
@@ -558,28 +396,16 @@ repo:
   `ca-certificates`, so every `git` over HTTPS from the server — the
   origin probe, mirror syncs, imports — failed certificate verification
   and the probe answered "not reachable" for a private repository that
-  should have read "looks private". Stripe kept working because the Rust
-  client bundles its own roots, so nothing looked wrong until a person
+  should have read "looks private". Nothing looked wrong until a person
   pasted a GitHub URL. `deploy/smoke.sh` now probes a public HTTPS origin
-  from inside the deployed container, in `deploy-validation` and after
-  every deploy; run against an image without the package it goes red
-  with production's exact sentence.
+  from inside the deployed container; run against an image without the
+  package it goes red with production's exact sentence.
 - **Reading the manual pass's tail rather than its head** — the change
   view stopped rendering "landing is blocked while a check is failing" in
   `0ceb3b4`; the walkthrough still waited for it, `step()` did not catch,
   and **every stage after the tenth stopped running** while the pass
   still looked like it was being run. `step()` now records a throwing
   stage as a problem and carries on, and the summary says how many threw.
-- **The manual GitHub-runner contract, on its first run** — the fake
-  gave every just-in-time runner the default labels `self-hosted`,
-  `linux` and `x64`; real GitHub attaches only the labels you register,
-  lowercased. The dispatcher registered with the size label alone, so
-  `runs-on: [self-hosted, weft]` — the form GitHub's own docs recommend
-  — would never have matched, and every such job would have sat queued
-  on GitHub for a day. Ten green e2e tests and a 0-problem intake could
-  not have found it: the fake was wrong in exactly the place the product
-  depended on it. The dispatcher now registers with the job's own label
-  list, and the fixture test holds the fake to the recorded answer.
 - **The manual mirror-push contract, on its first run** — under
   `--atomic`, the refs GitHub did *not* object to report
   `atomic transaction failed`. `classify` knew only `atomic push failed`
@@ -603,7 +429,6 @@ Every one of those is now held by a test.
 
 - [ ] `scripts/ci-local.sh` passes, and you have read what it **skipped**
 - [ ] every bug found along the way is fixed *and* pinned by a test
-- [ ] the coverage ledger has no entry you could not defend out loud
 - [ ] the manual browser pass reports 0 problems against a fully
       configured stack — **and no stage threw**. A stage that throws is
       one problem in the report and the run continues, but every stage
@@ -613,40 +438,13 @@ Every one of those is now held by a test.
       Checks tab, the land gate — `scripts/manual-ci.sh all` passes and
       you have read its NOTEs, and the walkthrough's `ci /` stages ran
       against a real local provider rather than skipping
-- [ ] if the change touches how a job is launched or stopped — the
-      dispatcher, `workflow/executor.rs`, the runner task definition, the
-      signal path — `scripts/manual-ecs.sh all` passes against a real
-      cluster under the dispatch credential, and `stop <task-arn>` has
-      been run once against a task running a real job. A run with no ARN
-      has not checked that `StopTask` stops anything
-- [ ] if the change touches billing — `stripe.rs`, the webhook, the plan
-      gates, org creation — `scripts/manual-stripe.sh all` passes under the
-      restricted test-mode key, `fixtures` has been run and the fixture
-      test is green on the recorded bodies
 - [ ] if the change touches forwarded pushes — `mirror/forward.rs`,
       `push.rs`, the REST doors' mirror branch, the `contents: write`
       permission, or the e2e hook's wording — `scripts/manual-mirror-push.sh
-      all` passes under the deployed App with a protected branch and a
+      all` passes under a real App installation with a protected branch and a
       denied installation, `fixtures` has been run, and the fixture test
       is green on the recorded bodies. A run without
       `STRATUM_GITHUB_PROTECTED_BRANCH` has not watched the atomic sibling
-- [ ] if the change touches GitHub runners — the `workflow_job` intake,
-      the dispatcher in `workers/github_runner.rs`, the `jitconfig`
-      route, `Dockerfile.github-runner`, or the App's permissions —
-      `scripts/manual-github-runners.sh all` passes under the deployed
-      App against a personal repository *and* an organisation
-      repository, `fixtures` has been run, and the fixture test is green
-      on the recorded bodies. A run without a real `runs-on: weft` job
-      has not checked that a runner ever took one
-- [ ] if the change touches the package registry — an adapter, the
-      admission policy, `registry_door.rs`, the blob or block path, the
-      runner's config files or its proxy — `scripts/manual-registry.sh all`
-      passes against a live stack and you have read its NOTEs; a stage
-      that NOTEd is a client this run did not check. If an upstream
-      document's shape may have moved, `fixtures` has been re-recorded
-      and committed. After the deploy, `registry-e2e.yml` is green on
-      the live fleet — the contract, the plan gate, and a Weft runner
-      job publishing all five, `docker push` included
 - [ ] if the change touches signing in with GitHub — the OAuth routes in
       `api/github_auth.rs`, `identities`, `verified_primary_email`, or
       the App's `Email addresses` permission —
@@ -660,9 +458,8 @@ Every one of those is now held by a test.
       against a live server
 - [ ] CI is green on the pushed commit before `main` moves
 - [ ] build artifacts cleaned up — `scripts/clean-build-artifacts.sh`
-      (`--deep` if you ran coverage or built the image). A full cycle
-      writes well over 30 GB and `cargo llvm-cov` keeps a second build
-      tree; leaving it there is how the next run hits "no space left on
+      (`--deep` if you built the image). A full cycle writes tens of GB;
+      leaving it there is how the next run hits "no space left on
       device" and gets misdiagnosed as a flaky test. See *Disk hygiene* in
       [`CONTRIBUTING.md`](CONTRIBUTING.md). Never clean while another
       build or agent is compiling against the same `target/`.

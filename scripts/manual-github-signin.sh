@@ -13,12 +13,14 @@
 # That is the exact shape of failure this repository has already paid
 # for twice. `get_page` classified a primary rate-limit refusal as a
 # permission denial because the fake always attached `Retry-After`, and
-# the test named for the case could not fail. The just-in-time runner
-# registered with the size label alone because the fake attached
-# GitHub's default labels and real GitHub attaches only what you ask
-# for; ten green e2e tests could not see it. A fake encodes what we
-# believe the provider does, and a suite built on a fake that is wrong
-# is green precisely where the product is broken.
+# the test named for the case could not fail. A forwarded mirror push
+# under `--atomic` reported every innocent sibling of a refused branch
+# as refused for its own reason, because the hermetic origin's hook
+# could not produce the phrase GitHub really sends
+# (`atomic transaction failed`); the assertion was loose enough to pass
+# against a phrase nothing emits. A fake encodes what we believe the
+# provider does, and a suite built on a fake that is wrong is green
+# precisely where the product is broken.
 #
 # So the beliefs this gate exists to check, all of them marked BELIEF in
 # `fake_github.rs`:
@@ -105,7 +107,7 @@
 # the part that cannot be automated — a token this script minted through
 # an API would be this script's grant, not a person's. `noperm` cannot
 # be claimed under a client that holds the permission and says so rather
-# than passing quietly, the same way `manual-github-runners.sh denied`
+# than passing quietly, the same way `manual-mirror-push.sh denied`
 # refuses to claim its case. Nothing here spends a rate-limit budget
 # worth worrying about.
 set -euo pipefail

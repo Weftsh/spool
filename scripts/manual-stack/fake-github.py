@@ -28,8 +28,6 @@ is a check the walkthrough really passes rather than one it steps around.
 whether GitHub has *proved* their primary address, which is the single
 fact the sign-in trusts when it skips our confirmation mail.
 """
-import base64
-import itertools
 import json
 import os
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -45,20 +43,22 @@ INSTALLATIONS = [
 
 # One installation's detail, as `GET /app/installations/{id}` answers it.
 # Mirrors `installation_json` in crates/stratum-testkit/src/fake_github.rs
-# exactly: 4001 is an organisation and 4002 a person, both holding what
-# the GitHub Actions runner feature needs; 4003 installed the App before
-# the feature existed and has not approved the new permissions, which is
-# how a real installation that predates a manifest change looks.
-FULL_PERMISSIONS = {"actions": "write", "administration": "write",
-                    "contents": "write", "issues": "read", "metadata": "read"}
-FULL_EVENTS = ["push", "workflow_job"]
+# exactly: 4001 is an organisation and 4002 a person, both holding
+# everything the App asks for today — `contents: write` being the one
+# that lets a push to a mirror be forwarded to its origin. 4003 and 4007
+# installed the App before it asked for that and have not approved the
+# change, which is how a real installation that predates a manifest
+# change looks.
+FULL_PERMISSIONS = {"actions": "read", "contents": "write", "issues": "read",
+                    "metadata": "read"}
 OLD_PERMISSIONS = {"actions": "read", "contents": "read", "issues": "read",
                    "metadata": "read"}
-OLD_EVENTS = ["push"]
+EVENTS = ["push"]
 INSTALLATION_DETAIL = {
     "4001": ("acme-inc", "Organization", True),
     "4002": ("ada", "User", True),
     "4003": ("noadmin-inc", "Organization", False),
+    "4007": ("prepush-inc", "Organization", False),
 }
 
 
@@ -68,16 +68,9 @@ def installation_json(id_, login, target_type, full):
         "account": {"login": login, "type": target_type},
         "target_type": target_type,
         "permissions": FULL_PERMISSIONS if full else OLD_PERMISSIONS,
-        "events": FULL_EVENTS if full else OLD_EVENTS,
+        "events": EVENTS,
         "suspended_at": None,
     }
-
-
-# Just-in-time runner ids, from 500 as the Rust fake's do.
-RUNNER_IDS = itertools.count(500)
-# Per-repository call counts for the alternating rate-limit refusals
-# below — the Rust fake's `refusals` counter, keyed the same way.
-RUNNER_CALLS = {}
 
 
 # The three sign-in code shapes, alongside the install flow's two.
@@ -118,10 +111,6 @@ def _fake_user(who):
     # these routes rather than 404ing into a walkthrough that reads the
     # miss as a product failure.
     return 900000 + sum(who.encode()), who, "verified"
-
-
-def b64(data):
-    return base64.b64encode(data).decode()
 
 
 REPOSITORIES = [
@@ -191,9 +180,6 @@ class H(BaseHTTPRequestHandler):
                 self._json(200, {"error": "bad_verification_code",
                                  "error_description": "The code passed is incorrect or expired."})
             return
-        if self.path.startswith("/repos/") and "/actions/" in self.path:
-            self._runners(self.path, body)
-            return
         if "/access_tokens" in self.path:
             if "/4006/" in self.path:
                 # GitHub not answering: the connection is dropped without
@@ -206,138 +192,6 @@ class H(BaseHTTPRequestHandler):
             )
             return
         self._json(404, {"message": "no such endpoint"})
-
-    def do_DELETE(self):
-        if self.path.startswith("/repos/") and "/actions/" in self.path:
-            self._runners(self.path, "")
-            return
-        self._json(404, {"message": "no such endpoint"})
-
-    def _runners(self, path, body):
-        """The self-hosted-runner routes: register a just-in-time runner,
-        remove one, cancel a run. A line-for-line mirror of `runners_route`
-        in crates/stratum-testkit/src/fake_github.rs — the two fakes must
-        agree, because a route taught to only one is a feature the other
-        gate cannot exercise (see the note on the issue routes below).
-
-        `noadmin/*` lacks `administration: write` and `noactionswrite/*`
-        lacks `actions: write`: a 403 WITH a budget still on it, which is
-        what tells a missing permission from the primary rate limit.
-        `private/*` answers 404 to a registration, as GitHub does for a
-        repository the installation cannot see. `ratelimited/*` and
-        `budgetspent/*` refuse every odd call with the secondary and the
-        primary limit respectively, so one pass sees both the refusal and
-        the recovery.
-        """
-        parts = urlparse(path).path[len("/repos/"):].strip("/").split("/")
-        if len(parts) < 4 or parts[2] != "actions":
-            self._json(404, {"message": "Not Found"})
-            return
-        owner, repo, kind, tail = parts[0], parts[1], parts[3], parts[4:]
-        if self.command == "POST" and kind == "runners" and tail == ["generate-jitconfig"]:
-            call = "jit"
-        elif self.command == "DELETE" and kind == "runners" and len(tail) == 1:
-            call = "delete"
-        elif self.command == "POST" and kind == "runs" and len(tail) == 2 and tail[1] == "cancel":
-            call = "cancel"
-        else:
-            self._json(404, {"message": "Not Found"})
-            return
-
-        if "ghs_" not in self.headers.get("authorization", ""):
-            self._json(401, {"message": "requires installation token"})
-            return
-
-        key = f"runners:{owner}/{repo}"
-        RUNNER_CALLS[key] = RUNNER_CALLS.get(key, 0) + 1
-        if RUNNER_CALLS[key] % 2 == 1:
-            if owner == "ratelimited":
-                self._json(403, {"message": "API rate limit exceeded"},
-                           {"Retry-After": "2", "X-RateLimit-Remaining": "0"})
-                return
-            if owner == "budgetspent":
-                import time
-                self._json(403, {"message": "API rate limit exceeded for installation ID 777."},
-                           {"X-RateLimit-Limit": "5000", "X-RateLimit-Remaining": "0",
-                            "X-RateLimit-Reset": str(int(time.time()) + 120)})
-                return
-
-        def denied(what):
-            self._json(403, {"message": f"Resource not accessible by integration ({what})"},
-                       {"X-RateLimit-Limit": "5000", "X-RateLimit-Remaining": "4999"})
-
-        def not_found():
-            self._json(404, {"message": "Not Found"})
-
-        if call == "jit":
-            if owner == "noadmin":
-                denied("administration: write")
-                return
-            if owner == "private":
-                not_found()
-                return
-            try:
-                req = json.loads(body) if body else {}
-            except ValueError:
-                req = {}
-            name = req.get("name") or ""
-            asked = [l for l in (req.get("labels") or []) if isinstance(l, str)]
-            # GitHub's 422s as the manual gate observed them (2026-09-07):
-            # a message and nothing else; a label with a space is accepted.
-            if not asked:
-                self._json(422, {"message": "Invalid request.\n\nInvalid property /labels: 1 item "
-                                            "required; only 0 were supplied.", "status": "422"})
-                return
-            if not name or not isinstance(req.get("runner_group_id"), int):
-                self._json(422, {"message": "Invalid request.\n\nInvalid property /name: required.",
-                                 "status": "422"})
-                return
-            long = next((l for l in asked if len(l) >= 256), None)
-            if long is not None:
-                self._json(422, {"message": f"Invalid Argument - Label '{long}' is not valid. Labels must "
-                                            "be less than 256 characters in length", "status": "422"})
-                return
-            runner_id = next(RUNNER_IDS)
-            # Exactly the labels asked for, lowercased — no defaults — as
-            # the real API answered the Rust fake's sibling.
-            labels = []
-            for l in (x.lower() for x in asked):
-                if l not in labels:
-                    labels.append(l)
-            labels_json = [{"id": 0, "name": l, "type": "read-only"} for l in labels]
-            runner_file = json.dumps({"agentName": name, "ephemeral": True}, separators=(",", ":"))
-            cfg = b64(json.dumps({".runner": b64(runner_file.encode())},
-                                 separators=(",", ":")).encode())
-            self._json(201, {
-                "runner": {"id": runner_id, "name": name, "os": "unknown",
-                           "status": "offline", "busy": False, "version": "2.337.0",
-                           "labels": labels_json, "runner_group_id": 1},
-                "encoded_jit_config": cfg,
-            })
-            return
-        if call == "delete":
-            if tail[0] == "0":
-                not_found()
-                return
-            if owner == "nodelete":
-                denied("administration: write (delete)")
-                return
-            self.send_response(204)
-            self.send_header("content-length", "0")
-            self.end_headers()
-            return
-        # cancel
-        if owner == "noactionswrite":
-            denied("actions: write")
-            return
-        if owner == "private":
-            not_found()
-            return
-        if tail[0] == "0":
-            # BELIEF: a run that is already over.
-            self._json(409, {"message": "Cannot cancel a workflow run that is completed."})
-            return
-        self._json(202, {})
 
     def do_GET(self):
         u = urlparse(self.path)
@@ -448,11 +302,11 @@ class H(BaseHTTPRequestHandler):
             # limit — as the Rust fake answers them.
             if inst_id == "4004":
                 self._json(403, {"message": "Resource not accessible by integration"},
-                           [("X-RateLimit-Limit", "5000"), ("X-RateLimit-Remaining", "4999")])
+                           {"X-RateLimit-Limit": "5000", "X-RateLimit-Remaining": "4999"})
                 return
             if inst_id == "4005":
                 self._json(403, {"message": "API rate limit exceeded"},
-                           [("Retry-After", "7"), ("X-RateLimit-Remaining", "0")])
+                           {"Retry-After": "7", "X-RateLimit-Remaining": "0"})
                 return
             detail = INSTALLATION_DETAIL.get(inst_id)
             if detail is None:
@@ -476,19 +330,6 @@ class H(BaseHTTPRequestHandler):
             ]
             self._json(200, {"total_count": len(repos), "repositories": repos})
             return
-        # One repository's public metadata, unauthenticated.
-        #
-        # The mirror path reads this to learn what the upstream says its
-        # star count is, so that a mirrored project can show "60.3k on
-        # GitHub" beside its own honest count here. Without this route
-        # the request 404s, `origin_stars` stays NULL, and the manual
-        # browser pass sees a mirror with no provenance at all — which
-        # is precisely the thing stars were built to demonstrate, absent
-        # from the one gate meant to look at it.
-        #
-        # 60300 is the number from the product argument: a migrated
-        # project's real reputation, shown separately and never summed
-        # with the handful of stars it honestly has here.
         # Issue-import routes, before the metadata route below — that one
         # matches anything after `/repos/`.
         #
@@ -548,7 +389,7 @@ class H(BaseHTTPRequestHandler):
             headers = {}
             last = max(1, -(-len(wanted) // per_page))
             if page < last:
-                base = f"http://127.0.0.1:{os.environ.get('FAKE_GITHUB_PORT', '59110')}"
+                base = f"http://127.0.0.1:{os.environ.get('FAKE_GITHUB_PORT', '29110')}"
                 headers["Link"] = (
                     f'<{base}/repos/{owner}/{repo}/{kind}?state={state}'
                     f'&per_page={per_page}&page={page + 1}>; rel="next"'
@@ -556,6 +397,14 @@ class H(BaseHTTPRequestHandler):
             self._json(200, body, headers)
             return
 
+        # One repository's public metadata, unauthenticated. The mirror
+        # path reads it for the default branch, the description and the
+        # upstream's own star count (kept as `origin_stars`); without the
+        # route that read 404s. Anything deeper under `/repos/` that no
+        # route above serves is a 404 too, as the Rust fake answers it —
+        # a repository body for `…/pulls` would be the worst answer
+        # available: a client looking for a list finds none and reports
+        # an empty project rather than an unserved route.
         if u.path.startswith("/repos/"):
             full_name = u.path[len("/repos/") :].strip("/")
             if full_name.count("/") != 1:
@@ -577,5 +426,5 @@ class H(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    port = int(os.environ.get("FAKE_GITHUB_PORT", "59110"))
+    port = int(os.environ.get("FAKE_GITHUB_PORT", "29110"))
     HTTPServer(("127.0.0.1", port), H).serve_forever()

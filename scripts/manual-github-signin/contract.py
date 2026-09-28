@@ -66,7 +66,7 @@ def get(url, token):
     req = urllib.request.Request(url, headers={
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
-        "User-Agent": "weft-manual-github-signin",
+        "User-Agent": "spool-manual-github-signin",
     })
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -86,7 +86,7 @@ def exchange(code, client_id=CLIENT_ID, client_secret=CLIENT_SECRET):
         f"{OAUTH}/login/oauth/access_token",
         data=body,
         headers={"Accept": "application/json",
-                 "User-Agent": "weft-manual-github-signin"},
+                 "User-Agent": "spool-manual-github-signin"},
     )
     try:
         with urllib.request.urlopen(req, timeout=20) as r:
@@ -362,9 +362,9 @@ def step_fixtures():
     }
     (FIXTURES / "provenance.json").write_text(json.dumps(prov, indent=2) + "\n")
     ok(f"wrote {FIXTURES}")
-    note("now add a fixture test that parses these the way the fake answers, "
-         "so the two cannot drift — see "
-         "`github_runner_fixtures_parse_like_the_fake` for the pattern.")
+    note("now run `cargo test -p stratum-server github_signin_fixtures_parse_like_the_fake` "
+         "(mirror/origin.rs): it parses these the way the fake answers, and goes red "
+         "the moment the recorded wire and the fake disagree.")
 
 
 STEPS = {

@@ -2,10 +2,11 @@
 # The stack the manual browser pass needs, brought up from nothing.
 #
 # CLAUDE.md requires the manual pass to run against a *fully configured*
-# deployment — Postgres, MinIO, the built site and dashboard, the SSH
-# front door, captured mail, and stand-ins for GitHub and Stripe — and
-# then gave no way to build one. So it got rebuilt by hand each time, and
-# each rebuild rediscovered the same four defects:
+# deployment — Postgres, MinIO, the built dashboard, the SSH front door,
+# captured mail, a stand-in for GitHub, a real CI provider on the other
+# end of the webhook, and a self-hosted runner binary for the workflow
+# stages — and then gave no way to build one. So it got rebuilt by hand
+# each time, and each rebuild rediscovered the same four defects:
 #
 #   * readiness loops that retried 60 times with no sleep between
 #     attempts, so a service that refuses the connection instantly burned
@@ -23,8 +24,6 @@
 #   scripts/manual-stack.sh up     # build it, seed it, print how to use it
 #   scripts/manual-stack.sh down   # stop everything
 #   scripts/manual-stack.sh env    # print the environment, for `eval`
-#   scripts/manual-stack.sh overage <org> <gb>|clear
-#                                  # put an org past its transfer pool, or undo it
 #
 # Everything lives under .stack/ and is disposable: `up` starts from an
 # empty database every time, because a manual pass against yesterday's
@@ -35,45 +34,31 @@ ROOT=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 RUN=${STRATUM_STACK_DIR:-$ROOT/.stack}
 FAKES=$ROOT/scripts/manual-stack
 
-PGPORT=${PGPORT:-55432}
-MINIOPORT=${MINIOPORT:-59000}
+# Every fixed port sits below 32768, outside Linux's default ephemeral
+# range (net.ipv4.ip_local_port_range, 32768-60999). These used to be
+# 55432, 59000, 59110 and 59120, inside it — and on a machine where test
+# suites are opening loopback connections by the thousand, the kernel
+# walks its outgoing local ports straight through them. A port an
+# outgoing socket (or its TIME_WAIT) holds is not LISTENing, so the
+# free-port check below cannot see it; docker then refused to publish
+# postgres with "address already in use" on a port nothing was serving.
+PGPORT=${PGPORT:-25432}
+MINIOPORT=${MINIOPORT:-29000}
 HTTPPORT=${HTTPPORT:-8080}
 SSHPORT=${SSHPORT:-2222}
-STRIPEPORT=${STRIPEPORT:-59100}
-# One secret, named once: the server verifies webhooks with it (via the
-# env file below) and the Stripe fake signs them with it. The fake was
-# first handed `$STRATUM_STRIPE_WEBHOOK_SECRET`, which only exists inside
-# the env file's heredoc — `set -u` stopped the stack at "fakes…".
-STRIPE_WEBHOOK_SECRET=${STRIPE_WEBHOOK_SECRET:-whsec_manual}
 PG_CONTAINER=${PG_CONTAINER:-stratum-stack-pg}
 MINIO_CONTAINER=${MINIO_CONTAINER:-stratum-stack-minio}
-GITHUBPORT=${GITHUBPORT:-59110}
+GITHUBPORT=${GITHUBPORT:-29110}
 # The miniature CI provider. Not a mock of one: it verifies our webhook
 # signature, clones with a real credential, runs the repository's own
 # ci.sh, and signs a verdict back into the intake. See
 # scripts/manual-stack/ci-runner.py.
-CIPORT=${CIPORT:-59120}
+CIPORT=${CIPORT:-29120}
 CI_REPO=${CI_REPO:-pipeline}
-# The ECS stand-in for hosted runners — deploy/fake-ecs/fake-ecs.py, the
-# same one deploy/compose.yml uses. It verifies the SigV4 the app signs
-# and starts the REAL runner image with the local docker daemon, so the
-# workflow stages drive the product's own dispatch path and nothing is
-# faked but the cloud. Without it the walkthrough would be looking at a
-# forge that cannot run CI of its own.
-ECSPORT=${ECSPORT:-59130}
-RUNNER_IMAGE=${RUNNER_IMAGE:-weft-runner:local}
-# The GitHub Actions runner image (Dockerfile.github-runner), started by
-# the same stand-in under a second task definition. The real agent cannot
-# finish a job without GitHub on the other end, so what the stack proves
-# for it is the launch: the dispatcher's RunTask has the shape the image
-# reads, and the container collects its registration from this server.
-GITHUB_RUNNER_IMAGE=${GITHUB_RUNNER_IMAGE:-weft-github-runner:local}
+# The repository the workflow and self-hosted-runner stages push
+# `.weft/ci.yml` into. Seeded with a README and no workflow, because
+# pushing the workflow is the thing being tested.
 WF_REPO=${WF_REPO:-builds}
-# Matches deploy/compose.yml. Not a secret: the fake checks the signature
-# with it, so a signer that drifts from AWS fails here rather than in
-# production, and it authorises nothing else anywhere.
-DISPATCH_KEY_ID=AKIALOCALDISPATCH
-DISPATCH_SECRET=local-dispatch-secret-not-a-real-key
 BUCKET=stratum
 PASSWORD="a long enough password"
 
@@ -96,7 +81,7 @@ wait_for() { # wait_for <name> <logfile> <command...>
 }
 
 stop_all() {
-  for p in server ci-runner fake-ecs stripe github minio pg; do
+  for p in server ci-runner github minio pg; do
     if [ -f "$RUN/$p.pid" ]; then
       kill "$(cat "$RUN/$p.pid")" 2>/dev/null || true
       rm -f "$RUN/$p.pid"
@@ -106,27 +91,22 @@ stop_all() {
   # names the wrapper rather than the server itself.
   pkill -f "postgres -D $RUN/pgdata" 2>/dev/null || true
   pkill -f "minio server $RUN/miniodata" 2>/dev/null || true
-  if command -v docker > /dev/null 2>&1; then
+  # A self-hosted runner the walkthrough started and did not get to stop
+  # (a pass interrupted mid-way). It would take the next pass's first job
+  # under a name that pass never registered.
+  pkill -f "weft-runner run --dir .*walk-runner-" 2>/dev/null || true
+  if command -v docker > /dev/null 2>&1 && docker info > /dev/null 2>&1; then
     docker rm -f "$PG_CONTAINER" "$MINIO_CONTAINER" > /dev/null 2>&1 || true
-    # Runner tasks the stand-in started. It deliberately does NOT use
-    # `docker run --rm` — a task that died is the one whose stderr you
-    # want — so a stopped runner outlives the process that started it and
-    # has to be cleared by label, exactly as scripts/ci-local.sh does.
-    docker ps -aq --filter label=stratum.fake-ecs \
-      | xargs -r docker rm -f > /dev/null 2>&1 || true
   fi
   # Wait for the listeners to actually go, rather than sleeping and
   # hoping. `kill` returns as soon as the signal is delivered, and a
   # docker port publisher outlives the container by a moment, so `down`
   # used to hand back a stack whose ports were still bound. Whatever ran
-  # next — `up` again, or deploy-validation, which wants the same 8080
-  # and 2222 — then failed on a port it had every reason to think was
-  # free, and the error said nothing about why.
-  # Every port this stack binds, not just the four the deployment smoke
-  # test also wants. `up` binds the fakes' ports too, and a `down`
-  # followed immediately by an `up` raced them exactly the same way.
+  # next — `up` again, or a deployment smoke test that wants the same
+  # 8080 and 2222 — then failed on a port it had every reason to think
+  # was free, and the error said nothing about why.
   wait_ports_free "$HTTPPORT" "$SSHPORT" "$PGPORT" "$MINIOPORT" \
-    "$STRIPEPORT" "$GITHUBPORT" "$CIPORT" "$ECSPORT"
+    "$GITHUBPORT" "$CIPORT"
 }
 
 # True while anything is listening on $1.
@@ -164,11 +144,18 @@ wait_ports_free() {
   done
 }
 
+# An S3 request signed as the stack's MinIO root, through curl's own
+# SigV4 — no SDK, no `mc`. Prints the HTTP status.
+s3() { # s3 <method> <path>
+  curl -s -o /dev/null -w '%{http_code}' -X "$1" \
+    --aws-sigv4 "aws:amz:us-east-1:s3" --user minioadmin:minioadmin \
+    "http://127.0.0.1:$MINIOPORT$2"
+}
+
 write_env() {
   # No backticks anywhere in this heredoc: it is unquoted, so a
   # backtick is command substitution and a comment mentioning one
-  # gets *run* — which is where the "weft.localhost: command not
-  # found" noise on every `up` came from.
+  # gets *run*.
   cat > "$RUN/env.sh" <<ENV
 export AWS_ACCESS_KEY_ID=minioadmin
 export AWS_SECRET_ACCESS_KEY=minioadmin
@@ -176,14 +163,11 @@ export AWS_REGION=us-east-1
 export STRATUM_DB_URL="postgres://stratum@127.0.0.1:$PGPORT/stratum"
 export STRATUM_STORE_URL="http://127.0.0.1:$MINIOPORT/$BUCKET"
 export STRATUM_DATA_DIR="$RUN/data"
-export STRATUM_SITE_DIR="$ROOT/web/site/dist"
 export STRATUM_DASHBOARD_DIR="$ROOT/web/dashboard/dist"
-# Loopback normally. When hosted runners are up the server has to be
-# reachable from inside a runner *container*, and a container's own
-# 127.0.0.1 is the container — so the bind widens to every interface and
-# the runner is handed a host-gateway address below. The published URL
-# stays loopback either way: that is what a person types.
-export STRATUM_BIND="$BINDADDR:$HTTPPORT"
+# Loopback only. Nothing in this stack runs in a container that would
+# need to reach the server from outside the host: the self-hosted runner
+# is a native process, the way a customer runs it.
+export STRATUM_BIND="127.0.0.1:$HTTPPORT"
 export STRATUM_PUBLIC_URL="http://127.0.0.1:$HTTPPORT"
 export STRATUM_WEBHOOK_SECRET="manual-stack-secret"
 # The SSH front door. Without it the dashboard correctly hides the SSH
@@ -191,130 +175,46 @@ export STRATUM_WEBHOOK_SECRET="manual-stack-secret"
 export STRATUM_SSH_BIND="127.0.0.1:$SSHPORT"
 export STRATUM_SSH_HOST_KEY="\$(cat "$RUN/host-key")"
 export STRATUM_SSH_PUBLIC_URL="ssh://git@127.0.0.1:$SSHPORT"
-# Customer sites, on their own domain. Without it the settings panel
-# correctly reports no address and the pass becomes a walkthrough of a
-# product that does not host sites.
-#
-# weft.localhost rather than plain localhost for two reasons that
-# both matter. The server refuses a sites domain with no dot in it,
-# because a suffix match on a bare name would claim the product's own
-# hostnames as customer sites. And RFC 6761 makes every name under
-# .localhost loopback, which macOS and Chrome both honour at any
-# depth, so docs--acme.weft.localhost reaches this stack with no
-# hosts file and no DNS. (No backticks in this comment: it sits inside
-# an unquoted heredoc, where a backtick is a command substitution and
-# printed "weft.localhost: command not found" four times per start.)
-# That is what lets the browser pass drive a real site rather than a
-# mocked one.
-export STRATUM_SITES_DOMAIN="weft.localhost"
 # Mail to a directory, so the pass opens an invitation the way the person
 # it was sent to does.
 export STRATUM_MAIL_TRANSPORT="capture"
 export STRATUM_MAIL_FROM="no-reply@stratum.test"
 export STRATUM_MAIL_DIR="$RUN/mail"
-export STRATUM_STRIPE_KEY="sk_test_manual"
-export STRATUM_STRIPE_BASE="http://127.0.0.1:$STRIPEPORT"
-export STRATUM_STRIPE_PRICE="price_seat"
-export STRATUM_STRIPE_WEBHOOK_SECRET="$STRIPE_WEBHOOK_SECRET"
-# The metered prices and the meters they report to, so the stack meters
-# use past the pool the way production does. The ids are the fake's;
-# scripts/manual-stripe.sh meters mints real ones in a sandbox.
-export STRATUM_STRIPE_PRICE_MINUTES="price_minutes"
-export STRATUM_STRIPE_PRICE_EGRESS="price_egress"
-export STRATUM_STRIPE_PRICE_STORAGE="price_storage"
-export STRATUM_STRIPE_METER_MINUTES="weft_hosted_minutes"
-export STRATUM_STRIPE_METER_EGRESS="weft_private_egress_mb"
-export STRATUM_STRIPE_METER_STORAGE="weft_private_storage_mb_days"
-export STRATUM_STRIPE_PRICE_PACKAGES="price_packages"
-export STRATUM_STRIPE_METER_PACKAGES="weft_private_packages_mb_days"
-# Fold and report every twenty seconds rather than every fifteen
-# minutes, so a person watching the fake's page sees the meter events a
-# clone produced before they have finished reading the billing screen.
-export STRATUM_BILLING_ROLLUP_SECS="20"
-export STRATUM_STORAGE_SWEEP_SECS="20"
 # A GitHub App pointed at the local fake, and a git base that is a
-# directory of bare repositories — so mirroring fetches from disk and no
-# packet leaves this machine.
+# directory of bare repositories — so mirroring fetches from disk, a
+# push to a mirror is forwarded to disk, and no packet leaves this
+# machine.
 export STRATUM_GITHUB_APP_ID="12345"
 export STRATUM_GITHUB_APP_KEY_PEM="$RUN/gh-app-key.pem"
 export STRATUM_GITHUB_API_BASE="http://127.0.0.1:$GITHUBPORT"
 export STRATUM_GITHUB_GIT_BASE="file://$RUN/origins"
 export STRATUM_GITHUB_INSTALL_URL="http://127.0.0.1:$GITHUBPORT/apps/stratum/installations/new"
 # The App's OAuth client, so the install callback proves the installer
-# controls the installation — the fake exchanges any code_owning_ code
-# followed by the installation id. (No angle brackets in this heredoc:
-# bash 3.2 reads them as redirections inside a command substitution.)
+# controls the installation and GitHub sign-in has a client to use — the
+# fake exchanges any code_owning_ code followed by the installation id.
+# (No angle brackets in this heredoc: bash 3.2 reads them as
+# redirections inside a command substitution.)
 export STRATUM_GITHUB_CLIENT_ID="Iv1.fake"
 export STRATUM_GITHUB_CLIENT_SECRET="fake-client-secret"
 export STRATUM_GITHUB_OAUTH_BASE="http://127.0.0.1:$GITHUBPORT"
-# The local CI provider and the repository it watches. The walkthrough
-# reads these to drive the loop; without them its CI stages report a
-# missing prerequisite rather than passing quietly, the same way a
-# missing SSH URL does.
-export CI_RUNNER_URL="http://127.0.0.1:$CIPORT"
-export CI_RUNNER_REPO="$CI_REPO"
-# What the manual gates read. scripts/manual-registry.sh documents
-# eval of this output as the way to get BASE and WEFT_TOKEN, and until
-# now env set neither — so following those instructions to the letter
-# got "BASE is not set", and an operator had to guess the port and go
-# looking for the token file. Same class as the missing eval in the
-# walkthrough instructions: a prerequisite you have to reconstruct is
-# one that gets reconstructed wrongly.
-#
-# No backticks in this block. The heredoc is unquoted, so a backtick is
-# command substitution and the comment would run.
-#
-# The token read is escaped on purpose, so it happens when the caller
-# evals this file rather than when the file is written: write_env runs
-# three seconds before bootstrap mints the token, so baking the value in
-# captured the *previous* stack's token and every call 401d.
-export BASE="http://127.0.0.1:$HTTPPORT"
-export WEFT_TOKEN="\$(cat "$RUN/token" 2>/dev/null)"
-ENV
-  # Hosted runners, only when the stand-in is actually up. These are the
-  # same variables the terraform root passes the real service, with the
-  # ECS endpoint pointed at deploy/fake-ecs — see deploy/compose.yml,
-  # which configures the app identically.
-  #
-  # Written conditionally rather than always: an app configured with an
-  # ECS endpoint that nothing is listening on would queue every job and
-  # report nothing, which reads as the product being broken.
-  if [ "$RUNNER_OK" = 1 ]; then
-    cat >> "$RUN/env.sh" <<ENV
-export STRATUM_RUNNER_ECS_CLUSTER="local"
-export STRATUM_RUNNER_ECS_TASK_DEFINITION="weft-runner-local"
-$( [ "$GITHUB_RUNNER_OK" = 1 ] && echo '# The GitHub Actions runner family, on the same stand-in. Written only
-# when its image exists: absent, the server treats GitHub runners as a
-# feature this deployment does not have and refuses the launch, which
-# is the honest state rather than a task that fails to start.
-export STRATUM_RUNNER_ECS_GITHUB_TASK_DEFINITION="weft-gh-runner-local"' )
-export STRATUM_RUNNER_ECS_SUBNETS="subnet-local"
-export STRATUM_RUNNER_ECS_SECURITY_GROUP="sg-local"
-export STRATUM_RUNNER_ECS_URL="http://127.0.0.1:$ECSPORT"
-export STRATUM_RUNNER_AWS_ACCESS_KEY_ID="$DISPATCH_KEY_ID"
-export STRATUM_RUNNER_AWS_SECRET_ACCESS_KEY="$DISPATCH_SECRET"
-export STRATUM_RUNNER_AWS_REGION="us-east-1"
-# Where a runner reaches this server, and where it is told to clone from
-# (the server derives clone_url from this, not from STRATUM_PUBLIC_URL).
-# host.docker.internal is the docker host as seen from a container.
-export STRATUM_RUNNER_URL="http://$RUNNER_HOST:$HTTPPORT"
 # 5s is the production default and makes every workflow stage of the
 # manual pass wait on a poll it does not care about.
 export STRATUM_RUNNER_POLL_SECS="1"
-# The same budget and ceiling the reference deployment ships
-# (deploy/compose.yml, deploy/terraform/variables.tf). Unset, the
-# binary meters nothing, the billing page has no minutes panel, and the
-# walkthrough's minutes stage asserts nothing — a pass of a product
-# that is not the one we deploy.
-export STRATUM_RUNNER_MINUTES_PER_MONTH="2000"
-export STRATUM_RUNNER_MAX_TIMEOUT_MINUTES="360"
-# The walkthrough is what the stack exists for, and its workflow stages
-# read these the way the CI stages read CI_RUNNER_URL: present means
-# "prove the loop", absent means "say the stack is half-configured".
-export RUNNER_ECS_URL="http://127.0.0.1:$ECSPORT"
+# The local CI provider and the repository it watches, and the
+# repository the workflow stages push to. The walkthrough reads these to
+# drive the loops; without them its stages report a missing prerequisite
+# rather than passing quietly, the same way a missing SSH URL does.
+export CI_RUNNER_URL="http://127.0.0.1:$CIPORT"
+export CI_RUNNER_REPO="$CI_REPO"
 export RUNNER_WF_REPO="$WF_REPO"
+# Where the stack is and an org admin token for poking it by hand. The
+# token read is escaped on purpose, so it happens when the caller evals
+# this file rather than when the file is written: write_env runs before
+# bootstrap mints the token, so baking the value in captured the
+# *previous* stack's token and every call 401d.
+export BASE="http://127.0.0.1:$HTTPPORT"
+export STACK_TOKEN="\$(cat "$RUN/token" 2>/dev/null)"
 ENV
-  fi
   # The self-hosted stages start the REAL runner binary on this machine,
   # from the command Settings → Runners shows. It is the one piece of
   # this stack a customer runs themselves, so it runs here the way it
@@ -328,65 +228,23 @@ ENV
 
 cmd_env() { [ -f "$RUN/env.sh" ] || die "no stack — run: scripts/manual-stack.sh up"; cat "$RUN/env.sh"; }
 
-# Put an organization past its transfer pool, honestly: a row in the
-# same `metrics_minute` table a real clone writes, against one of the
-# org's private repositories, for as many gigabytes as asked. The
-# billing view, the clone door and the rollup all read that table, so
-# what the walkthrough then sees is the product at the cap, not a
-# mocked answer. `count = 0` marks the row as seeded — a served request
-# always counts at least one — and `clear` deletes exactly those rows.
-# Three seats at the stack's 10 GB is a 30 GB pool; 40 crosses it.
-cmd_overage() {
-  [ -f "$RUN/env.sh" ] || die "no stack — run: scripts/manual-stack.sh up"
-  local org=${1:-} what=${2:-}
-  [ -n "$org" ] && [ -n "$what" ] || die "usage: manual-stack.sh overage <org> <gb>|clear"
-  local sql
-  if [ "$what" = clear ]; then
-    sql="DELETE FROM metrics_minute WHERE count = 0 AND kind = 'clone' AND repo_id IN \
-           (SELECT r.id FROM repos r JOIN orgs o ON o.id = r.org_id WHERE o.name = '$org');"
-  else
-    case "$what" in *[!0-9]*|'') die "gb must be a whole number, or 'clear'";; esac
-    sql="INSERT INTO metrics_minute (repo_id, minute, kind, count, bytes, ms_sum, histogram) \
-           SELECT r.id, (extract(epoch from now()) * 1000)::bigint / 60000, 'clone', 0, \
-                  ${what}::bigint * 1073741824, 0, '{}' \
-           FROM repos r JOIN orgs o ON o.id = r.org_id \
-           WHERE o.name = '$org' AND r.public = false ORDER BY r.name LIMIT 1;"
-  fi
-  local out
-  if command -v docker > /dev/null 2>&1 && [ -n "$(docker ps -q -f "name=^${PG_CONTAINER}\$")" ]; then
-    out=$(docker exec "$PG_CONTAINER" psql -U stratum -d stratum -v ON_ERROR_STOP=1 -t -c "$sql")
-  else
-    local psql
-    psql=$(command -v psql || true)
-    [ -n "$psql" ] || for cand in /usr/lib/postgresql/*/bin /opt/homebrew/opt/postgresql@*/bin /usr/local/opt/postgresql@*/bin; do
-      [ -x "$cand/psql" ] && psql="$cand/psql"
-    done
-    [ -n "$psql" ] || die "no psql on PATH and no $PG_CONTAINER container"
-    out=$("$psql" -h 127.0.0.1 -p "$PGPORT" -U stratum -d stratum -v ON_ERROR_STOP=1 -t -c "$sql")
-  fi
-  # psql's tag says how many rows moved; an org with no private
-  # repository seeds nothing, and that has to be said rather than left
-  # for the walkthrough to discover as "the clone was not refused".
-  case "$out" in
-    *"INSERT 0 0"*) die "$org has no private repository to record transfer against" ;;
-  esac
-  if [ "$what" = clear ]; then
-    say "overage cleared for $org ($(echo "$out" | tr -d '\n'))"
-  else
-    say "$org: $what GB of transfer recorded against its first private repository"
-  fi
-}
-
 cmd_down() { stop_all; say "stack down"; }
 
 cmd_up() {
   command -v git >/dev/null || die "git is required"
+  command -v lsof >/dev/null || die "lsof is required (to tell a free port from a held one)"
+  command -v openssl >/dev/null || die "openssl is required (the fake GitHub App's key)"
+  # The SSH host key, and the walkthrough's own client key and clone, all
+  # need OpenSSH. Said here rather than discovered as an empty host key
+  # and a server that will not start its SSH door.
+  command -v ssh-keygen >/dev/null && command -v ssh >/dev/null \
+    || die "the OpenSSH client (ssh, ssh-keygen) is required — e.g. apt-get install openssh-client"
   # Docker first, and by default. postgres and minio on the host needed a
   # Debian layout, a `postgres` system user, and root to `su` to it —
   # three assumptions that hold on the CI image and on nothing else, so
   # the stack simply would not come up on a development machine. The
   # containers need none of them, which is also how the product is
-  # actually deployed. Set STRATUM_STACK_NO_DOCKER=1 to force the old path.
+  # actually deployed. Set STRATUM_STACK_NO_DOCKER=1 to force the host path.
   USE_DOCKER=0
   if [ -z "${STRATUM_STACK_NO_DOCKER:-}" ] && command -v docker > /dev/null 2>&1 \
      && docker info > /dev/null 2>&1; then
@@ -420,15 +278,44 @@ cmd_up() {
     [ -n "$pgbin" ] && [ -x "$pgbin/initdb" ] || die \
       "no PostgreSQL binaries found, and no docker daemon to run one in.
 Start Docker, or set STRATUM_PG_BIN_DIR / put initdb on PATH."
+    # The host path runs postgres as its own uid, through `su`.
+    id postgres > /dev/null 2>&1 || die \
+      "no docker daemon, and no 'postgres' user to run the host PostgreSQL as.
+Start Docker, or create the user (the Debian postgresql package does)."
+    [ "$(id -u)" = 0 ] || die \
+      "no docker daemon, and the host PostgreSQL path needs root to su to 'postgres'.
+Start Docker, or run as root."
   fi
-  # Only the host path needs a binary. Under docker the stack runs
-  # `quay.io/minio/minio` and never looks at `.testkit/bin` — so this
-  # check, which was not guarded the way the PostgreSQL one above it is,
-  # refused to start a stack it was fully able to run. On macOS it could
-  # never be satisfied at all: MinIO publishes no darwin binary any more
-  # (see scripts/fetch-minio.sh), so the advice to "run the test suite
-  # once to fetch it" named a fetch that cannot succeed.
-  if [ "$USE_DOCKER" = 0 ]; then
+  # MinIO: the pinned image under docker, the pinned binary otherwise —
+  # the same release `.minio-version` pins for the test harness, so the
+  # pass and the suite are not talking to two different stores.
+  #
+  # A daemon that answers is not a daemon that can pull. One whose
+  # registry access is broken (a proxy it was not told about, quay.io
+  # refusing the manifest HEAD with a 401) used to stop the stack at
+  # "minio…" after postgres was already up; with a host binary on hand it
+  # runs that instead and says so. On macOS the host binary can never be
+  # had: MinIO publishes no darwin build any more (scripts/fetch-minio.sh).
+  local minio_release minio_image pull_log
+  minio_release=$(tr -d '[:space:]' < "$ROOT/.minio-version")
+  minio_image="quay.io/minio/minio:$minio_release"
+  MINIO_HOST=1
+  if [ "$USE_DOCKER" = 1 ]; then
+    pull_log=$(mktemp)
+    if docker image inspect "$minio_image" > /dev/null 2>&1 \
+       || docker pull -q "$minio_image" > "$pull_log" 2>&1; then
+      MINIO_HOST=0
+    elif [ -x "$ROOT/.testkit/bin/minio" ]; then
+      say "minio: docker could not pull $minio_image ($(tail -1 "$pull_log" | cut -c1-120))"
+      say "  running .testkit/bin/minio on the host instead"
+    else
+      die "docker could not pull $minio_image, and there is no .testkit/bin/minio to fall back to:
+$(tail -3 "$pull_log")
+Fix the daemon's registry access, or run scripts/fetch-minio.sh (Linux)."
+    fi
+    rm -f "$pull_log"
+  fi
+  if [ "$MINIO_HOST" = 1 ]; then
     [ -x "$ROOT/.testkit/bin/minio" ] || die \
       "no minio at .testkit/bin/minio, and no docker daemon to run one in.
 Start Docker, or run scripts/fetch-minio.sh."
@@ -440,17 +327,25 @@ Start Docker, or run scripts/fetch-minio.sh."
   elif [ -x "$ROOT/target/debug/stratum-server" ]; then
     bin=$ROOT/target/debug/stratum-server
   else
-    die "no server binary — run: cargo build --release -p stratum-server"
+    die "no server binary — run: cargo build --release -p stratum-server -p stratum-runner"
   fi
-  for d in web/site/dist web/dashboard/dist; do
-    [ -d "$ROOT/$d" ] || die "no $d — run: (cd ${d%/dist} && npm ci && npm run build)"
-  done
-  # The runner binary for self-hosted runners, same pick as the server:
-  # release when it is there, debug otherwise, and said out loud when
-  # it is stale next to the server — the walkthrough's self-hosted
-  # stages then test a runner the server was not built with.
+  # Both browser gates read dist, not src: a source edit with no build
+  # behind it is tested against the previous bundle.
+  [ -f "$ROOT/web/dashboard/dist/index.html" ] \
+    || die "no web/dashboard/dist — run: (cd web/dashboard && npm ci && npm run build)"
+  if [ -n "$(find "$ROOT/web/dashboard/src" -newer "$ROOT/web/dashboard/dist/index.html" -print -quit)" ]; then
+    say "dashboard: web/dashboard/dist is older than web/dashboard/src — the pass will"
+    say "  test the previous bundle. Rebuild: (cd web/dashboard && npm run build)"
+  fi
+  # The runner binary for self-hosted runners, picked from the same
+  # profile as the server — a release server next to a debug runner from
+  # last week is two different builds of the product — and said out loud
+  # when it is stale against its own sources.
   RUNNER_BIN=
-  for cand in "$ROOT/target/release/weft-runner" "$ROOT/target/debug/weft-runner"; do
+  local profile
+  profile=$(basename "$(dirname "$bin")")
+  for cand in "$ROOT/target/$profile/weft-runner" "$ROOT/target/release/weft-runner" \
+              "$ROOT/target/debug/weft-runner"; do
     if [ -x "$cand" ]; then RUNNER_BIN=$cand; break; fi
   done
   if [ -z "$RUNNER_BIN" ]; then
@@ -468,36 +363,39 @@ Start Docker, or run scripts/fetch-minio.sh."
   stop_all
   # A port another run still holds is fatal, not a warning. `up` used to
   # print "still in use", start its own fakes — which failed to bind,
-  # silently — and hand the pass a stack whose Stripe, GitHub, CI and
-  # ECS were somebody else's, hours old and watching a server that was
-  # gone. The ci stages then failed on a provider that "never reported",
-  # which read as a product bug and was three leftover Python processes.
+  # silently — and hand the pass a stack whose GitHub and CI were
+  # somebody else's, hours old and watching a server that was gone. The
+  # ci stages then failed on a provider that "never reported", which
+  # read as a product bug and was leftover Python processes.
   ports_free_or_die "$HTTPPORT" "$SSHPORT" "$PGPORT" "$MINIOPORT" \
-    "$STRIPEPORT" "$GITHUBPORT" "$CIPORT" "$ECSPORT"
-  rm -rf "$RUN/pgdata" "$RUN/miniodata" "$RUN/data" "$RUN/mail" "$RUN/ci-work"
-  # `$RUN/miniodata/$BUCKET` is the bucket: the filesystem backend takes
-  # each top-level directory as one, and it is made before minio starts
-  # so it is there the first time the server writes.
+    "$GITHUBPORT" "$CIPORT"
+  rm -rf "$RUN/pgdata" "$RUN/miniodata" "$RUN/data" "$RUN/mail" "$RUN/ci-work" "$RUN/origins"
+  # `$RUN/miniodata/$BUCKET` is made before minio starts so it is there
+  # the first time the server writes; the bucket is then *proved* over
+  # the S3 API below, rather than assumed from a directory.
   mkdir -p "$RUN/pgdata" "$RUN/miniodata/$BUCKET" "$RUN/data" "$RUN/mail" "$RUN/logs" \
            "$RUN/origins" "$RUN/ci-work"
 
   # postgres runs under its own uid, so every directory on the way down
   # to PGDATA has to be traversable by it — not just PGDATA itself.
-  local anc=$RUN
-  while [ "$anc" != "/" ]; do
-    chmod o+x "$anc" 2>/dev/null || true
-    anc=$(dirname "$anc")
-  done
+  if [ "$USE_DOCKER" = 0 ]; then
+    local anc=$RUN
+    while [ "$anc" != "/" ]; do
+      chmod o+x "$anc" 2>/dev/null || true
+      anc=$(dirname "$anc")
+    done
+  fi
 
   # Credentials, generated rather than committed. A private key in a
   # repository is a private key somebody will eventually reuse.
-  [ -f "$RUN/host-key" ] || ssh-keygen -t ed25519 -N "" -C manual-stack -f "$RUN/host-key" >/dev/null
+  [ -f "$RUN/host-key" ] || ssh-keygen -q -t ed25519 -N "" -C manual-stack -f "$RUN/host-key"
   [ -f "$RUN/gh-app-key.pem" ] || openssl genrsa -out "$RUN/gh-app-key.pem" 2048 2>/dev/null
 
-  # Origins for the mirror flow to fetch from, over file://.
+  # Origins for the mirror flow to fetch from, and forward pushes to,
+  # over file://. Rebuilt every time with the rest of the stack: a push
+  # through the mirror lands here, and yesterday's pushes are yesterday's.
   for name in acme-inc/widget acme-inc/atlas; do
     local bare=$RUN/origins/$name.git
-    [ -d "$bare" ] && continue
     mkdir -p "$(dirname "$bare")"
     local work=$RUN/origins/.build
     rm -rf "$work"; mkdir -p "$work"
@@ -523,121 +421,57 @@ Start Docker, or run scripts/fetch-minio.sh."
     wait_for postgres "$RUN/logs/pg.log" \
       docker exec "$PG_CONTAINER" pg_isready -U stratum -q
 
+  else
+    say "postgres…"
+    chown -R postgres:postgres "$RUN/pgdata"
+    # `-s /bin/sh`: the postgres account's own shell may be nologin, and
+    # `su` then refuses with "This account is currently not available".
+    su -s /bin/sh postgres -c "$pgbin/initdb -D $RUN/pgdata -U stratum -A trust --no-sync" \
+      > "$RUN/logs/initdb.log" 2>&1 || { tail -5 "$RUN/logs/initdb.log" >&2; exit 1; }
+    su -s /bin/sh postgres -c "$pgbin/postgres -D $RUN/pgdata -p $PGPORT -k $RUN/pgdata -c listen_addresses=127.0.0.1" \
+      > "$RUN/logs/pg.log" 2>&1 &
+    echo $! > "$RUN/pg.pid"
+    wait_for postgres "$RUN/logs/pg.log" "$pgbin/pg_isready" -h 127.0.0.1 -p "$PGPORT" -q
+    "$pgbin/createdb" -h 127.0.0.1 -p "$PGPORT" -U stratum stratum
+  fi
+
+  if [ "$MINIO_HOST" = 0 ]; then
     say "minio… (container)"
-    # $RUN/miniodata is bind-mounted, so the bucket directory made above
-    # is present before minio starts — the filesystem backend takes each
-    # top-level directory as a bucket, and creating it afterwards is what
-    # used to make the first repo write 404.
     docker run -d --name "$MINIO_CONTAINER" \
       -p "127.0.0.1:$MINIOPORT:9000" \
       -e MINIO_ROOT_USER=minioadmin -e MINIO_ROOT_PASSWORD=minioadmin \
       -e MINIO_BROWSER=off \
       -v "$RUN/miniodata:/data" \
-      quay.io/minio/minio server /data --address ":9000" > /dev/null
+      "$minio_image" server /data --address ":9000" > /dev/null
     docker logs -f "$MINIO_CONTAINER" > "$RUN/logs/minio.log" 2>&1 &
-    # /health/ready, not /health/live: liveness turns 200 before the S3
-    # API is serving, which is how the bucket write right after it used
-    # to fail.
-    wait_for minio "$RUN/logs/minio.log" \
-      curl -fsS "http://127.0.0.1:$MINIOPORT/minio/health/ready"
   else
-    say "postgres…"
-    chown -R postgres:postgres "$RUN/pgdata"
-    su postgres -c "$pgbin/initdb -D $RUN/pgdata -U stratum -A trust --no-sync" \
-      > "$RUN/logs/initdb.log" 2>&1 || { tail -5 "$RUN/logs/initdb.log" >&2; exit 1; }
-    su postgres -c "$pgbin/postgres -D $RUN/pgdata -p $PGPORT -k $RUN/pgdata -c listen_addresses=127.0.0.1" \
-      > "$RUN/logs/pg.log" 2>&1 &
-    echo $! > "$RUN/pg.pid"
-    wait_for postgres "$RUN/logs/pg.log" "$pgbin/pg_isready" -h 127.0.0.1 -p "$PGPORT" -q
-    "$pgbin/createdb" -h 127.0.0.1 -p "$PGPORT" -U stratum stratum
-
     say "minio…"
-    MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin \
+    MINIO_ROOT_USER=minioadmin MINIO_ROOT_PASSWORD=minioadmin MINIO_BROWSER=off \
       "$ROOT/.testkit/bin/minio" server "$RUN/miniodata" --address "127.0.0.1:$MINIOPORT" \
       > "$RUN/logs/minio.log" 2>&1 &
     echo $! > "$RUN/minio.pid"
-    wait_for minio "$RUN/logs/minio.log" \
-      curl -fsS "http://127.0.0.1:$MINIOPORT/minio/health/ready"
+  fi
+  # /health/ready, not /health/live: liveness turns 200 before the S3
+  # API is serving, which is how the bucket write right after it used
+  # to fail.
+  wait_for minio "$RUN/logs/minio.log" \
+    curl -fsS "http://127.0.0.1:$MINIOPORT/minio/health/ready"
+  # The bucket, proved rather than assumed. A directory made before the
+  # server started is a bucket to some MinIO releases and not to others;
+  # a HEAD over the API is the question the server will actually ask.
+  if [ "$(s3 HEAD "/$BUCKET")" != 200 ]; then
+    local made
+    made=$(s3 PUT "/$BUCKET")
+    [ "$(s3 HEAD "/$BUCKET")" = 200 ] \
+      || die "minio is up but bucket '$BUCKET' could not be made (PUT answered $made); see $RUN/logs/minio.log"
   fi
 
-  say "fakes…"
-  # FAKE_STRIPE_PORT, not the default. $STRIPEPORT was overridable here
-  # and never reached the fake, which reads FAKE_STRIPE_PORT and falls
-  # back to 59100 — so a second stack on non-default ports came up as far
-  # as the fakes and then died on `Address already in use` for a port
-  # nobody had asked it to use. The github fake was always passed its
-  # port; this one was not.
-  # The fake serves the card page and the portal itself and delivers
-  # the events those pages cause to our webhook, signed with the secret
-  # the server verifies with — so a person can finish the trip.
-  FAKE_STRIPE_PORT=$STRIPEPORT \
-    FAKE_STRIPE_WEBHOOK_URL="http://127.0.0.1:$HTTPPORT/webhooks/stripe" \
-    FAKE_STRIPE_WEBHOOK_SECRET="$STRIPE_WEBHOOK_SECRET" \
-    python3 "$FAKES/fake-stripe.py" > "$RUN/logs/stripe.log" 2>&1 &
-  echo $! > "$RUN/stripe.pid"
+  say "fake github…"
   STRATUM_PUBLIC_URL="http://127.0.0.1:$HTTPPORT" FAKE_GITHUB_PORT=$GITHUBPORT \
     python3 "$FAKES/fake-github.py" > "$RUN/logs/github.log" 2>&1 &
   echo $! > "$RUN/github.pid"
-  wait_for stripe "$RUN/logs/stripe.log" \
-    curl -fsS -o /dev/null "http://127.0.0.1:$STRIPEPORT/v1/ping"
   wait_for github "$RUN/logs/github.log" \
     curl -fsS -o /dev/null "http://127.0.0.1:$GITHUBPORT/app/installations"
-
-  # ------------------------------------------------------------------
-  # Hosted runners: the ECS stand-in.
-  #
-  # Run on the host rather than in a container, like the other fakes —
-  # it only needs python3 and the docker CLI, both of which are already
-  # prerequisites here. It starts runner containers on the default
-  # bridge, so FAKE_ECS_NETWORK is set explicitly: the auto-detection in
-  # fake-ecs.py inspects its own container, which does not exist when it
-  # is a host process.
-  #
-  # Two things have to be true or the workflow stages prove nothing, and
-  # both are checked here rather than discovered as a mysterious timeout
-  # in the browser: a docker daemon, and the runner image built from
-  # Dockerfile.runner.
-  # ------------------------------------------------------------------
-  RUNNER_OK=0
-  GITHUB_RUNNER_OK=0
-  RUNNER_HOST=host.docker.internal
-  BINDADDR=127.0.0.1
-  if [ "$USE_DOCKER" = 0 ]; then
-    say "hosted runners: no docker daemon — the walkthrough's workflow stages will say so"
-  elif ! docker image inspect "$RUNNER_IMAGE" > /dev/null 2>&1; then
-    say "hosted runners: no $RUNNER_IMAGE image — build it with"
-    say "  docker build -f Dockerfile.runner -t $RUNNER_IMAGE ."
-    say "the walkthrough's workflow stages will report it as a problem"
-  else
-    RUNNER_OK=1
-    # A container cannot reach a server bound to the host's loopback.
-    BINDADDR=0.0.0.0
-    # The GitHub Actions runner image is optional on top: without it the
-    # stand-in is told no second definition and the server is told no
-    # GitHub family, so the walkthrough's GitHub-runner stages report
-    # the missing image rather than a launch that fails.
-    if docker image inspect "$GITHUB_RUNNER_IMAGE" > /dev/null 2>&1; then
-      GITHUB_RUNNER_OK=1
-    else
-      say "GitHub Actions runners: no $GITHUB_RUNNER_IMAGE image — build it with"
-      say "  docker build --platform linux/amd64 -f Dockerfile.github-runner -t $GITHUB_RUNNER_IMAGE ."
-      say "the server will refuse GitHub runner launches until it exists"
-    fi
-    FAKE_ECS_ACCESS_KEY_ID=$DISPATCH_KEY_ID \
-    FAKE_ECS_SECRET_ACCESS_KEY=$DISPATCH_SECRET \
-    FAKE_ECS_REGION=us-east-1 \
-    FAKE_ECS_CLUSTER=local \
-    FAKE_ECS_TASK_DEFINITION=weft-runner-local \
-    FAKE_ECS_RUNNER_IMAGE="$RUNNER_IMAGE" \
-    FAKE_ECS_GITHUB_TASK_DEFINITION=$( [ "$GITHUB_RUNNER_OK" = 1 ] && echo weft-gh-runner-local ) \
-    FAKE_ECS_GITHUB_RUNNER_IMAGE=$( [ "$GITHUB_RUNNER_OK" = 1 ] && echo "$GITHUB_RUNNER_IMAGE" ) \
-    FAKE_ECS_PORT=$ECSPORT \
-    FAKE_ECS_NETWORK=bridge \
-      python3 "$ROOT/deploy/fake-ecs/fake-ecs.py" > "$RUN/logs/fake-ecs.log" 2>&1 &
-    echo $! > "$RUN/fake-ecs.pid"
-    wait_for "ecs stand-in" "$RUN/logs/fake-ecs.log" \
-      curl -fsS -o /dev/null "http://127.0.0.1:$ECSPORT/"
-  fi
 
   write_env
   say "server…"
@@ -657,8 +491,14 @@ Start Docker, or run scripts/fetch-minio.sh."
   "$bin" admin user-create --email dev@acme.dev  --name "Dev Person" --password "$PASSWORD" --org acme --role member >/dev/null
   "$bin" admin user-create --email view@acme.dev --name "Vi Viewer"  --password "$PASSWORD" --org acme --role viewer >/dev/null
 
-  api() { curl -sf -X "$1" "http://127.0.0.1:$HTTPPORT$2" \
-    -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "$3" -o /dev/null; }
+  # Every seed call says which call failed rather than failing quietly.
+  # A seeded stack that is missing half its data looks like a broken
+  # product to the next person, and they will debug the product.
+  api() {
+    curl -sf -X "$1" "http://127.0.0.1:$HTTPPORT$2" \
+      -H "Authorization: Bearer $token" -H 'Content-Type: application/json' -d "$3" -o /dev/null \
+      || { say "seed: $1 $2 failed (see $RUN/logs/server.log)"; return 1; }
+  }
   # The same call, but hand the body back. Secrets and tokens are shown
   # exactly once by the routes that mint them, so a discarded response
   # is a credential that cannot be recovered.
@@ -667,154 +507,22 @@ Start Docker, or run scripts/fetch-minio.sh."
   # One field out of a JSON object, or empty. `python3 -c` rather than a
   # jq dependency: nothing else in this script needs one.
   jfield() { python3 -c 'import json,sys;print(json.loads(sys.stdin.read() or "{}").get(sys.argv[1],""))' "$1"; }
-  # Paid, through the front door rather than by decree. A bootstrapped
-  # org is `free` like one a customer creates — there is no card step:
-  # the provider is the merchant of record and only meets a card on its
-  # subscription page. `admin set-plan --plan paid` used to do this in
-  # one line and left an org that was paid with no customer and no
-  # subscription behind it — a state no customer can be in, so the
-  # billing screen the pass looked at was one no customer would ever see.
-  # The subscription is opened on the provider's page: ask for it (which
-  # makes acme's customer at the fake), then press the fake's "Subscribe"
-  # the way a person would, so acme is paid through the same three
-  # events a real completion sends.
-  sub_url=$(api_json POST /v1/orgs/acme/billing/subscribe '{}' | jfield url)
-  [ -n "$sub_url" ] || die "seed: the subscribe route gave no checkout page — is the Stripe fake up?"
-  curl -sf -o /dev/null -X POST "$sub_url/complete" \
-    || die "seed: acme could not subscribe (see $RUN/logs/server.log)"
-  api POST /v1/orgs/acme/repos '{"name":"widget","public":true,"description":"the fast one — CI checks out from here"}'
-  api POST /v1/orgs/acme/repos '{"name":"payments-api","description":"money, counted"}'
-  api POST /v1/orgs/acme/repos '{"name":"ledger","description":"private ledger work"}'
+
+  # Every repository is private to its organisation; there is no other
+  # kind, so none of these says so.
+  api POST /v1/orgs/acme/repos '{"name":"widget","description":"the fast one"}' || true
+  api POST /v1/orgs/acme/repos '{"name":"payments-api","description":"money, counted"}' || true
+  api POST /v1/orgs/acme/repos '{"name":"ledger","description":"private ledger work"}' || true
   # Two commits, so a file has history to page through and a version to
   # switch back to.
   api POST /v1/orgs/acme/repos/widget/commits '{"message":"first commit","operations":[
     {"op":"put","path":"README.md","content":"# widget\n\nThe fast one.\n"},
     {"op":"put","path":"src/main.rs","content":"fn main() {}\n"},
-    {"op":"put","path":"docs/guide.md","content":"# Guide\n"}]}'
+    {"op":"put","path":"docs/guide.md","content":"# Guide\n"}]}' || true
   api POST /v1/orgs/acme/repos/widget/commits '{"message":"expand the readme","operations":[
-    {"op":"put","path":"README.md","content":"# widget\n\nThe fast one. CI checks out from here.\n"}]}'
+    {"op":"put","path":"README.md","content":"# widget\n\nThe fast one, and the one this stack clones.\n"}]}' || true
   api POST /v1/orgs/acme/repos/payments-api/commits '{"message":"scaffold","operations":[
-    {"op":"put","path":"README.md","content":"# payments-api\n"}]}'
-
-  # A person with a personal namespace, a filled-in profile, a pin and a
-  # star.
-  #
-  # This exists because the manual browser pass kept walking a different
-  # product than the one being built. The profile page and the star
-  # control both render *identity* and *counts*, and a stack seeded only
-  # with an org and three role accounts shows the empty rendering of
-  # both — a handle over a repo grid, and a bare zero — which passes
-  # while proving nothing. A page whose filled-in state a person never
-  # looks at is a page whose filled-in state is broken for weeks.
-  #
-  # It has to go through signup rather than `admin user-create`, because
-  # only signup creates a **personal namespace**, and `/{handle}` is a
-  # personal namespace. It has to use a session rather than the org
-  # token, because a profile edit and a star are both a *person's* acts
-  # and the server refuses a service token for exactly that reason —
-  # which is itself worth having exercised here.
-  local jar=$RUN/ada.cookies handle=ada-dev email=ada@stratum.dev
-  curl -sf -X POST "http://127.0.0.1:$HTTPPORT/v1/auth/signup" \
-    -H 'Content-Type: application/json' \
-    -d "{\"handle\":\"$handle\",\"email\":\"$email\",\"name\":\"Ada Lovelace\",\"password\":\"$PASSWORD\"}" \
-    -o /dev/null || say "signup for $handle failed — profile seeding skipped"
-  # The confirmation link is in the captured mail, the same place the
-  # walkthrough reads it from.
-  local verify=""
-  for _ in $(seq 1 50); do
-    verify=$(python3 - "$RUN/mail" "$email" <<'PYV'
-# Search the message *body*, not `json.dumps(m)`.
-#
-# Dumping the message re-escapes its newlines as the two-character
-# sequence backslash-n, which `\s` does not match — so a token pattern
-# that excludes whitespace runs straight past the end of the URL and
-# swallows the rest of the paragraph. That produced an 92-character
-# token where the real one is 84, the verify POST failed, `curl -sf`
-# swallowed the failure, and every seeding step after it ran with an
-# empty cookie jar. The stack reported success and seeded nothing.
-#
-# The first version of this was checked against a hand-written fixture
-# with the link on one line, which matched. Reality wraps the mail.
-import json, os, re, sys
-d, to = sys.argv[1], sys.argv[2]
-for name in sorted(os.listdir(d)) if os.path.isdir(d) else []:
-    if not name.endswith(".json"):
-        continue
-    m = json.load(open(os.path.join(d, name)))
-    if m.get("to") != to:
-        continue
-    # An explicit charset rather than "not whitespace": the token is
-    # base32-ish with underscores, and percent-escapes survive to be
-    # decoded by the caller.
-    hit = re.search(r"#verify=([A-Za-z0-9_%-]+)", m.get("text", ""))
-    if hit:
-        print(hit.group(1))
-        break
-PYV
-)
-    [ -n "$verify" ] && break
-    sleep 0.1
-  done
-  if [ -n "$verify" ]; then
-    verify=$(python3 -c "import sys,urllib.parse;print(urllib.parse.unquote(sys.argv[1]))" "$verify")
-    curl -sf -X POST "http://127.0.0.1:$HTTPPORT/v1/auth/verify" \
-      -c "$jar" -H 'Content-Type: application/json' \
-      -d "{\"token\":\"$verify\"}" -o /dev/null \
-      || say "verify failed for $email — profile seeding will be empty"
-    # Prove the session exists before spending eight requests on it.
-    #
-    # Without this the failure is invisible: `curl -sf -o /dev/null`
-    # reports nothing a human sees, so a broken verify produced an empty
-    # cookie jar and every call below silently did nothing, while the
-    # stack printed "stack up" and looked seeded. The first run of this
-    # script did exactly that.
-    if ! curl -sf -b "$jar" "http://127.0.0.1:$HTTPPORT/v1/auth/me" -o /dev/null; then
-      say "no session for $email — profile, pins, star and mirror unseeded"
-    fi
-    # Says which call failed rather than failing quietly. A seeded stack
-    # that is missing half its data looks like a broken product to the
-    # next person, and they will debug the product.
-    person() { curl -sf -X "$1" "http://127.0.0.1:$HTTPPORT$2" \
-      -b "$jar" -c "$jar" -H 'Content-Type: application/json' -d "$3" -o /dev/null \
-      || say "seed: $1 $2 failed"; }
-    # Every field the rail renders, so the manual pass sees the filled-in
-    # page rather than the fallback.
-    person PATCH "/v1/users/$handle" '{"display_name":"Ada Lovelace",
-      "bio":"Notes on the Analytical Engine, mostly.",
-      "pronouns":"she/her","company":"Analytical Engines Ltd","location":"London",
-      "links":[{"label":null,"url":"https://ada.example/"}]}'
-    person POST "/v1/orgs/$handle/repos" '{"name":"engine","public":true,
-      "description":"the analytical one"}'
-    person POST "/v1/orgs/$handle/repos/engine/commits" '{"message":"first commit",
-      "operations":[{"op":"put","path":"README.md","content":"# engine\n\nNotes.\n"}]}'
-    # `repo`, not `name`: a pin names a repository the way a URL does.
-    # The wrong key answers 422, which the silent curl swallowed.
-    person PUT "/v1/users/$handle/pins" "{\"pins\":[{\"org\":\"$handle\",\"repo\":\"engine\"}]}"
-    # A star on somebody else's public repo — the ordinary case, and the
-    # one that used to be broken: starring is not a members-only act.
-    person PUT "/v1/orgs/acme/repos/widget/star" ''
-  else
-    say "no confirmation mail for $email — profile and star seeding skipped"
-  fi
-
-  # A mirror, so the manual pass can see an imported count beside our
-  # own. The fake GitHub reports 60,300 stars for any repository it is
-  # asked about, which is the number from the product argument: a
-  # migrated project's real reputation, shown separately and never
-  # summed with the four stars it honestly has here.
-  # `atlas-upstream`, not `atlas`. The walkthrough's mirror stage creates
-  # `acme/atlas` itself, deliberately, to exercise the whole round trip —
-  # connect the app, pick an installation, sync. Seeding the same name
-  # first made that stage answer **409**, and the sync it was there to
-  # watch "ended on: nothing at all". Two problems in the manual gate,
-  # from a fixture that was only ever meant to give the browser pass an
-  # imported star count to look at.
-  #
-  # The gate gets the clean name; this row's name is arbitrary and its
-  # job is only to exist and carry a count.
-  api POST /v1/orgs/acme/mirrors '{"name":"atlas-upstream","provider":"github",
-    "origin":"acme-inc/atlas","public":true,"description":"mirrored from upstream"}' \
-    || say "seed: mirror atlas-upstream failed — no imported star count to look at"
+    {"op":"put","path":"README.md","content":"# payments-api\n"}]}' || true
 
   # ------------------------------------------------------------------
   # A CI provider, and a repository for it to build.
@@ -826,23 +534,18 @@ PYV
   # send verifies under somebody else's check, that a `repo:read` token
   # clones from outside, and that the intake accepts what a real client
   # sends rather than what our own test helper sends.
-  #
-  # The repository is **private** on purpose. A public one clones with no
-  # credential, and then the credential seam is not tested — the same
-  # shape as SSH keys that were registered and revoked for weeks without
-  # anything ever cloning with one.
   # ------------------------------------------------------------------
   say "ci provider…"
   api POST /v1/orgs/acme/repos \
     "{\"name\":\"$CI_REPO\",\"description\":\"builds on every push, through a real CI provider\"}" \
-    || say "seed: repo $CI_REPO failed — the CI loop will not run"
+    || say "      the CI loop will not run"
   # `ci.sh` is what passing *means* here. The provider runs it and does
   # not know what is in it, which is the actual relationship between a
   # project and its CI.
   api POST "/v1/orgs/acme/repos/$CI_REPO/commits" '{"message":"first commit","operations":[
     {"op":"put","path":"README.md","content":"# pipeline\n\nCI clones this and runs ci.sh.\n"},
     {"op":"put","path":"ci.sh","content":"#!/bin/sh\n# What passing means for this repository. The CI provider runs this and\n# does not know what is in it.\n#\n# `:(exclude)ci.sh`, and it is load-bearing: git grep searches every\n# tracked file including this one, and this one has to name the marker in\n# order to search for it. Without the exclusion the check can never pass,\n# on any tree — which is exactly how it behaved until a walkthrough run\n# reported a tree with nothing wrong in it as failing.\nset -e\ntest -f README.md\nif git grep -lF '"'"'FIXME!!'"'"' -- . '"'"':(exclude)ci.sh'"'"' ; then\n  echo \"a leftover marker is still in the tree\"\n  exit 1\nfi\necho \"tree is clean\"\n"}]}' \
-    || say "seed: $CI_REPO ci.sh failed — the provider will find nothing to run"
+    || say "      the provider will find nothing to run"
 
   # The three credentials the provider needs, each minted through the
   # route a real maintainer would use, and each shown exactly once.
@@ -870,77 +573,59 @@ PYV
   fi
 
   # ------------------------------------------------------------------
-  # An empty repository for the hosted-runner stages to push a workflow
-  # into.
+  # An empty repository for the workflow and self-hosted-runner stages to
+  # push a workflow into.
   #
-  # Its own repo, not `widget`: the workflow stages push with the real
-  # git CLI and then assert on what the Checks tab holds, and sharing a
+  # Its own repo, not `widget`: those stages push with the real git CLI
+  # and then assert on what the Checks tab holds, and sharing a
   # repository with the CI provider's `ci/local` rows — or with the repo
   # stages that walk widget's file tree — would make each stage's
-  # assertions depend on the other's leftovers. It is seeded with a
-  # README and NOT with a workflow, because pushing the workflow is the
-  # thing being tested.
+  # assertions depend on the other's leftovers. No runner is registered
+  # here: registering one from the command Settings → Runners shows is
+  # what the walkthrough tests.
   # ------------------------------------------------------------------
   say "workflow repo…"
   api POST /v1/orgs/acme/repos \
-    "{\"name\":\"$WF_REPO\",\"description\":\"hosted runners build this one\"}" \
-    || say "seed: repo $WF_REPO failed — the workflow stages will say so"
+    "{\"name\":\"$WF_REPO\",\"description\":\"self-hosted runners build this one\"}" \
+    || say "      the workflow stages will say so"
   api POST "/v1/orgs/acme/repos/$WF_REPO/commits" '{"message":"first commit","operations":[
-    {"op":"put","path":"README.md","content":"# builds\n\nA workflow in .weft/ runs here on every push.\n"}]}' \
-    || say "seed: $WF_REPO README failed"
+    {"op":"put","path":"README.md","content":"# builds\n\nA workflow in .weft/ runs here, on a registered runner, on every push.\n"}]}' \
+    || true
 
   local SELF_HOSTED_STATUS
   if [ -n "$RUNNER_BIN" ]; then
     SELF_HOSTED_STATUS="$RUNNER_BIN. The walkthrough registers one from
-               Settings → Runners and runs it. By hand: Add a runner there,
-               then run the two commands it shows with --dir <somewhere>."
+               Settings → Runners and runs it on this machine. By hand: Add a
+               runner there, then run the two commands it shows with
+               --dir <somewhere>; push a .weft/ci.yml to acme/$WF_REPO."
   else
     SELF_HOSTED_STATUS="OFF — no weft-runner binary (cargo build --release
                -p stratum-runner). The walkthrough's self-hosted stages will
                report this as a problem, not skip it."
   fi
-  local RUNNER_STATUS
-  if [ "$RUNNER_OK" = 1 ]; then
-    RUNNER_STATUS="hosted runners on, through the ECS stand-in at
-               http://127.0.0.1:$ECSPORT. acme/$WF_REPO has .weft/ci.yml;
-               a push starts a real $RUNNER_IMAGE container. Tasks:
-               docker ps -a --filter label=stratum.fake-ecs"
-    if [ "$GITHUB_RUNNER_OK" = 1 ]; then
-      RUNNER_STATUS="$RUNNER_STATUS
-               GitHub Actions runners: on, as weft-gh-runner-local from
-               $GITHUB_RUNNER_IMAGE (launch shape only: no GitHub here)"
-    else
-      RUNNER_STATUS="$RUNNER_STATUS
-               GitHub Actions runners: OFF — no $GITHUB_RUNNER_IMAGE image
-               (docker build --platform linux/amd64 -f Dockerfile.github-runner
-               -t $GITHUB_RUNNER_IMAGE .)"
-    fi
-  else
-    RUNNER_STATUS="OFF — no docker daemon or no $RUNNER_IMAGE image. The
-               walkthrough's workflow stages will report this as a problem,
-               not skip it."
-  fi
 
   cat <<DONE
 
-  stack up — http://127.0.0.1:$HTTPPORT
+  stack up — http://127.0.0.1:$HTTPPORT   (server: $bin)
 
     sign in    ada@acme.dev / $PASSWORD  (owner)
                dev@acme.dev, view@acme.dev  (member, viewer)
     org token  $RUN/token
     logs       $RUN/logs/
+    mail       $RUN/mail/
     env        eval "\$(scripts/manual-stack.sh env)"
 
     ci         a real provider on http://127.0.0.1:$CIPORT, watching
                acme/$CI_REPO — push to it and it clones, runs ci.sh and
                signs a verdict back. What it did: /runs
 
-    runners    ${RUNNER_STATUS}
+    github     a stand-in App on http://127.0.0.1:$GITHUBPORT; mirrors
+               fetch from, and forward pushes to, $RUN/origins
 
-    self-hosted ${SELF_HOSTED_STATUS}
+    runners    ${SELF_HOSTED_STATUS}
 
   manual pass:
-    eval "\$(scripts/manual-stack.sh env)"   # RUNNER_BIN, RUNNER_ECS_URL, CI_RUNNER_URL…
+    eval "\$(scripts/manual-stack.sh env)"   # RUNNER_BIN, CI_RUNNER_URL, RUNNER_WF_REPO…
     cd web/dashboard && BASE=http://127.0.0.1:$HTTPPORT \\
       STRATUM_MAIL_DIR=$RUN/mail node tools/walkthrough.mjs
 
@@ -953,6 +638,5 @@ case "${1:-up}" in
   up) cmd_up ;;
   down) cmd_down ;;
   env) cmd_env ;;
-  overage) shift; cmd_overage "$@" ;;
-  *) die "usage: manual-stack.sh [up|down|env|overage <org> <gb>|clear]" ;;
+  *) die "usage: manual-stack.sh [up|down|env]" ;;
 esac

@@ -43,7 +43,7 @@ land has to do this; the docs' snippets do not mention it.
 
 Configuration is all environment, all required except where noted:
 
-  CI_RUNNER_PORT            where to listen                (default 59120)
+  CI_RUNNER_PORT            where to listen                (default 29120)
   CI_RUNNER_PUBLIC_URL      how the runs log is linked to  (default from port)
   STRATUM_URL               the forge                      (default :8080)
   CI_RUNNER_ORG             org name, e.g. `acme`
@@ -90,7 +90,7 @@ import urllib.request
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse
 
-PORT = int(os.environ.get("CI_RUNNER_PORT", "59120"))
+PORT = int(os.environ.get("CI_RUNNER_PORT", "29120"))
 PUBLIC_URL = os.environ.get("CI_RUNNER_PUBLIC_URL", f"http://127.0.0.1:{PORT}")
 STRATUM = os.environ.get("STRATUM_URL", "http://127.0.0.1:8080").rstrip("/")
 ORG = os.environ.get("CI_RUNNER_ORG", "acme")

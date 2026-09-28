@@ -1,37 +1,54 @@
 #!/usr/bin/env python3
-"""Create the GitHub App a Stratum fleet needs, without typing it in.
+"""Create the GitHub App a Spool deployment needs, without typing it in.
 
 GitHub's App Manifest flow: this script serves one local page that posts a
 manifest to GitHub, a person confirms it there with a single click, GitHub
 redirects back here with a one-hour code, and the script exchanges the code
-for the App's id, private key and webhook secret. The key and secret are
-written under `.secrets/` (gitignored, mode 0600) and never printed.
+for the App's id, private key, webhook secret and OAuth client. The key and
+secrets are written under `.secrets/` (gitignored, mode 0600) and never
+printed.
 
-    scripts/github-app-create.py --org weft --name weft --public-url https://api.weft.sh
+    scripts/github-app-create.py --name my-forge --public-url https://git.example.com
+    scripts/github-app-create.py --org my-github-org --name my-forge --public-url …
 
-The manifest is exactly what `mirror/`, `installations::` and the GitHub
-Actions runner feature rely on: read-only metadata/issues, write on
-contents (a push to a mirror is forwarded to its origin); the
-webhook at `<public-url>/webhooks/github`; and the post-install Setup URL
-at `<public-url>/v1/github/setup` — the route that binds an installation
-to one org (docs/LAUNCH.md, "The GitHub App is public").
+One App does everything the server does with GitHub, and the manifest asks
+for exactly that and nothing more. Each permission is here because of a
+call the server makes — the file and the call are named, so a permission
+nobody needs any more is easy to see and take away:
 
-Two of the permissions are `write`, and both are for hosted runners:
+  * `metadata: read` — every App holds it; `GET /installation/repositories`
+    (the repository picker, `mirror/origin.rs`) is read under it.
+  * `contents: write` — a mirror is cloned and synced with `contents: read`,
+    and a push *to* a mirror is forwarded to its origin
+    (`mirror/forward.rs`) under the installation token, which needs
+    `write`. An installation made while this said `read` keeps `read`
+    until its owner approves the change on GitHub.
+  * `issues: read` — issue import (`workers/importer.rs`): an origin's
+    issues, their comments, labels and milestones.
+  * `actions: read` — the CI poller (`workers/checks_poll.rs`) reads an
+    origin's workflow runs so a mirror's checks carry GitHub's verdict.
+  * `email_addresses: read` — an *account* permission, used by signing in
+    with GitHub (`api/github_auth.rs`): `GET /user/emails` under the
+    signed-in person's token is how the server learns that GitHub has
+    proved their primary address. Without it that call is refused and
+    every GitHub sign-up falls back to a confirmation mail.
 
-  * `administration: write` is what `POST …/actions/runners/generate-jitconfig`
-    needs — registering a just-in-time runner against a repository is an
-    administration call, not an actions one — and what `DELETE
-    …/actions/runners/{id}` needs to remove one that never picked its job up.
-  * `actions: write` is what `POST …/actions/runs/{id}/cancel` needs, so a
-    job this fleet cannot run (over budget, no capacity) is cancelled at
-    GitHub rather than left queued forever.
+One event: `push`, which the webhook at `<public-url>/webhooks/github`
+turns into a mirror sync (`mirror/webhook.rs`). Every other event GitHub
+sends there is acknowledged and ignored, so the App does not subscribe to
+any. GitHub delivers an App's own `installation` events whether or not it
+subscribes; they are not offered as a subscription.
 
-And two of the events: `workflow_job` is how GitHub asks this fleet to
-run a job (the intake in `github_runner/`), and `installation` is how it
-tells us an installation was suspended, removed or had these permissions
-approved — an installation that predates this manifest holds the old
-grants until its owner accepts the new ones, which is what
-`GET /app/installations/{id}` is read for.
+Two URLs come back to the server: the post-install Setup URL
+`<public-url>/v1/github/setup`, the route that binds an installation to one
+org, and the sign-in callback `<public-url>/v1/auth/github/callback`. Both
+are listed as OAuth callback URLs, because with user authorization
+requested GitHub returns the browser to a *callback* URL.
+
+Not requested, and worth knowing: `workflows: write`. GitHub refuses an App
+token a push that creates or changes a file under `.github/workflows/`
+unless the App holds it, so a push to a mirror that touches the origin's
+Actions workflows is refused at the origin.
 
 Compare against `gh api apps/<slug> --jq .permissions,.events` for an
 existing App; an App created before this file changed needs its
@@ -52,62 +69,40 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 
-# One App that does everything: what every deployment started with, and
-# what a deployment without a Runners App still runs.
 PERMISSIONS = {
     "metadata": "read",
     # `write`, not `read`: a push to a mirror is forwarded to its origin
-    # under the installation token. An installation made while this said
-    # `read` has to approve the change before its mirrors forward.
+    # under the installation token.
     "contents": "write",
     "issues": "read",
-    # `write`, not `read`: cancelling a workflow run at GitHub.
-    "actions": "write",
-    # Registering and removing just-in-time runners.
-    "administration": "write",
+    "actions": "read",
+    # Account permission: `GET /user/emails` during GitHub sign-in.
+    "email_addresses": "read",
 }
-# `installation` is not listed: GitHub delivers an App's own installation
-# events (created, deleted, new_permissions_accepted) to every App and does
-# not offer them as a subscription — an App edited by hand on 2026-09-07
-# reports events ["push", "workflow_job"] and still receives them.
-EVENTS = ["push", "workflow_job"]
+EVENTS = ["push"]
 
-# The split: a Marketplace listing is per App, and the two products want
-# different permissions. The mirror App writes `contents` and reads the
-# rest; the Runners App writes administration (just-in-time runners) and
-# actions (cancelling a run), and hears `workflow_job` on a hook of its
-# own. A deployment that has both sets STRATUM_GITHUB_RUNNERS_* beside
-# STRATUM_GITHUB_*.
-#
-# `contents: write` on the *mirror* App is the whole of write-through: a
-# push to a mirror is forwarded to its origin under that App's
-# installation token, so the App that owns mirroring is the one that
-# needs it. This said `read` when the split was written, which would have
-# handed anyone who created a mirror-only App from this script one that
-# cannot forward a push — and they would not find out until the first
-# push came back refused.
-KINDS = {
-    "all": (PERMISSIONS, EVENTS, "/webhooks/github", "/v1/github/setup",
-            "Connects GitHub repositories to a Stratum fleet: mirrors, imports, CI verdicts and hosted Actions runners."),
-    "mirror": ({"metadata": "read", "contents": "write", "issues": "read", "actions": "read"},
-               ["push"], "/webhooks/github", "/v1/github/setup",
-               "Weft Mirror: a live, provably-fresh copy of your repositories that your CI clones from."),
-    "runners": ({"metadata": "read", "actions": "write", "administration": "write"},
-                ["workflow_job"], "/webhooks/github-runners", "/v1/github/setup/runners",
-                "Weft Runners: runs-on: weft sends a GitHub Actions job to Weft's hosted runners."),
-}
+DESCRIPTION = (
+    "Connects GitHub repositories to a self-hosted Spool forge: mirrors that "
+    "sync on push and forward pushes back, issue import, CI verdicts, and "
+    "signing in with GitHub."
+)
 
 
-def manifest(name: str, public_url: str, redirect: str, kind: str = "all") -> dict:
-    permissions, events, hook, setup, description = KINDS[kind]
+def manifest(name: str, public_url: str, redirect: str, description: str = DESCRIPTION,
+             public: bool = False) -> dict:
+    setup = f"{public_url}/v1/github/setup"
     return {
         "name": name,
         "url": public_url,
         "description": description,
-        "public": True,
-        "hook_attributes": {"url": f"{public_url}{hook}", "active": True},
+        # Private by default: only the account that owns the App can
+        # install it, which is what a single self-hosted forge wants.
+        # `--public` for a forge whose users install it on their own
+        # GitHub organisations.
+        "public": public,
+        "hook_attributes": {"url": f"{public_url}/webhooks/github", "active": True},
         "redirect_url": redirect,
-        "setup_url": f"{public_url}{setup}",
+        "setup_url": setup,
         # Come back after an installation is *edited* too. Such a return
         # carries no `state`; the callback binds it to the org the
         # signed-in person began a connect for.
@@ -116,17 +111,17 @@ def manifest(name: str, public_url: str, redirect: str, kind: str = "all") -> di
         # install. GitHub then appends a `code` to the redirect, which
         # the callback exchanges to learn which installations that
         # person controls — the only proof that the id in the URL is
-        # theirs and not another customer's.
+        # theirs and not somebody else's.
         "request_oauth_on_install": True,
         # GitHub refuses a manifest that requests OAuth on install and
-        # names no callback URL ("Callback URLs at least one callback URL
-        # is required", seen creating the runners App on 2026-09-14). With
-        # user authorization requested, the browser comes back to the
-        # *callback* URL, and GitHub keeps only its path — which is why
-        # each kind's setup path is a path and never a query.
-        "callback_urls": [f"{public_url}{setup}"],
-        "default_permissions": permissions,
-        "default_events": events,
+        # names no callback URL. With user authorization requested, the
+        # browser comes back to a *callback* URL and GitHub keeps only its
+        # path — which is why both are paths and never a query. The
+        # second is where signing in with GitHub returns
+        # (`api/github_auth.rs` derives it from the public URL).
+        "callback_urls": [setup, f"{public_url}/v1/auth/github/callback"],
+        "default_permissions": PERMISSIONS,
+        "default_events": EVENTS,
     }
 
 
@@ -149,13 +144,15 @@ def write_secret(path: Path, content: str) -> None:
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("--org", help="organization that will own the App (omit for your user account)")
+    ap.add_argument("--org", help="GitHub organization that will own the App (omit for your user account)")
     ap.add_argument("--name", required=True, help="App name; must be unique across GitHub")
-    ap.add_argument("--public-url", required=True, help="the deployed API origin, e.g. https://api.weft.sh")
+    ap.add_argument("--public-url", required=True,
+                    help="the forge's public origin, as STRATUM_PUBLIC_URL says it, e.g. https://git.example.com")
+    ap.add_argument("--description", default=DESCRIPTION, help="shown on the App's GitHub page")
+    ap.add_argument("--public", action="store_true",
+                    help="let any GitHub account install the App (default: only its owner)")
     ap.add_argument("--port", type=int, default=8477)
     ap.add_argument("--no-browser", action="store_true", help="print the local URL instead of opening it")
-    ap.add_argument("--kind", choices=sorted(KINDS), default="all",
-                    help="which App to create: `all` (one App for everything), `mirror`, or `runners` (the second App, STRATUM_GITHUB_RUNNERS_*)")
     args = ap.parse_args()
 
     public_url = args.public_url.rstrip("/")
@@ -166,7 +163,7 @@ def main() -> int:
         if args.org
         else f"https://github.com/settings/apps/new?state={state}"
     )
-    body = json.dumps(manifest(args.name, public_url, redirect, args.kind))
+    body = json.dumps(manifest(args.name, public_url, redirect, args.description, args.public))
     outcome: dict = {}
 
     class Handler(http.server.BaseHTTPRequestHandler):
@@ -213,14 +210,19 @@ def main() -> int:
                     env_path,
                     f"STRATUM_GITHUB_APP_ID={app['id']}\n"
                     f"STRATUM_GITHUB_WEBHOOK_SECRET={app['webhook_secret']}\n"
-                    f"STRATUM_GITHUB_APP_KEY_PEM=$(cat {pem_path})\n"
+                    # A *path*: the server reads the key from the file this
+                    # names (`app.rs`, STRATUM_GITHUB_APP_KEY carries the PEM
+                    # itself). This wrote `$(cat <path>)`, which a sourcing
+                    # shell expanded into the PEM and the server then tried
+                    # to open as a file name — and which an EnvironmentFile or
+                    # `--env-file` never expands at all.
+                    f"STRATUM_GITHUB_APP_KEY_PEM={pem_path}\n"
                     f"STRATUM_GITHUB_INSTALL_URL={app['html_url']}/installations/new\n"
                     # The conversion answer is the only time GitHub shows the
                     # OAuth client secret; the App page can only mint another.
-                    # The install callback needs both, and the fleet's
-                    # precondition refuses a secret with either blank — the
-                    # runners App created on 2026-09-14 had to have a second
-                    # secret generated by hand because these were dropped.
+                    # The install callback and GitHub sign-in need both, and
+                    # the server refuses to boot with one set and not the
+                    # other.
                     f"STRATUM_GITHUB_CLIENT_ID={app.get('client_id', '')}\n"
                     f"STRATUM_GITHUB_CLIENT_SECRET={app.get('client_secret', '')}\n",
                 )
@@ -242,7 +244,8 @@ def main() -> int:
     print(
         f"created {outcome['slug']} (App ID {outcome['id']}) at {outcome['html_url']}\n"
         f"  private key: {outcome['pem']}\n"
-        f"  env (source it): {outcome['env']}\n"
+        f"  env: {outcome['env']} (KEY=value lines: source it, or hand it to\n"
+        "       systemd's EnvironmentFile= or docker's --env-file)\n"
         "Remaining by hand: nothing — install it on an org through the dashboard's Connect button."
     )
     return 0

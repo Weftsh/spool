@@ -1,10 +1,18 @@
 name: ci
 
 on:
+  # Every branch on push. A push run's checks attach to the commit and
+  # show on a pull request from this repository, so a same-repository PR
+  # needs no run of its own — a `pull_request` run there would build the
+  # same head a second time. A fork's PR is the one thing a push here
+  # never covers, because its commits are pushed somewhere else, so
+  # `pull_request` is on and every job below runs for it only when the
+  # head is a fork (the `if:` on each job). `pull_request`, never
+  # `pull_request_target`: a fork's code runs with a read-only token and
+  # no secrets.
   push:
-    branches: [main]
+    branches: ["**"]
   pull_request:
-  workflow_dispatch:
 
 permissions:
   contents: read
@@ -20,6 +28,7 @@ env:
 
 jobs:
   correctness-gate:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     steps:
@@ -93,7 +102,64 @@ jobs:
       - name: Unit + integration tests
         run: cargo test --workspace --release
 
+  # The `#[ignore]`d suite: SIGKILLs the server at named store operations
+  # and storms it with a seeded fault plan. A red run prints
+  # `STRATUM_CHAOS_SEED=<n>` and the tail of the fault trace; re-running
+  # with that seed replays the same verdicts.
+  chaos:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Start reclaiming disk
+        run: |
+          df -h /
+          TOOLS="${AGENT_TOOLSDIRECTORY:-/opt/hostedtoolcache}"
+          rm -f /tmp/free-disk.done
+          sudo bash -c "rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc \
+            /usr/local/share/boost /usr/local/share/powershell /usr/share/swift \
+            '$TOOLS' || true; docker image prune -af || true; \
+            touch /tmp/free-disk.done" >/tmp/free-disk.log 2>&1 </dev/null &
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: "1.96.0"
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ hashFiles('Cargo.toml') }}
+
+      - name: MinIO version
+        id: minio
+        run: echo "release=$(cat .minio-version)" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/cache@v4
+        with:
+          path: .testkit/bin/minio
+          key: minio-linux-amd64-${{ steps.minio.outputs.release }}
+
+      - name: Fetch MinIO (testkit backend)
+        run: scripts/fetch-minio.sh
+
+      - name: Wait for the disk reclaim
+        run: |
+          for _ in $(seq 1 300); do
+            [ -f /tmp/free-disk.done ] && break
+            sleep 2
+          done
+          cat /tmp/free-disk.log || true
+          test -f /tmp/free-disk.done || { echo "the reclaim never finished"; exit 1; }
+          df -h /
+
+      - name: Chaos e2e (kill points, fault storm, key-scoped freezes)
+        run: cargo test -p stratum-server --test chaos_e2e --release -- --ignored
+
   web:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
     runs-on: ubuntu-24.04
     timeout-minutes: 40
     steps:
@@ -129,3 +195,42 @@ jobs:
         run: |
           npx playwright install --with-deps chromium
           npx playwright test
+
+  # Credential-free: fmt, validate, and the env-lock module's own test.
+  terraform-validation:
+    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name != github.repository
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      # Fetched by version from releases.hashicorp.com and checked against
+      # the SHA256SUMS HashiCorp publishes beside it. The version line
+      # keeps the `terraform_version` key because scripts/ci-local.sh
+      # reads the pin from this file.
+      - name: Install terraform
+        env:
+          terraform_version: "1.15.8"
+        run: |
+          v="$terraform_version"
+          base="https://releases.hashicorp.com/terraform/$v"
+          curl -fsSLO "$base/terraform_${v}_linux_amd64.zip"
+          curl -fsSL "$base/terraform_${v}_SHA256SUMS" | grep "linux_amd64.zip" | sha256sum -c -
+          python3 -c "import zipfile; zipfile.ZipFile('terraform_${v}_linux_amd64.zip').extract('terraform', '$HOME/.local/bin')"
+          chmod 755 "$HOME/.local/bin/terraform"
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          "$HOME/.local/bin/terraform" version
+
+      - name: Terraform fmt + validate (credential-free)
+        run: |
+          terraform -chdir=deploy/terraform fmt -check -recursive
+          terraform -chdir=deploy/terraform init -backend=false -input=false
+          terraform -chdir=deploy/terraform validate
+          terraform -chdir=deploy/terraform/bootstrap init -backend=false -input=false
+          terraform -chdir=deploy/terraform/bootstrap validate
+          # The env lock's contract, against a real terraform and no
+          # provider: a state applied as prod refuses a test plan.
+          terraform -chdir=deploy/terraform/modules/env-lock init -backend=false -input=false
+          terraform -chdir=deploy/terraform/modules/env-lock test

@@ -400,82 +400,6 @@ fn the_local_ci_script_covers_every_job_the_workflow_declares() {
     );
 }
 
-/// The local coverage run drops test binaries no target owns any more.
-///
-/// cargo-llvm-cov reports over every executable in its `deps` dir that
-/// matches a workspace *package*, and cargo never deletes an artifact it
-/// has stopped producing. When the runner's `[[bin]]` was renamed from
-/// `stratum-runner` to `weft-runner`, the old test binary stayed behind:
-/// never run, so zero hits, and mapped to `spec.rs` as it was when it was
-/// built — so the gate reported a doc comment as an unexecuted line, on
-/// the one machine that had seen both names, while CI was green. The
-/// script `ci-local.sh` calls before `cargo llvm-cov` has to remove
-/// exactly that file and nothing beside it: the current target's
-/// binary, the `.d` files, and anything that does not have cargo's
-/// `<stem>-<hash>` shape all stay.
-#[test]
-fn the_local_coverage_run_prunes_test_binaries_no_target_owns() {
-    use std::os::unix::fs::PermissionsExt;
-    const SCRIPT: &str = include_str!("../../../scripts/ci-local.sh");
-    assert!(
-        SCRIPT.contains("prune_stale_objects.py"),
-        "scripts/ci-local.sh does not prune stale test binaries before cargo llvm-cov"
-    );
-
-    let scratch = Scratch::new("prune-stale");
-    let deps = scratch.path().join("deps");
-    std::fs::create_dir_all(&deps).unwrap();
-    let put = |name: &str, exec: bool| {
-        let p = deps.join(name);
-        std::fs::write(&p, b"#!/bin/sh\n").unwrap();
-        let mode = if exec { 0o755 } else { 0o644 };
-        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(mode)).unwrap();
-        p
-    };
-    let stale = put("stratum_runner-c9249235f4e946bb", true);
-    let current = put("weft_runner-08c2cca3768129c1", true);
-    let other_current = put("docs_e2e-0123456789abcdef", true);
-    let depinfo = put("stratum_runner-c9249235f4e946bb.d", false);
-    let not_cargo = put("stratum_runner", true);
-
-    let script = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("../../scripts/prune_stale_objects.py");
-    let out = Command::new("python3")
-        .arg(&script)
-        .arg(&deps)
-        .args(["weft-runner", "docs_e2e"])
-        .output()
-        .expect("run prune_stale_objects.py");
-    assert!(
-        out.status.success(),
-        "prune failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    let said = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        said.contains("stratum_runner-c9249235f4e946bb"),
-        "the prune did not say what it removed: {said}"
-    );
-
-    assert!(
-        !stale.exists(),
-        "the renamed target's old test binary survived"
-    );
-    assert!(
-        current.exists(),
-        "the current target's test binary was removed"
-    );
-    assert!(
-        other_current.exists(),
-        "another current target's binary was removed"
-    );
-    assert!(depinfo.exists(), "a non-executable .d file was removed");
-    assert!(
-        not_cargo.exists(),
-        "a file without cargo's <stem>-<hash> shape was removed"
-    );
-}
-
 /// CI runs `npm ci` from a clean checkout; the local script installs
 /// only when it has to. "Only when it has to" used to mean "when
 /// `node_modules` is missing", so a merge that brought two new packages
@@ -554,82 +478,6 @@ fn the_local_web_job_reinstalls_when_the_lockfile_moved() {
     );
 }
 
-/// The deploy workflow applies the environment's own variables.
-///
-/// `deploy/terraform/variables.tf` defaults to no domain, no GitHub App
-/// and no billing, and a plan with no `-var-file` is a plan for exactly
-/// that fleet. The first production apply is done from a laptop with
-/// `envs/prod.tfvars`; if the workflow's apply then ran on the defaults
-/// it would "correct" the zone, the certificate, the aliases and the
-/// mail identity out of existence on the next merge that touched
-/// `deploy/terraform/` — a green job that takes the product's name away.
-/// So the workflow must read `envs/<ENV_NAME>.tfvars`, the file must
-/// exist, and its `env` must be the environment it is named for: a
-/// rehearsal file that said `prod` would apply prod's names into the
-/// test state and clash with the real ones.
-#[test]
-fn the_deploy_workflow_applies_the_environments_own_variables() {
-    const WORKFLOW: &str = include_str!("../../../.github/workflows/deploy.yml");
-    let envs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../deploy/terraform/envs");
-
-    let env_name = WORKFLOW
-        .lines()
-        .find_map(|l| l.trim().strip_prefix("ENV_NAME:"))
-        .map(|v| v.trim().trim_matches('"').to_string())
-        .expect("deploy.yml declares ENV_NAME");
-
-    let plan = WORKFLOW
-        .lines()
-        .filter(|l| l.contains("terraform") && l.contains(" plan "))
-        .collect::<Vec<_>>();
-    assert_eq!(
-        plan.len(),
-        1,
-        "expected one terraform plan in deploy.yml, found {plan:?}"
-    );
-    // The var-file is on the continuation line; take the plan command as
-    // the run through to `-out=`.
-    let plan_start = WORKFLOW.find(plan[0]).unwrap();
-    let plan_cmd =
-        &WORKFLOW[plan_start..WORKFLOW[plan_start..].find("-out=").unwrap() + plan_start];
-    assert!(
-        plan_cmd.contains("-var-file=\"envs/${{ env.ENV_NAME }}.tfvars\""),
-        "deploy.yml plans without the environment's tfvars, so its apply \
-         would reset the fleet to variables.tf's defaults:\n{plan_cmd}"
-    );
-
-    let mut files: Vec<_> = std::fs::read_dir(&envs)
-        .expect("deploy/terraform/envs exists")
-        .map(|e| e.unwrap().path())
-        .filter(|p| p.extension().is_some_and(|x| x == "tfvars"))
-        .collect();
-    files.sort();
-    assert!(
-        files
-            .iter()
-            .any(|p| p.file_stem().unwrap() == env_name.as_str()),
-        "deploy.yml deploys {env_name} but deploy/terraform/envs/{env_name}.tfvars does not exist"
-    );
-    for file in files {
-        let stem = file.file_stem().unwrap().to_string_lossy().to_string();
-        let text = std::fs::read_to_string(&file).unwrap();
-        let declared = text
-            .lines()
-            .map(str::trim)
-            .filter(|l| !l.starts_with('#'))
-            .find_map(|l| l.strip_prefix("env"))
-            .and_then(|rest| rest.trim().strip_prefix('='))
-            .map(|v| v.trim().trim_matches('"').to_string());
-        assert_eq!(
-            declared.as_deref(),
-            Some(stem.as_str()),
-            "{}: `env` must be the environment the file is named for, \
-             because every name and every prod protection keys on it",
-            file.display()
-        );
-    }
-}
-
 /// Every top-level path the router claims is a namespace nobody can take.
 ///
 /// A namespace is a first path segment — `/<namespace>/<repo>.git` is the
@@ -690,64 +538,6 @@ fn no_router_path_can_be_taken_as_a_namespace() {
             stratum_control::registry::is_reserved(&seg.to_uppercase()),
             "{seg} is reserved but {} is not",
             seg.to_uppercase()
-        );
-    }
-}
-
-/// Every marketing page the site ships is a namespace nobody can take.
-///
-/// The sibling test above scrapes `.route()` literals, and that is
-/// exactly why it cannot see these: `/mirror`, `/repos`, `/monorepo`,
-/// `/gitfarm` and `/discover` are not routes at all. They are Astro
-/// files served by the axum `.fallback`, so the router knows nothing
-/// about them and the scraper finds nothing to reserve. `monorepo` was
-/// missed on that account — a live product page with no denylist entry
-/// behind it.
-///
-/// It matters the moment `/{owner}` renders: a stranger who signs up as
-/// `monorepo` shadows a page the company sells from, and the marketing
-/// team finds out from a customer.
-///
-/// The page list is read from disk rather than `include_str!`'d from a
-/// generated manifest, because a manifest is a second thing to keep in
-/// step with `web/site/src/pages/` — which is the drift this test
-/// exists to catch. `read_dir` has no copy to fall behind.
-#[test]
-fn no_site_page_can_be_taken_as_a_namespace() {
-    let pages = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/site/src/pages");
-    let mut names: Vec<String> = std::fs::read_dir(&pages)
-        .unwrap_or_else(|e| panic!("read {}: {e}", pages.display()))
-        .map(|e| e.expect("dir entry").path())
-        .filter(|p| p.extension().and_then(|x| x.to_str()) == Some("astro"))
-        .filter_map(|p| p.file_stem().and_then(|s| s.to_str()).map(str::to_string))
-        // `index.astro` is the site root, not a first path segment, so
-        // it claims no namespace and reserving `index` would be noise.
-        .filter(|n| n != "index")
-        .collect();
-    names.sort();
-    assert!(
-        names.len() >= 5,
-        "failed to read the site's pages, found {names:?}"
-    );
-
-    let missing: Vec<&String> = names
-        .iter()
-        .filter(|n| !stratum_control::registry::is_reserved(n))
-        .collect();
-    assert!(
-        missing.is_empty(),
-        "these are live site pages but not reserved namespace names, so a \
-         stranger could take one and shadow it: {missing:?}"
-    );
-
-    // …case-insensitively, for the same reason the router test checks
-    // it: the namespace is case-folded and a list that catches one
-    // spelling catches nothing.
-    for name in &names {
-        assert!(
-            stratum_control::registry::is_reserved(&name.to_uppercase()),
-            "{name} is reserved but {} is not",
-            name.to_uppercase()
         );
     }
 }
@@ -1336,88 +1126,14 @@ fn the_ci_guide_matches_the_intake_it_documents() {
     );
 }
 
-/// `scripts/remap_ledger.py` must move every form of `lines` the gate
-/// accepts. It used to match only `"n"` and `"a-b"`; an entry written as
-/// a comma list — `"903,906,909"`, nine of which were in the ledger —
-/// was silently left where it was, and the gate then reported it twice:
-/// once as stale, once as an unledgered line at its new home. That is
-/// precisely the double finding the script exists to prevent, and it
-/// invited the worst fix — re-deriving the reason by hand against a line
-/// nobody looked at.
-#[test]
-fn the_ledger_remap_moves_comma_lists_and_ranges_alike() {
-    let scratch = Scratch::new("remap-ledger");
-    let repo = scratch.path().join("repo");
-    std::fs::create_dir_all(repo.join("src")).unwrap();
-    stratum_testkit::gitcli::git(&repo, &["init", "-q", "-b", "main"]);
-    let body: String = (1..=12).map(|i| format!("line {i}\n")).collect();
-    std::fs::write(repo.join("src/a.rs"), &body).unwrap();
-    let ledger = "[[exempt]]\n\
-                  file = \"src/a.rs\"\n\
-                  lines = \"3,5,7\"\n\
-                  reason = \"three arms, one reason\"\n\
-                  \n\
-                  [[exempt]]\n\
-                  file = \"src/a.rs\"\n\
-                  lines = \"8-9, 11\"\n\
-                  reason = \"a range and a line\"\n\
-                  \n\
-                  [[exempt]]\n\
-                  file = \"src/a.rs\"\n\
-                  lines = \"2,4\"\n\
-                  reason = \"one piece of this is about to be rewritten\"\n";
-    std::fs::write(repo.join("ledger.toml"), ledger).unwrap();
-    stratum_testkit::gitcli::git(&repo, &["add", "-A"]);
-    stratum_testkit::gitcli::git(&repo, &["commit", "-q", "-m", "green"]);
-
-    // Two lines inserted at the top shift everything by two; line 4 is
-    // rewritten, which should drop the entry that names it — whole, not
-    // half, because its pieces share one reason.
-    let edited = format!(
-        "// new\n// new\n{}",
-        body.replace("line 4\n", "changed 4\n")
-    );
-    std::fs::write(repo.join("src/a.rs"), edited).unwrap();
-
-    let script = concat!(env!("CARGO_MANIFEST_DIR"), "/../../scripts/remap_ledger.py");
-    let out = Command::new("python3")
-        .args([script, "HEAD", "--ledger", "ledger.toml"])
-        .current_dir(&repo)
-        .output()
-        .expect("run remap_ledger.py");
-    let stdout = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        out.status.success(),
-        "{stdout}{}",
-        String::from_utf8_lossy(&out.stderr)
-    );
-    assert!(
-        stdout.contains("moved 2, unchanged 0, dropped 1"),
-        "{stdout}"
-    );
-    assert!(stdout.contains("dropped: src/a.rs:2,4"), "{stdout}");
-
-    let after = std::fs::read_to_string(repo.join("ledger.toml")).unwrap();
-    assert!(after.contains("lines = \"5,7,9\""), "{after}");
-    assert!(after.contains("lines = \"10-11,13\""), "{after}");
-    assert!(
-        !after.contains("2,4"),
-        "the rewritten entry is gone: {after}"
-    );
-    assert!(
-        after.contains("reason = \"three arms, one reason\""),
-        "reasons and formatting survive: {after}"
-    );
-}
-
 /// The public documentation names the product's identifiers — the job
 /// environment a `ci.sh` reads, the webhook signature header a CI
 /// provider verifies, the runner binary a person installs, the prefix on
 /// every token they copy — and each of those was renamed from its
 /// `stratum` spelling before anybody outside depended on it. This is what
 /// keeps the old spelling from coming back one page at a time: it walks
-/// every docs page, the site's layouts and the OpenAPI document, and
-/// fails on the first old-name identifier it finds.
+/// every docs page and the OpenAPI document, and fails on the first
+/// old-name identifier it finds.
 ///
 /// Three things that look like the old name are not: the Cargo package is
 /// still `stratum-runner` (`cargo build -p stratum-runner`, the path
@@ -1429,7 +1145,7 @@ fn the_ledger_remap_moves_comma_lists_and_ranges_alike() {
 /// scanner refuses, which has nothing to do with us.
 #[test]
 fn the_public_docs_use_no_old_name_identifier() {
-    let site = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../web/site");
+    let docs = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../../docs");
     let mut files: Vec<std::path::PathBuf> = Vec::new();
     fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
         for e in std::fs::read_dir(dir).unwrap_or_else(|e| panic!("read {}: {e}", dir.display())) {
@@ -1441,9 +1157,9 @@ fn the_public_docs_use_no_old_name_identifier() {
             }
         }
     }
-    walk(&site.join("src"), &mut files);
-    files.push(site.join("public/openapi.json"));
-    assert!(files.len() > 20, "found only {} site files", files.len());
+    walk(&docs, &mut files);
+    files.push(docs.join("openapi.json"));
+    assert!(files.len() > 20, "found only {} docs files", files.len());
 
     // The published forms of the old name, each one a contract somebody
     // outside would have copied.
@@ -1486,7 +1202,7 @@ fn the_public_docs_use_no_old_name_identifier() {
             if let Some(o) = old.iter().find(|o| line.contains(*o)) {
                 hits.push(format!(
                     "{}:{}: `{o}` in {}",
-                    f.strip_prefix(&site).unwrap().display(),
+                    f.strip_prefix(&docs).unwrap().display(),
                     n + 1,
                     line.trim()
                 ));
@@ -1645,120 +1361,6 @@ fn the_bootstrap_oidc_trust_admits_both_github_subject_formats() {
                  repository's deploy can mint: {patterns:?}"
             );
         }
-    }
-}
-
-/// Nothing downstream of `infra` may inherit its skip.
-///
-/// `infra` runs only on a merge that touches `deploy/terraform`, so on
-/// the ordinary merge it is skipped by design and the pipeline is meant
-/// to carry on without it. GitHub propagates a skipped job down the
-/// whole `needs` chain rather than one hop, so a job that merely
-/// *succeeds* still passes the skip on: `deploy` guarded itself with
-/// `always()`, `smoke` did not, and `infra`'s skip travelled through a
-/// green `deploy` and skipped the smoke. The run reported success, so a
-/// normal merge shipped to production and nothing ever cloned from the
-/// live fleet — the one check that runs the real git client against what
-/// was actually deployed, silently not running, on the path taken by
-/// every merge that is not an infra change.
-///
-/// So: every job downstream of `infra` states what it does when `infra`
-/// is skipped.
-#[test]
-fn no_deploy_job_downstream_of_infra_inherits_its_skip() {
-    const WORKFLOW: &str = include_str!("../../../.github/workflows/deploy.yml");
-
-    // The `jobs:` mapping, one entry per key at its indentation.
-    let jobs_at = WORKFLOW
-        .find("\njobs:\n")
-        .expect("deploy.yml declares jobs");
-    let jobs = &WORKFLOW[jobs_at + "\njobs:\n".len()..];
-    let mut starts: Vec<(usize, String)> = jobs
-        .match_indices('\n')
-        .map(|(i, _)| i + 1)
-        .chain(std::iter::once(0))
-        .filter_map(|i| {
-            let line = jobs[i..].lines().next()?;
-            let name = line.strip_prefix("  ")?.strip_suffix(':')?;
-            (!name.starts_with(' ') && !name.starts_with('#')).then(|| (i, name.to_string()))
-        })
-        .collect();
-    starts.sort();
-    assert!(
-        starts.iter().any(|(_, n)| n == "infra"),
-        "deploy.yml no longer has an `infra` job; this test guards its skip"
-    );
-
-    let bodies: Vec<(String, &str)> = starts
-        .iter()
-        .enumerate()
-        .map(|(n, (at, name))| {
-            let end = starts.get(n + 1).map_or(jobs.len(), |(next, _)| *next);
-            (name.clone(), &jobs[*at..end])
-        })
-        .collect();
-    let body = |name: &str| {
-        bodies
-            .iter()
-            .find(|(n, _)| n == name)
-            .unwrap_or_else(|| panic!("deploy.yml declares the {name} job"))
-            .1
-    };
-    // `needs: x` and `needs: [x, y]` both appear in this file.
-    let needs = |name: &str| -> Vec<String> {
-        body(name)
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("needs:"))
-            .map(|v| {
-                v.trim()
-                    .trim_matches(['[', ']'])
-                    .split(',')
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .collect()
-            })
-            .unwrap_or_default()
-    };
-
-    let mut downstream: Vec<String> = Vec::new();
-    let mut frontier = vec!["infra".to_string()];
-    while let Some(job) = frontier.pop() {
-        for (name, _) in &bodies {
-            if needs(name).contains(&job) && !downstream.contains(name) {
-                downstream.push(name.clone());
-                frontier.push(name.clone());
-            }
-        }
-    }
-    assert!(
-        !downstream.is_empty(),
-        "nothing depends on `infra`, so this test proves nothing"
-    );
-
-    for job in &downstream {
-        let guard = body(job)
-            .lines()
-            .find_map(|l| l.trim().strip_prefix("if:"))
-            .unwrap_or_else(|| {
-                panic!(
-                    "the {job} job is downstream of `infra`, which skips on \
-                     every merge that does not touch deploy/terraform, and has \
-                     no `if:` — so it inherits that skip and the run still \
-                     reports success"
-                )
-            });
-        assert!(
-            guard.contains("always()"),
-            "the {job} job is downstream of `infra` but its guard does not \
-             call always(), so a skipped `infra` skips it too — through any \
-             number of succeeded jobs in between:\n  if:{guard}"
-        );
-        assert!(
-            guard.contains("result == 'success'"),
-            "the {job} job guards with always() but does not require its \
-             dependency to have succeeded, so it would also run after a \
-             failure:\n  if:{guard}"
-        );
     }
 }
 
@@ -1963,30 +1565,27 @@ fn every_job_that_backgrounds_the_disk_reclaim_waits_for_it_first() {
     );
 }
 
-/// No commit is tested twice.
+/// A pull request does not re-run what the push already ran.
 ///
-/// `on: pull_request` fires under `refs/pull/<n>/merge` while `on: push`
-/// fires under `refs/heads/<branch>` for the same head SHA, so the
-/// concurrency group cannot fold the two and both run to completion:
-/// the whole five-job pipeline twice, ~55 minutes of the two long jobs.
-/// Naming the types and leaving `synchronize` out stopped the second
-/// run on later commits, but not on a PR's *first* commit — `opened`
-/// fires on the SHA the push has just run (PR #44 had ten checks for
-/// five jobs) — and on a fleet with one slot that is an hour.
+/// Every branch is tested on push, and a push run's checks attach to the
+/// commit and show on a pull request from this repository — so a
+/// `pull_request` run of that same head is the whole pipeline a second
+/// time, with nothing to show for it but the wait. A fork's pull request
+/// is different: its commits were pushed somewhere else, and no push run
+/// here ever sees them. So `pull_request` is on, and every job carries
+/// the guard that runs it only for a fork's head.
 ///
-/// So there is no `pull_request` trigger at all: the push run's checks
-/// attach to the commit and show on the PR, and this repository is
-/// private and takes no fork PRs, which is the one case a push in this
-/// repository cannot cover. This test exists because adding
-/// `pull_request:` back — with or without a types list — is the easy
-/// edit whose only symptom is the bill.
+/// This test exists because dropping the guard from one job — or adding
+/// a job without it — is the easy edit whose only symptom is every PR
+/// building twice.
 #[test]
 fn a_pull_request_does_not_re_run_what_the_push_already_ran() {
     const WORKFLOW: &str = include_str!("../../../.github/workflows/ci.yml");
+    const FORKS_ONLY: &str = "if: github.event_name == 'push' || \
+                              github.event.pull_request.head.repo.full_name != github.repository";
 
-    let on = WORKFLOW
-        .split("\njobs:")
-        .next()
+    let (on, jobs) = WORKFLOW
+        .split_once("\njobs:")
         .expect("the workflow has a jobs: block");
     let triggers: Vec<&str> = on
         .lines()
@@ -1998,17 +1597,45 @@ fn a_pull_request_does_not_re_run_what_the_push_already_ran() {
         "ci.yml no longer triggers on push; found {triggers:?}"
     );
     assert!(
-        !triggers.iter().any(|t| t.starts_with("pull_request")),
-        "ci.yml triggers on pull_request, which runs a PR's commit a second \
-         time beside the push run — every first commit of a PR, or every \
-         commit with `synchronize` — ~55 minutes of the two long jobs each: \
-         {triggers:?}"
-    );
-    assert!(
         on.contains("branches: [\"**\"]"),
         "the push trigger must cover every branch, or a branch without a PR \
          is never tested: {on}"
     );
+    if !triggers.iter().any(|t| t.starts_with("pull_request")) {
+        return;
+    }
+    assert!(
+        !triggers
+            .iter()
+            .any(|t| t.starts_with("pull_request_target")),
+        "pull_request_target runs a fork's code with this repository's secrets"
+    );
+    // Each job is a two-space key under `jobs:`; the first line of its
+    // body that is not blank or a comment must be the guard.
+    let lines: Vec<&str> = jobs.lines().collect();
+    let mut names = Vec::new();
+    for (i, line) in lines.iter().enumerate() {
+        let is_job = line.starts_with("  ")
+            && !line.starts_with("   ")
+            && line.trim_end().ends_with(':')
+            && !line.trim().starts_with('#');
+        if !is_job {
+            continue;
+        }
+        let name = line.trim().trim_end_matches(':');
+        names.push(name.to_string());
+        let first = lines[i + 1..]
+            .iter()
+            .map(|l| l.trim())
+            .find(|l| !l.is_empty() && !l.starts_with('#'))
+            .unwrap_or_default();
+        assert_eq!(
+            first, FORKS_ONLY,
+            "job {name} runs on a pull request from this repository too, \
+             building a head its push already built"
+        );
+    }
+    assert!(!names.is_empty(), "no jobs were found in ci.yml");
 }
 
 /// Every Rust cache is keyed on the manifest, not just the lockfile.
@@ -2063,89 +1690,12 @@ fn every_rust_cache_is_keyed_on_the_manifest() {
             i + 1
         );
     }
+    // One per job that installs a Rust toolchain: correctness and chaos.
+    let toolchains = WORKFLOW.matches("dtolnay/rust-toolchain").count();
     assert!(
-        caches >= 3,
-        "expected the three Rust jobs to cache; found {caches}"
+        toolchains >= 2 && caches >= toolchains,
+        "expected every Rust job ({toolchains}) to cache; found {caches}"
     );
-}
-
-/// The pricing page renders every figure it states from
-/// `web/shared/pricing.ts`; the dashboard renders the same figures from
-/// what `GET …/billing` answers, which come from the `DEFAULT_*`
-/// constants in `api/billing_api.rs`. Nothing compares the two at
-/// runtime — the site is static and the server is a binary — so a
-/// price changed in one place and not the other ships as a page that
-/// disagrees with the billing screen. This is the comparison. Both
-/// files are read as text: the server crate is a binary, so the test
-/// cannot import the constants, and the module is TypeScript.
-#[test]
-fn the_site_quotes_the_prices_the_server_defaults_to() {
-    const SITE: &str = include_str!("../../../web/shared/pricing.ts");
-    const SERVER: &str = include_str!("../src/api/billing_api.rs");
-
-    /// The integer after `key:` on its own line of the `PRICING` object.
-    fn site_value(key: &str) -> i64 {
-        let line = SITE
-            .lines()
-            .map(str::trim)
-            .find(|l| l.starts_with(&format!("{key}:")))
-            .unwrap_or_else(|| panic!("web/shared/pricing.ts has no `{key}:` line"));
-        let value = line[key.len() + 1..].trim().trim_end_matches(',').trim();
-        value.parse().unwrap_or_else(|_| {
-            panic!("`{key}` in web/shared/pricing.ts is {value:?}, not a plain integer")
-        })
-    }
-
-    /// The integer a `pub const NAME: i64 = …;` is set to.
-    fn server_value(name: &str) -> i64 {
-        let needle = format!("pub const {name}: i64 =");
-        let start = SERVER
-            .find(&needle)
-            .unwrap_or_else(|| panic!("billing_api.rs has no `{needle}`"));
-        let rest = &SERVER[start + needle.len()..];
-        let end = rest.find(';').expect("unterminated const");
-        let value: String = rest[..end]
-            .chars()
-            .filter(|c| *c != '_' && !c.is_whitespace())
-            .collect();
-        value
-            .parse()
-            .unwrap_or_else(|_| panic!("`{name}` is {value:?}, not a plain integer"))
-    }
-
-    let pairs = [
-        ("seatCents", "DEFAULT_PRICE_PER_SEAT_CENTS"),
-        ("freeMinutes", "DEFAULT_FREE_CI_MINUTES"),
-        ("minutesPerSeat", "DEFAULT_PAID_CI_MINUTES_PER_SEAT"),
-        ("egressGbPerSeat", "DEFAULT_PAID_EGRESS_GB_PER_SEAT"),
-        ("storageGbPerSeat", "DEFAULT_PAID_STORAGE_GB_PER_SEAT"),
-        (
-            "overageCentsPer1000Minutes",
-            "DEFAULT_OVERAGE_1000_MINUTES_CENTS",
-        ),
-        ("overageCentsPerGbEgress", "DEFAULT_OVERAGE_EGRESS_GB_CENTS"),
-        (
-            "overageCentsPerGbMonthStorage",
-            "DEFAULT_OVERAGE_STORAGE_GB_MONTH_CENTS",
-        ),
-        ("packagesGbPerSeat", "DEFAULT_PAID_PACKAGES_GB_PER_SEAT"),
-        (
-            "overageCentsPerGbMonthPackages",
-            "DEFAULT_OVERAGE_PACKAGES_GB_MONTH_CENTS",
-        ),
-    ];
-    for (key, name) in pairs {
-        assert_eq!(
-            site_value(key),
-            server_value(name),
-            "web/shared/pricing.ts `{key}` and billing_api.rs `{name}` disagree: \
-             the pricing page would quote one figure and the billing screen another"
-        );
-    }
-    // The spend limit a new organization starts at is a product promise
-    // the page states in words ("starts at $0"); the server has no
-    // constant for it because 0 is the column default.
-    assert_eq!(site_value("defaultSpendLimitCents"), 0);
 }
 
 /// Only the addressing boundary turns an organization into a store key.

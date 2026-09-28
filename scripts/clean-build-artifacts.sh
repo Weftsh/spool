@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
-# Reclaim disk after a build/test/coverage cycle.
+# Reclaim disk after a build/test cycle.
 #
 # The heavy hitters, in the order they fill a disk:
-#   target/llvm-cov-target   a SECOND full build tree — `cargo llvm-cov`
-#                            never reuses target/debug, so a coverage run
-#                            roughly doubles the workspace on disk
+#   target/llvm-cov-target   a SECOND full build tree, when anybody has run
+#                            `cargo llvm-cov` by hand — it never reuses
+#                            target/debug, so it roughly doubles the
+#                            workspace on disk
 #   target/debug/incremental recompilation cache; pure scratch, and the
 #                            largest thing that is safe to delete blind
 #   docker build cache       BuildKit keeps every layer of every image
@@ -26,7 +27,7 @@ say() { printf '  %s\n' "$*"; }
 
 echo "cleaning build artifacts under $ROOT"
 
-# Coverage's separate build tree: always disposable, always large.
+# `cargo llvm-cov`'s separate build tree: always disposable, always large.
 if [ -d "$ROOT/target/llvm-cov-target" ]; then
   say "target/llvm-cov-target ($(du -sh "$ROOT/target/llvm-cov-target" | cut -f1))"
   rm -rf "$ROOT/target/llvm-cov-target"

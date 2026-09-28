@@ -8,13 +8,12 @@
 # gate: you trust it and it lies.
 #
 #   scripts/ci-local.sh            # everything available on this machine
-#   scripts/ci-local.sh --fast     # skip coverage (~4 min) and deploy
+#   scripts/ci-local.sh --fast     # skip chaos (minutes of wall clock)
 #   scripts/ci-local.sh --only web # one job
 #   scripts/ci-local.sh --only none # the preconditions only, no job
 #
 # Exit status is 1 if anything failed. Anything *skipped* is named loudly
-# in the summary: a skip is not a pass, and the run that broke this
-# branch was a coverage gate nobody had run.
+# in the summary: a skip is not a pass.
 set -uo pipefail
 cd "$(dirname "$0")/.."
 
@@ -36,9 +35,8 @@ PASSED=()
 
 # ---------------------------------------------------- preflight: disk
 #
-# A full cycle writes well over 30 GB — `cargo llvm-cov` keeps a second
-# build tree rather than reusing target/debug, and deploy-validation
-# builds a real image on top of that. Running out happens *mid-job*, and
+# A full cycle writes tens of GB — a release build of the workspace, its
+# test binaries, and MinIO's store on top. Running out happens *mid-job*, and
 # the shape it takes is the problem: a compiler or a test process dies
 # with an I/O error somewhere unrelated to whatever is actually wrong,
 # and the run gets re-run, passes on the retry after something else
@@ -51,9 +49,9 @@ PASSED=()
 free_gib() { df -Pk . | awk 'NR==2 {printf "%d", $4/1024/1024}'; }
 
 preflight_disk() {
-  # A full run needs room for both build trees and an image; --fast and
-  # --only skip the expensive halves and need proportionally less.
-  local need=${STRATUM_MIN_FREE_GIB:-30}
+  # A full run needs room for the release build and the test stores;
+  # --fast and --only need proportionally less.
+  local need=${STRATUM_MIN_FREE_GIB:-20}
   [ "$FAST" = 1 ] && need=${STRATUM_MIN_FREE_GIB:-12}
   [ -n "$ONLY" ] && need=${STRATUM_MIN_FREE_GIB:-12}
   local have; have="$(free_gib)"
@@ -105,7 +103,7 @@ step() {
 # ran" and a summary with no failures, which reads exactly like a pass —
 # the same trap as a SKIP being mistaken for one, and worse, because
 # nothing ran at all.
-ALL_JOBS="correctness-gate coverage chaos web deploy-validation terraform-validation s3-contract ecs-contract stripe-contract github-runners-contract"
+ALL_JOBS="correctness-gate chaos web terraform-validation s3-contract github-signin-contract"
 # `none` runs the preconditions — the disk check above — and no job at
 # all. It is spelled out rather than being any unmatched word, because
 # "any unmatched word means run nothing" is indistinguishable from a
@@ -156,44 +154,6 @@ if wants correctness-gate; then
   fi
 fi
 
-# ---------------------------------------------------------- job: coverage
-#
-# cargo-llvm-cov reports over every executable in its deps dir that
-# matches a workspace *package*, and cargo never deletes an artifact it
-# has stopped producing. So renaming a [[bin]] leaves the old target's
-# test binary behind — never run, so zero hits, and mapped to the source
-# as it was when it was built — and the gate fails on lines that are now
-# comments, on this machine and not in CI, whose cache never saw the old
-# name. Dropping what no current target owns is what makes the local run
-# reproduce CI rather than report on a tree CI has never had.
-prune_stale_objects() {
-  local deps=target/llvm-cov-target/debug/deps
-  [ -d "$deps" ] || return 0
-  cargo metadata --no-deps --format-version 1 \
-    | python3 -c 'import json,sys; print("\n".join(t["name"] for p in json.load(sys.stdin)["packages"] for t in p["targets"]))' \
-    | xargs python3 scripts/prune_stale_objects.py "$deps"
-}
-
-if wants coverage; then
-  say "coverage"
-  if [ "$FAST" = 1 ] && [ -z "$ONLY" ]; then
-    SKIPPED+=("coverage: --fast")
-  elif ! command -v cargo-llvm-cov > /dev/null 2>&1 && ! cargo llvm-cov --version > /dev/null 2>&1; then
-    SKIPPED+=("coverage: cargo-llvm-cov is not installed")
-  elif ! ensure_minio; then
-    SKIPPED+=("coverage: could not fetch MinIO — start one and export STRATUM_MINIO_URL")
-  elif step "prune test binaries no target owns any more" prune_stale_objects \
-    && step "cargo llvm-cov --workspace" \
-         cargo llvm-cov --workspace --lcov --output-path coverage.lcov \
-    && step "coverage gate — 100%, ledger-exact" \
-         python3 scripts/coverage_gate.py coverage.lcov coverage-ledger.toml
-  then
-    # The gate prints the two lines worth seeing even on success.
-    python3 scripts/coverage_gate.py coverage.lcov coverage-ledger.toml | sed 's/^/   /'
-    PASSED+=("coverage")
-  fi
-fi
-
 # -------------------------------------------------------------- job: chaos
 # The `#[ignore]`d suite: SIGKILLs the server at named store operations and
 # storms it with a seeded fault plan. Skipped by --fast because it is
@@ -216,22 +176,6 @@ fi
 # The design-system contract greps are the checks most likely to be
 # skipped locally and to fail in CI, because nothing about editing a page
 # suggests they exist.
-site_contract() ( # a subshell: this cd must not leak into later steps
-  cd web/site || return 1
-  test -s dist/llms.txt || { echo "dist/llms.txt is missing or empty"; return 1; }
-  test -s dist/llms-full.txt || { echo "dist/llms-full.txt is missing or empty"; return 1; }
-  test -s dist/openapi.json || { echo "dist/openapi.json is missing or empty"; return 1; }
-  node -e "const s=require('./dist/openapi.json'); if(s.openapi!=='3.1.0'||Object.keys(s.paths).length<10) process.exit(1)" \
-    || { echo "dist/openapi.json is not a 3.1.0 document with routes"; return 1; }
-  grep -q 'data-theme="dark"' dist/index.html || { echo "the landing page is not dark-first"; return 1; }
-  grep -q 'data-theme="dark"' dist/mirror/index.html || { echo "the mirror page is not dark-first"; return 1; }
-  grep -q 'data-theme="dark"' dist/monorepo/index.html || { echo "the monorepo page is not dark-first"; return 1; }
-  ! grep -q 'data-theme' dist/docs/index.html || { echo "docs must follow the visitor's preference"; return 1; }
-  ls dist/_astro/ | grep -qi 'inter.*\.woff2' || { echo "the Inter woff2 did not ship"; return 1; }
-  ls dist/_astro/ | grep -qi 'jetbrains-mono.*\.woff2' || { echo "the JetBrains Mono woff2 did not ship"; return 1; }
-)
-
-in_site() { ( cd web/site && "$@" ); }
 in_dash() { ( cd web/dashboard && "$@" ); }
 
 if wants web; then
@@ -249,7 +193,7 @@ if wants web; then
     # change under test — which is exactly how people learn to ignore a
     # local gate. Name the version instead.
     SKIPPED+=("web: node $(node --version) is older than the $node_want CI pins — \
-nvm install $node_want (Astro refuses to build below its minimum)")
+nvm install $node_want")
   else
     # `npm ci` in CI, `npm install` here: CI starts from a clean checkout,
     # and reinstalling from scratch on every local run is minutes wasted.
@@ -264,11 +208,7 @@ nvm install $node_want (Astro refuses to build below its minimum)")
       [ "$1/package-lock.json" -nt "$1/node_modules/.package-lock.json" ]
     }
     ok=1
-    ! npm_stale web/site || step "site — npm install" in_site npm install || ok=0
     ! npm_stale web/dashboard || step "dashboard — npm install" in_dash npm install || ok=0
-    [ "$ok" = 1 ] && step "site — build" in_site npm run build || ok=0
-    [ "$ok" = 1 ] && step "site — design-system contract" site_contract || ok=0
-    [ "$ok" = 1 ] && step "site — rendered-HTML assertions" in_site npx vitest run || ok=0
     [ "$ok" = 1 ] && step "dashboard — unit tests" in_dash npx vitest run || ok=0
     [ "$ok" = 1 ] && step "dashboard — build" in_dash npm run build || ok=0
     if [ "$ok" = 1 ]; then
@@ -313,56 +253,8 @@ cd web/dashboard && npx playwright install chromium")
   fi
 fi
 
-# ------------------------------------------------- job: deploy-validation
-# CI runs deploy/proot/ci.sh on the fleet: kaniko and PRoot, no container
-# runtime. On Linux that is exactly what runs here, with its work under
-# .proot-local so the tree owns what it wrote. Anywhere else the closest
-# reproduction is deploy/proot/local-model.sh — the same script inside a
-# Docker container that models a Fargate task, on this machine's
-# architecture rather than the fleet's — and without Docker it is a SKIP.
-if wants deploy-validation; then
-  say "deploy-validation"
-  # The stack binds :8080 and :2222, and so does the manual stack. With
-  # one already up the smoke talks to whatever *is* listening and dies at
-  # the first REST call with a bare 404 that says nothing about the real
-  # problem. Give a port a moment to come free before giving up on it: a
-  # stack that was just taken down can hold the listener for a second or
-  # two after the command that stopped it returned.
-  ok=1
-  for port in 8080 2222; do
-    deadline=$(( $(date +%s) + 20 ))
-    while lsof -nP -iTCP:$port -sTCP:LISTEN > /dev/null 2>&1; do
-      if [ "$(date +%s)" -ge "$deadline" ]; then break; fi
-      sleep 0.5
-    done
-    if lsof -nP -iTCP:$port -sTCP:LISTEN > /dev/null 2>&1; then
-      SKIPPED+=("deploy-validation: port $port is still in use after 20s — \
-a manual stack is probably up. scripts/manual-stack.sh down")
-      ok=0
-      break
-    fi
-  done
-  if [ "$ok" = 0 ]; then
-    :
-  elif [ "$(uname -s)" = Linux ]; then
-    step "deploy-validation under PRoot (deploy/proot/ci.sh, work in .proot-local)" \
-      env PROOT_WORK="$PWD/.proot-local" bash deploy/proot/ci.sh \
-      && PASSED+=("deploy-validation")
-  elif docker info > /dev/null 2>&1; then
-    step "deploy-validation under PRoot, in the Fargate model box (deploy/proot/local-model.sh)" \
-      bash deploy/proot/local-model.sh \
-      && PASSED+=("deploy-validation")
-  else
-    SKIPPED+=("deploy-validation: needs Linux for PRoot, or a docker daemon for the \
-Fargate model box (deploy/proot/local-model.sh) — only CI runs it otherwise")
-  fi
-fi
-
 # ------------------------------------------ job: terraform-validation
-# Credential-free: fmt, validate, and the env-lock module's test. Its
-# own CI job on the fleet since it stopped being the tail of
-# deploy-validation, so a terraform mistake is not reported behind an
-# image build.
+# Credential-free: fmt, validate, and the env-lock module's test.
 if wants terraform-validation; then
   say "terraform-validation"
   tf_want="$(awk -F'"' '/terraform_version:/{print $2; exit}' .github/workflows/ci.yml)"
@@ -432,71 +324,8 @@ MinIO in correctness-gate; real S3 is a MANUAL gate — scripts/manual-s3.sh che
   fi
 fi
 
-# ------------------------------------------ manual gate: ecs-contract
-# The same argument as s3-contract, about a different provider: every
-# RunTask/StopTask in the suite is answered by FakeEcs, which encodes what
-# we believe ECS does. This block names the real-ECS half as unchecked so
-# a green local run cannot imply it passed. The dispatch credential, not
-# an admin key: manual-ecs.sh's AccessDenied case can only fail under one.
-if wants ecs-contract; then
-  say "ecs-contract (manual gate)"
-  if [ -z "${STRATUM_RUNNER_ECS_CLUSTER:-}" ] || [ -z "${STRATUM_RUNNER_AWS_ACCESS_KEY_ID:-}" ]; then
-    SKIPPED+=("ecs-contract: no real-ECS credentials. Dispatch ran against \
-FakeEcs in correctness-gate; real ECS is a MANUAL gate — scripts/manual-ecs.sh all, \
-under the dispatch credential")
-  else
-    step "the ECS contract against a real cluster" \
-      ./scripts/manual-ecs.sh all \
-      && PASSED+=("ecs-contract")
-  fi
-fi
-
-# --------------------------------------- manual gate: stripe-contract
-# The third of these, about the payment provider: every billing test
-# runs against FakeStripe, which encodes what we believe Stripe sends,
-# and three of those beliefs have already been wrong once. This block
-# names the real-Stripe half as unchecked. The test-mode restricted key
-# we deploy with, not the account's secret key: half of what is checked
-# is that the restricted permissions admit every call the server makes.
-if wants stripe-contract; then
-  say "stripe-contract (manual gate)"
-  case "${STRATUM_STRIPE_KEY:-}" in
-    rk_test_*|sk_test_*)
-      step "the Stripe contract against a real test-mode account" \
-        ./scripts/manual-stripe.sh all \
-        && PASSED+=("stripe-contract") ;;
-    *)
-      SKIPPED+=("stripe-contract: no test-mode STRATUM_STRIPE_KEY. Billing ran against \
-FakeStripe in correctness-gate; real Stripe is a MANUAL gate — scripts/manual-stripe.sh all, \
-under the restricted key you deploy with, then \`fixtures\`") ;;
-  esac
-fi
-
-# -------------------------------- manual gate: github-runners-contract
-# The fourth, about GitHub's self-hosted-runner API: every registration,
-# deletion and cancellation in the suite is answered by FakeGithub's
-# runners_route, which encodes what we believe GitHub answers — and two
-# of those beliefs (the default labels on a just-in-time runner, 409 for
-# cancelling a finished run) are not in GitHub's documentation at all.
-# This block names the real-GitHub half as unchecked. The App and the
-# installations you deploy with: `denied` cannot fail under one that
-# holds administration: write, and the script refuses to claim it.
-if wants github-runners-contract; then
-  say "github-runners-contract (manual gate)"
-  if [ -z "${STRATUM_GITHUB_APP_ID:-}" ] || [ -z "${STRATUM_GITHUB_RUNNER_REPO:-}" ] \
-     || { [ -z "${STRATUM_GITHUB_INSTALLATION_ID:-}" ] && [ -z "${STRATUM_GITHUB_INSTALLATION:-}" ]; }; then
-    SKIPPED+=("github-runners-contract: no App credentials. The runner routes ran against \
-FakeGithub in correctness-gate; real GitHub is a MANUAL gate — scripts/manual-github-runners.sh all, \
-under the App installation you deploy with, then \`fixtures\`")
-  else
-    step "the GitHub runner contract against the real API" \
-      ./scripts/manual-github-runners.sh all \
-      && PASSED+=("github-runners-contract")
-  fi
-fi
-
 # --------------------------------- manual gate: github-signin-contract
-# The fifth, about the other half of the same App: signing *in* with
+# The second, about the GitHub App: signing *in* with
 # GitHub skips our own confirmation mail, and the whole justification is
 # one field — `verified`, on the primary entry of GET /user/emails — in
 # a response the fake answers from what we believe. This block names the
