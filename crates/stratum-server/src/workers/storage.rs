@@ -222,7 +222,7 @@ mod tests {
             },
         )
         .unwrap();
-        ctl::set_logical(&db, ctl::OWNER_REPO, &repo.id, &org.id, true, 500, 1).unwrap();
+        ctl::set_logical(&db, ctl::OWNER_REPO, &repo.id, &org.id, 500, 1).unwrap();
         assert!(sweep(&db, "http://127.0.0.1:1/never", 0, now_ms()).unwrap());
         assert_eq!(
             ctl::owner_bytes(&db, ctl::OWNER_REPO, &repo.id).unwrap(),
@@ -296,16 +296,7 @@ mod tests {
             "the physical bytes were recorded beside the logical ones"
         );
         // A prefix in step with its manifest is not named.
-        ctl::set_logical(
-            &db,
-            ctl::OWNER_REPO,
-            &repo.id,
-            &org.id,
-            true,
-            3 * DRIFT_FLOOR,
-            1,
-        )
-        .unwrap();
+        ctl::set_logical(&db, ctl::OWNER_REPO, &repo.id, &org.id, 3 * DRIFT_FLOOR, 1).unwrap();
         assert!(inventory(&db, &bucket.base_url, &repos, now_ms()).is_empty());
     }
 

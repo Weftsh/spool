@@ -47,7 +47,6 @@ pub fn refresh_repo_with(db: &ControlDb, store_url: &str, repo: &Repo) -> Result
         OWNER_REPO,
         &repo.id,
         &repo.org_id,
-        true,
         bytes,
         stratum_control::ids::now_ms(),
     )?;
