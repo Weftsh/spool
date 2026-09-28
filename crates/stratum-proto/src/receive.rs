@@ -35,18 +35,6 @@ use stratum_store::{gitobj, Manifest, ObjectStore, Plane, PutCond, PutError};
 
 const ZERO: &str = "0000000000000000000000000000000000000000";
 
-/// The sentence a push that would take an organization's private
-/// storage past what its seats include and its spend limit buys is
-/// refused with. It lives here, beside the `ng` path that emits it on
-/// the wire, and every other door — the receive-pack advert, SSH, a
-/// commit over REST, the repository view's `write_blocked` — quotes
-/// this one string so a person reads the same words whichever way they
-/// tried. It begins `quota:` because that is what the dashboard keys
-/// on, and it says what to do next, because a bare "payment required"
-/// sends people to the wrong screen.
-pub const STORAGE_REFUSAL: &str = "quota: this push would take private storage past the pool \
-    and the spend limit — nothing stored was touched; raise the limit in Settings → Billing, \
-    free space, or make the repository public";
 // STRATUM-CORE DIVERGENCE: the walk caps are env-tunable so operators can
 // tighten them per deployment and tests can exercise the fallback arms
 // with tiny graphs; defaults match the research constants.
@@ -204,27 +192,17 @@ pub fn request_is_complete(body: &[u8]) -> bool {
 /// and passed no list; both product fronts (HTTP and SSH) load it from
 /// the control plane per push.
 ///
-/// `room` is how many more bytes the organization's private storage may
-/// take, or `None` when nothing meters it — a public repository, a
-/// deployment that sells nothing, an allowance of zero meaning
-/// unlimited. A pack larger than the room is refused with
-/// [`STORAGE_REFUSAL`] before it is quarantined, let alone written: the
-/// promise is that nothing in the store changes, and the only way to
-/// keep it is to decide before the first PUT. The measure is the pack
-/// as sent, which is the WAL entry it would become; precision is one
-/// push, which the request body limit bounds.
 pub fn receive(
     store: &ObjectStore,
     prefix: &str,
     body: &[u8],
     protected: &[String],
-    room: Option<u64>,
     out: &mut impl Write,
 ) -> Result<Option<Vec<Update>>, String> {
     let Some(req) = parse_request(body)? else {
         return write_flush(out).map(|_| None).map_err(|e| e.to_string());
     };
-    let verdict = process(store, prefix, &req.updates, protected, room, &req.pack);
+    let verdict = process(store, prefix, &req.updates, protected, &req.pack);
     report(out, &req, verdict)
 }
 
@@ -382,7 +360,6 @@ fn process(
     prefix: &str,
     updates: &[Update],
     protected: &[String],
-    room: Option<u64>,
     pack: &[u8],
 ) -> Result<(), String> {
     // The default branch, read before any validation: deleting the ref
@@ -470,13 +447,6 @@ fn process(
     }
     if pack.len() < 32 || &pack[..4] != b"PACK" {
         return Err("no pack in push".into());
-    }
-    // The storage cap, decided on the pack's own size before the
-    // quarantine directory exists and before any object is PUT. A
-    // deletion-only push carries no pack and was answered above: freeing
-    // refs is never refused for want of room. See `room` on `receive`.
-    if room.is_some_and(|r| pack.len() as u64 > r) {
-        return Err(STORAGE_REFUSAL.into());
     }
     let entries = u32::from_be_bytes(pack[8..12].try_into().unwrap()) as u64;
     let payload = &pack[12..pack.len() - 20];

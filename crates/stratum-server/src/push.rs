@@ -31,8 +31,7 @@ pub async fn receive(
             let store = ctx.store();
             let mut buf = Vec::new();
             // `None`: nothing caps what a repository may hold here.
-            let accepted =
-                receive::receive(&store, &ctx.prefix, &body, &protected, None, &mut buf)?;
+            let accepted = receive::receive(&store, &ctx.prefix, &body, &protected, &mut buf)?;
             Ok((buf, accepted))
         })
         .await

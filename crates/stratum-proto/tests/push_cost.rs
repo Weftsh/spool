@@ -172,7 +172,7 @@ fn a_push_costs_one_cat_file_however_many_objects_it_carries() {
 
     let before = cat_file_spawns();
     let mut out = Vec::new();
-    let accepted = receive(&store, prefix, &body, &[], None, &mut out).expect("push accepted");
+    let accepted = receive(&store, prefix, &body, &[], &mut out).expect("push accepted");
     let spawned = cat_file_spawns() - before;
 
     assert!(accepted.is_some(), "push was refused: {out:?}");
