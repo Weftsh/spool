@@ -2527,6 +2527,7 @@ version = "0.1.0"
 dependencies = [
  "axum",
  "bytes",
+ "ed25519-dalek",
  "flate2",
  "granit-parser",
  "hmac 0.12.1",
@@ -2566,6 +2567,7 @@ dependencies = [
 name = "stratum-testkit"
 version = "0.1.0"
 dependencies = [
+ "ed25519-dalek",
  "hmac 0.12.1",
  "libc",
  "postgres",

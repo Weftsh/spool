@@ -102,7 +102,8 @@ Steps run directly on that machine, as that account. See
 
 - [docs/operations.md](docs/operations.md) — configuration reference,
   migrations, backups, upgrades, mail, SSH, single sign-on, the GitHub App,
-  runners.
+  runners, and the license key (which never stops the server; its daily
+  check sends three fields, listed there).
 - [docs/deployment-aws.md](docs/deployment-aws.md) — the Terraform reference
   deployment for AWS (ECS, RDS, S3, CloudFront) in `deploy/terraform`.
 

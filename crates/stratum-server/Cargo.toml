@@ -22,6 +22,7 @@ sha2.workspace = true
 hmac = "0.12"
 rand = "0.8"
 rsa = { version = "0.9", features = ["sha1", "sha2"] }
+ed25519-dalek = "3"
 ureq.workspace = true
 libc.workspace = true
 russh = "0.63.0"

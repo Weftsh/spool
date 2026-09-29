@@ -163,6 +163,16 @@ Everything is an environment variable. Unset means the default.
 | `STRATUM_OIDC_SESSION_HOURS` | `12` | How long a session begun through the provider lasts, 1–336. |
 | `STRATUM_SSO_ONLY` | `true` with SSO | Whether SSO is the only way into the dashboard: password and GitHub sign-in are off. `false` keeps them alongside. `true` without SSO configured refuses to boot. |
 
+### License key
+
+| Variable | Default | Meaning |
+|---|---|---|
+| `STRATUM_LICENSE_ENDPOINT` | `https://license.weft.sh/v1/spool/check` | Where the daily license check goes. `https://` only, except to this machine. |
+| `STRATUM_LICENSE_TICK_SECS` | `3600` | How often the check worker wakes to see whether a check is due. `0` turns the worker off. |
+| `STRATUM_LICENSE_CHECK_SECS` | `86400` | How old the last check must be before the next. |
+| `STRATUM_LICENSE_RETRY_MS` | `30000` | Between the check's attempts, when the service does not answer. |
+| `STRATUM_DEV_MODE` / `STRATUM_DEV_LICENSE_PUBLIC_KEYS` | *(unset)* | For a license service in development only: `1`, and a JSON map of kid to PEM public key to trust beside the built-in ones. Without `STRATUM_DEV_MODE=1` the second refuses to boot. |
+
 ### Webhooks
 
 | Variable | Default | Meaning |
@@ -502,6 +512,43 @@ scripts sign in, and the provider is never asked about them. Run
 [`user-disable`](#offboarding) as part of the same checklist; it ends
 all of it at once.
 
+## License key
+
+A Weft license key covers access to Spool's releases and security
+patches for the organisation that bought it. **It never stops the
+server.** No feature is behind a tier, and nothing is refused or slowed
+when a key expires, lapses or is revoked, or when more people use the
+server than it covers. What it produces is a sentence for you.
+
+Install the key from the email with the operator CLI (`docker compose
+exec spool …`, or `deploy/admin-ecs.sh` on AWS):
+
+```sh
+stratum-server admin license-install 'weft_lic_v1.…'
+stratum-server admin license-status
+```
+
+`license-install` verifies the key first and refuses one this build
+cannot read, saying why. `license-status` prints the key's entity, tier,
+expiry and limit, the number of **people** the server has — accounts
+that are not switched off, which is what a Spool license counts — and
+what the license service last said. `license-remove` removes it.
+
+Once a day an online key checks in with Weft's license service. The
+check sends exactly three fields, and nothing else — no hostnames,
+addresses, repository or organisation names, or anything about who the
+people are:
+
+```json
+{ "keyId": "lic_…", "version": "0.1.0", "people": 42 }
+```
+
+The answer — `active`, `lapsed` or `revoked`, and sometimes a notice —
+is logged and shown by `license-status`. A refusal is not retried until
+the next day; no answer is retried twice. With several nodes, one of
+them checks, once a day. `stratum-server admin license-check` checks
+now. An offline key (enterprise) never calls out.
+
 ## Self-hosted runners
 
 `.weft/` workflows run on runners you register: the `weft-runner`
@@ -554,6 +601,10 @@ stratum-server admin user-disable --email ADDR       # offboarding
 stratum-server admin user-enable  --email ADDR       # …and undoing it
 stratum-server admin repair-identities [--dry-run]   # accounts missing a handle
 stratum-server admin sso-check                       # ask the SSO provider, before anybody signs in
+stratum-server admin license-install KEY             # the Weft license key, verified first
+stratum-server admin license-status                  # what it covers, and what Weft last said
+stratum-server admin license-check                   # check in with Weft now
+stratum-server admin license-remove
 ```
 
 - **Where to run it.** In the compose stack, `docker compose exec spool

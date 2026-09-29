@@ -3323,6 +3323,8 @@ const MIGRATIONS: &[&str] = &[
     "#,
     // Accounts nobody proved, from a build that let anybody sign up.
     ACCOUNTS_NOBODY_PROVED,
+    // The server's Weft license key and the last daily check's answer.
+    crate::license::MIGRATION,
 ];
 
 /// Close every door into an account whose address was never proved.

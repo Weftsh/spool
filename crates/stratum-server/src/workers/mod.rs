@@ -13,6 +13,7 @@ pub mod forker;
 pub mod gc;
 pub mod importer;
 pub mod lander;
+pub mod license;
 pub mod notifier;
 pub mod notify;
 pub mod promoter;
@@ -44,6 +45,7 @@ pub fn spawn_all(state: &SharedState) {
     runner::spawn(state.clone());
     storage::spawn(state.clone());
     usage::spawn(state.clone());
+    license::spawn(state.clone());
 }
 
 /// A job lease, in milliseconds, from a seconds-valued env knob.

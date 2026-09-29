@@ -63,6 +63,9 @@ pub struct AppState {
     /// cannot keep signing in another way. Tokens, SSH keys and git are
     /// untouched.
     pub sso_only: bool,
+    /// How the Weft license key is read and checked (`STRATUM_LICENSE_*`).
+    /// Informational only: see [`crate::license`].
+    pub license: Arc<crate::license::Config>,
     pub data_dir: std::path::PathBuf,
     /// Built dashboard SPA (Vite dist) served at `/dashboard/`.
     pub dashboard_dir: Option<std::path::PathBuf>,
@@ -1657,9 +1660,11 @@ pub fn state_from_env() -> Result<SharedState, String> {
     // provider that is down must not stop this server starting.
     let sso_cfg = crate::oidc::config_from(|k| std::env::var(k).ok())?;
     let sso_only = crate::oidc::sso_only_from(|k| std::env::var(k).ok(), sso_cfg.is_some())?;
+    let license = crate::license::config_from(|k| std::env::var(k).ok())?;
     Ok(Arc::new(AppState {
         sso: sso_cfg.map(|c| Arc::new(crate::oidc::Oidc::new(c))),
         sso_only,
+        license: Arc::new(license),
         db,
         store: Arc::new(stratum_store::ObjectStore::new(
             &store_url,

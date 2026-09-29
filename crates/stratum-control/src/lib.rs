@@ -27,6 +27,7 @@ pub mod installations;
 pub mod invites;
 pub mod issues;
 pub mod jobs;
+pub mod license;
 pub mod members;
 pub mod metrics;
 pub mod profiles;

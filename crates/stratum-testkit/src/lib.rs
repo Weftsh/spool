@@ -16,6 +16,7 @@ pub mod fleet;
 pub mod gateproxy;
 pub mod gitcli;
 pub mod httpfake;
+pub mod license;
 pub mod mailbox;
 pub mod minio;
 pub mod oidc;

@@ -13,6 +13,7 @@ mod authx;
 mod cdn;
 mod changeset_workspace;
 mod git_http;
+mod license;
 mod mail;
 mod metering;
 mod mirror;
@@ -370,9 +371,13 @@ fn admin(args: &[String]) -> Result<(), String> {
             Ok(())
         }
         "sso-check" => sso_check(&db),
+        "license-install" | "license-status" | "license-remove" | "license-check" => {
+            license_command(cmd, args.get(1).map(String::as_str), &db)
+        }
         other => Err(format!(
             "unknown admin command {other:?} (bootstrap | mint | \
-             user-create | repair-identities | user-disable | user-enable | sso-check)"
+             user-create | repair-identities | user-disable | user-enable | sso-check | \
+             license-install | license-status | license-remove | license-check)"
         )),
     }
 }
@@ -454,4 +459,54 @@ fn sso_check(db: &stratum_control::ControlDb) -> Result<(), String> {
     } else {
         Err("sso-check: a check failed; the line above says which".into())
     }
+}
+
+/// The Weft license key: install one (verified first), say what it
+/// means today, remove it, or check it with the license service now
+/// rather than at the day's check. Each prints one JSON line.
+fn license_command(
+    cmd: &str,
+    arg: Option<&str>,
+    db: &stratum_control::ControlDb,
+) -> Result<(), String> {
+    let cfg = license::config_from(|k| std::env::var(k).ok())?;
+    let now = cdn::now_secs() as i64;
+    let out = match cmd {
+        "license-install" => {
+            let key = arg
+                .filter(|k| !k.starts_with("--"))
+                .ok_or("license-install KEY required (the weft_lic_v1… key from the email)")?;
+            // Verified before it is stored: a key this build cannot read
+            // would sit there reading as "invalid" until somebody looked.
+            let payload = license::verify_key(key, &cfg.trusted)
+                .map_err(|e| format!("this key cannot be installed: {e}"))?;
+            stratum_control::license::install(db, key.trim(), &payload.lid)?;
+            license::status(db, &cfg, now)?
+        }
+        "license-status" => license::status(db, &cfg, now)?,
+        "license-remove" => {
+            serde_json::json!({ "removed": stratum_control::license::remove(db)? })
+        }
+        _ => {
+            let report = license::run_check(db, &cfg)?;
+            let failed = matches!(report.outcome, "refused" | "unanswered" | "untrusted");
+            if report.outcome == "none" {
+                return Err("no license key is installed: license-install KEY".into());
+            }
+            println!(
+                "{}",
+                serde_json::to_value(&report).expect("a report serializes")
+            );
+            return if failed {
+                Err(format!(
+                    "license-check: {}",
+                    report.error.unwrap_or_default()
+                ))
+            } else {
+                Ok(())
+            };
+        }
+    };
+    println!("{out}");
+    Ok(())
 }

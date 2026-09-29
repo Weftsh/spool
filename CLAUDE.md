@@ -115,6 +115,16 @@ assigned to, and once **per provider** you support: a run against Okta
 has not claimed Entra. The operator's version of the no-browser half is
 `stratum-server admin sso-check`, which runs the product's own code.
 
+The license key has no manual gate here, because its contract is
+checked where the other side lives. `stratum_testkit::license` is what
+we believe Weft's license service signs and answers, and the license
+service's `spool_e2e` — a CI job in `weftsh/license`, pinned to a Spool
+commit in its `spool.ref` — issues a key through a real purchase, installs
+it with this binary's own `admin license-install`, and runs
+`license-check` against the real service. A change to `license.rs`, the
+check's three fields or the CLI's output is not done until the license
+repository's pin has moved to it and that job is green.
+
 One command reproduces those CI jobs, in CI's order, from CI's own
 commands:
 

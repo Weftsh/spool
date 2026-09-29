@@ -198,17 +198,24 @@ pub fn sso_only_from(
 /// must be reached over TLS, but a stand-in on loopback is how the tests
 /// and the manual stack run.
 fn check_url(what: &str, url: &str) -> Result<(), String> {
-    if url.starts_with("https://") {
+    if https_or_loopback(url) {
         return Ok(());
+    }
+    Err(format!("SSO: {what} must be https:// (got {url:?})"))
+}
+
+/// The rule [`check_url`] applies, for any other service this server
+/// calls with something worth protecting.
+pub(crate) fn https_or_loopback(url: &str) -> bool {
+    if url.starts_with("https://") {
+        return true;
     }
     if let Some(rest) = url.strip_prefix("http://") {
         let host = rest.split(['/', '?']).next().unwrap_or("");
         let host = host.rsplit_once(':').map(|(h, _)| h).unwrap_or(host);
-        if matches!(host, "127.0.0.1" | "localhost" | "[::1]") {
-            return Ok(());
-        }
+        return matches!(host, "127.0.0.1" | "localhost" | "[::1]");
     }
-    Err(format!("SSO: {what} must be https:// (got {url:?})"))
+    false
 }
 
 fn is_google(issuer: &str) -> bool {
